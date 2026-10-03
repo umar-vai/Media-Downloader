@@ -2,7 +2,7 @@
 
 Standalone media-downloader project separated from `team-fahad-transcriber`.
 
-The transcriber repository is now focused only on transcription. Downloader-specific desktop/local files and the Windows build workflow live here.
+The transcriber repository is now focused only on transcription. Downloader-specific desktop/local/cloud files and the Windows build workflow live here.
 
 ## Included apps
 
@@ -39,12 +39,25 @@ On Windows, double-click:
 
 The launcher creates its own virtual environment, installs dependencies and opens the app at `http://127.0.0.1:8765`.
 
+### Standalone Streamlit downloader
+
+Location: `streamlit_downloader/`
+
+This is the web/Streamlit version of the downloader, kept fully separate from the transcriber. It prepares supported audio/video files in temporary server storage and exposes the finished file through a browser download button.
+
+Run it with:
+
+```bash
+python -m pip install -r streamlit_downloader/requirements.txt
+streamlit run streamlit_downloader/app.py
+```
+
 ## Windows EXE
 
 The workflow `.github/workflows/build-desktop-downloader.yml` builds `TeamFahadYouTubeDownloader.exe` and uploads it as a GitHub Actions artifact.
 
 ## Project separation
 
-This repository should contain downloader functionality only. `team-fahad-transcriber` should remain focused on transcription workflows.
+This repository contains downloader functionality only. `team-fahad-transcriber` remains focused on transcription workflows.
 
 Use this software only for content you own, public-domain media, or content you have permission to download. It is not intended to bypass DRM, private access, login requirements or other platform restrictions.
