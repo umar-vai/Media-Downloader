@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from media_sources import detect_platform, is_supported_media_url, platform_name, request_options
+from media_sources import detect_platform, is_supported_media_url, platform_name, request_options, video_format_selector
 
 
 class MediaSourceTests(unittest.TestCase):
@@ -48,6 +48,18 @@ class MediaSourceTests(unittest.TestCase):
         self.assertEqual(facebook["impersonate"].client, "chrome")
         self.assertEqual(instagram["impersonate"].client, "chrome")
         self.assertNotIn("impersonate", youtube)
+
+    def test_social_video_format_fallback(self):
+        instagram = video_format_selector("https://www.instagram.com/reel/ABC/", "720p")
+        facebook = video_format_selector("https://www.facebook.com/reel/123", "720p")
+        youtube = video_format_selector("https://youtu.be/abc", "720p")
+        self.assertIn("b[ext=mp4]/b/", instagram)
+        self.assertIn("b[ext=mp4]/b/", facebook)
+        self.assertNotIn("b[ext=mp4]/b/", youtube)
+
+    def test_social_best_available_selector(self):
+        selector = video_format_selector("https://www.instagram.com/reel/ABC/", "Best available")
+        self.assertTrue(selector.startswith("b[ext=mp4]/b/"))
 
 
 if __name__ == "__main__":

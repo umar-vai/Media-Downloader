@@ -161,3 +161,7 @@ The app will not install a release if:
 The old EXE is backed up before replacement. If the newly launched EXE exits immediately, the updater restores the backup.
 
 Use the downloader only for content you own or have permission to download.
+
+### Social format fallback
+
+Facebook and Instagram downloads prefer the selected quality, but if that exact resolution/stream is unavailable the app automatically falls back to the best compatible combined video or merged stream instead of failing with a requested-format error.

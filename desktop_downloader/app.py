@@ -22,7 +22,7 @@ from PIL import Image
 from imageio_ffmpeg import get_ffmpeg_exe
 from tkinter import filedialog, messagebox
 
-from media_sources import browser_headers, detect_platform, is_supported_media_url, platform_name, request_options
+from media_sources import browser_headers, detect_platform, is_supported_media_url, platform_name, request_options, video_format_selector
 from update_manager import ReleaseInfo, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
 
@@ -1010,15 +1010,7 @@ class DownloaderApp(ctk.CTk):
             )
         else:
             quality = self.video_quality_var.get()
-            if quality == "Best available":
-                opts["format"] = "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
-            else:
-                height = int(quality.rstrip("p"))
-                opts["format"] = (
-                    f"bv*[height<={height}][ext=mp4]+ba[ext=m4a]/"
-                    f"b[height<={height}][ext=mp4]/"
-                    f"bv*[height<={height}]+ba/b[height<={height}]"
-                )
+            opts["format"] = video_format_selector(url, quality)
             opts["merge_output_format"] = "mp4"
 
         try:
