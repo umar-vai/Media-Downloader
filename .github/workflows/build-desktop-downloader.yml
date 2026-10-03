@@ -29,22 +29,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Apply v2.3.0 social platform support
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.0 social support'
-        shell: pwsh
-        run: python scripts/feature_v230_social.py
-
-      - name: Commit v2.3.0 source
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.0 social support'
-        shell: pwsh
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          Get-ChildItem -Path . -Directory -Filter __pycache__ -Recurse | Remove-Item -Recurse -Force
-          git add desktop_downloader
-          git commit -m "Add Facebook and Instagram support v2.3.0"
-          git push origin main
-
       - name: Install dependencies
         shell: pwsh
         run: |
@@ -110,15 +94,17 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Create v2.3.0 tag
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.0 social support'
+      - name: Create v2.3.0 tag once
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Publish v2.3.0 release'
         shell: pwsh
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag v2.3.0
           git push origin v2.3.0
 
-      - name: Publish v2.3.0 release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.0 social support'
+      - name: Publish v2.3.0 once
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Publish v2.3.0 release'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v2.3.0
