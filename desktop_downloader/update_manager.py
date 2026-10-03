@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import socket
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -15,7 +17,7 @@ APP_ASSET_NAME = "MediaDownloader.exe"
 LEGACY_APP_ASSET_NAME = "Team" + "Fahad" + "YouTubeDownloader.exe"
 ASSET_CANDIDATES = (APP_ASSET_NAME, LEGACY_APP_ASSET_NAME)
 CHECKSUM_ASSET_NAME = f"{APP_ASSET_NAME}.sha256"
-USER_AGENT = "MediaDownloader-Updater/1.0"
+USER_AGENT = "MediaDownloader-Updater/1.1"
 
 
 class UpdateError(RuntimeError):
@@ -44,29 +46,57 @@ def is_newer_version(latest: str, current: str) -> bool:
     return normalize_version(latest) > normalize_version(current)
 
 
-def _request(url: str, timeout: int = 12) -> urllib.response.addinfourl:
+def _reason_text(exc: BaseException) -> str:
+    reason = getattr(exc, "reason", None)
+    text = str(reason or exc).strip()
+    return text[:240] or exc.__class__.__name__
+
+
+def _open_with_retries(
+    request: urllib.request.Request,
+    timeout: int,
+    attempts: int = 4,
+) -> urllib.response.addinfourl:
+    last_error: BaseException | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return urllib.request.urlopen(request, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code not in {408, 425, 429, 500, 502, 503, 504} or attempt >= attempts:
+                raise
+        except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError, OSError) as exc:
+            last_error = exc
+            if attempt >= attempts:
+                raise
+        time.sleep(min(8.0, 1.25 * (2 ** (attempt - 1))))
+    if last_error:
+        raise last_error
+    raise UpdateError("The network request could not be started.")
+
+
+def _request(url: str, timeout: int = 12, attempts: int = 4) -> urllib.response.addinfourl:
     request = urllib.request.Request(
         url,
         headers={
             "User-Agent": USER_AGENT,
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
+            "Connection": "close",
         },
     )
     try:
-        return urllib.request.urlopen(request, timeout=timeout)
+        return _open_with_retries(request, timeout=timeout, attempts=attempts)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             raise UpdateError("No published update release is available yet.") from exc
         raise UpdateError(f"Update server returned HTTP {exc.code}.") from exc
-    except urllib.error.URLError as exc:
-        raise UpdateError("Could not connect to the update server.") from exc
-    except TimeoutError as exc:
-        raise UpdateError("The update check timed out.") from exc
+    except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError, OSError) as exc:
+        raise UpdateError(f"Could not connect to the update server: {_reason_text(exc)}") from exc
 
 
-def fetch_latest_release(timeout: int = 12) -> ReleaseInfo:
-    with _request(LATEST_RELEASE_API, timeout=timeout) as response:
+def fetch_latest_release(timeout: int = 15) -> ReleaseInfo:
+    with _request(LATEST_RELEASE_API, timeout=timeout, attempts=4) as response:
         try:
             payload = json.loads(response.read().decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -124,35 +154,57 @@ def download_release(
     release: ReleaseInfo,
     destination_dir: Path,
     progress_callback: Callable[[int, int], None] | None = None,
-    timeout: int = 30,
+    timeout: int = 45,
 ) -> Path:
     destination_dir.mkdir(parents=True, exist_ok=True)
     partial_path = destination_dir / f"{APP_ASSET_NAME}.part"
     final_path = destination_dir / APP_ASSET_NAME
 
     try:
-        with _request(release.checksum_url, timeout=timeout) as response:
+        with _request(release.checksum_url, timeout=timeout, attempts=5) as response:
             expected_hash = parse_checksum(response.read(16_384).decode("utf-8", errors="replace"))
 
-        request = urllib.request.Request(release.asset_url, headers={"User-Agent": USER_AGENT})
-        try:
-            response = urllib.request.urlopen(request, timeout=timeout)
-        except urllib.error.HTTPError as exc:
-            raise UpdateError(f"Update download returned HTTP {exc.code}.") from exc
-        except urllib.error.URLError as exc:
-            raise UpdateError("The update download could not be started.") from exc
-
-        downloaded = 0
-        total = int(response.headers.get("Content-Length") or 0)
-        with response, partial_path.open("wb") as handle:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
+        last_error: BaseException | None = None
+        for attempt in range(1, 6):
+            try:
+                partial_path.unlink(missing_ok=True)
+                request = urllib.request.Request(
+                    release.asset_url,
+                    headers={
+                        "User-Agent": USER_AGENT,
+                        "Accept": "application/octet-stream",
+                        "Connection": "close",
+                    },
+                )
+                response = _open_with_retries(request, timeout=timeout, attempts=2)
+                downloaded = 0
+                total = int(response.headers.get("Content-Length") or 0)
+                with response, partial_path.open("wb") as handle:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback:
+                            progress_callback(downloaded, total)
+                if partial_path.exists() and partial_path.stat().st_size > 0:
+                    last_error = None
                     break
-                handle.write(chunk)
-                downloaded += len(chunk)
-                if progress_callback:
-                    progress_callback(downloaded, total)
+                last_error = UpdateError("The downloaded update file is empty.")
+            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError, OSError) as exc:
+                last_error = exc
+                try:
+                    partial_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            if attempt < 5:
+                time.sleep(min(10.0, 1.5 * (2 ** (attempt - 1))))
+
+        if last_error:
+            if isinstance(last_error, urllib.error.HTTPError):
+                raise UpdateError(f"Update download returned HTTP {last_error.code}.") from last_error
+            raise UpdateError(f"The update download could not be started: {_reason_text(last_error)}") from last_error
 
         if not partial_path.exists() or partial_path.stat().st_size <= 0:
             raise UpdateError("The downloaded update file is empty.")
