@@ -8,6 +8,7 @@ on:
     paths:
       - 'desktop_downloader/**'
       - '.github/workflows/build-desktop-downloader.yml'
+      - 'scripts/hotfix_v232_format_fallback.py'
   pull_request:
     paths:
       - 'desktop_downloader/**'
@@ -22,10 +23,28 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Apply v2.3.2 social format fallback hotfix
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.2 format fallback hotfix'
+        shell: pwsh
+        run: python scripts/hotfix_v232_format_fallback.py
+
+      - name: Commit v2.3.2 source
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.2 format fallback hotfix'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          Get-ChildItem -Path . -Directory -Filter __pycache__ -Recurse | Remove-Item -Recurse -Force
+          git add desktop_downloader
+          git commit -m "Add social video format fallback v2.3.2"
+          git push origin main
 
       - name: Install dependencies
         shell: pwsh
@@ -93,6 +112,33 @@ jobs:
             dist/TeamFahadYouTubeDownloader.exe.sha256
           if-no-files-found: error
           retention-days: 30
+
+      - name: Create v2.3.2 tag once
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.2 format fallback hotfix'
+        shell: pwsh
+        run: |
+          git tag v2.3.2
+          git push origin v2.3.2
+
+      - name: Publish v2.3.2 once
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.2 format fallback hotfix'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.3.2
+          name: Media Downloader v2.3.2
+          body: |
+            Hotfix for Facebook/Instagram Reels that expose formats which do not exactly match the selected resolution.
+
+            - Adds platform-aware social video format selection.
+            - Prefers the selected quality where available.
+            - Falls back to the best combined MP4/combined stream when the selected resolution is unavailable.
+            - Falls back to separate best video + audio streams when needed.
+            - Prevents common `Requested format is not available` failures on Instagram/Facebook Reels.
+          files: |
+            dist/MediaDownloader.exe
+            dist/MediaDownloader.exe.sha256
+            dist/TeamFahadYouTubeDownloader.exe
+            dist/TeamFahadYouTubeDownloader.exe.sha256
 
       - name: Publish GitHub Release assets
         if: startsWith(github.ref, 'refs/tags/v')
