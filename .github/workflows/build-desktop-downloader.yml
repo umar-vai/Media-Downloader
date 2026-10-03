@@ -22,8 +22,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -92,20 +90,6 @@ jobs:
             dist/TeamFahadYouTubeDownloader.exe.sha256
           if-no-files-found: error
           retention-days: 30
-
-      - name: Publish v2.2.3 test release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Publish v2.2.3 test release'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v2.2.3
-          name: Media Downloader v2.2.3
-          body: |
-            Auto-update end-to-end test release from v2.2.2 to v2.2.3. No downloader functionality changes.
-          files: |
-            dist/MediaDownloader.exe
-            dist/MediaDownloader.exe.sha256
-            dist/TeamFahadYouTubeDownloader.exe
-            dist/TeamFahadYouTubeDownloader.exe.sha256
 
       - name: Publish GitHub Release assets
         if: startsWith(github.ref, 'refs/tags/v')
