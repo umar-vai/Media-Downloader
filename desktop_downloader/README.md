@@ -1,6 +1,6 @@
 # Media Downloader — Desktop App
 
-A portable Windows desktop downloader for Team Fahad. By default, downloaded media is saved to:
+A portable Windows desktop media downloader. By default, downloaded media is saved to:
 
 `Downloads/Media Downloader`
 
@@ -52,7 +52,7 @@ The single source of truth is:
 Example:
 
 ```python
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.3"
 ```
 
 Use semantic versions such as:
