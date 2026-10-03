@@ -12,7 +12,7 @@ The desktop app includes a **Save Location** control. Use **Choose folder** to s
 - Facebook public videos and Reels
 - Instagram public videos and Reels
 
-The app automatically detects the platform from the pasted URL. Private, friends-only, login-required, DRM-protected or otherwise access-restricted media is not bypassed. Platform changes can occasionally require a newer `yt-dlp` release.
+The app automatically detects the platform from the pasted URL. Facebook and Instagram requests use yt-dlp browser impersonation via curl_cffi for more reliable TLS/network compatibility. Private, friends-only, login-required, DRM-protected or otherwise access-restricted media is not bypassed. Platform changes can occasionally require a newer `yt-dlp` release.
 
 ## Auto-update system
 

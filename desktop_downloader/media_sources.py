@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
+from yt_dlp.networking.impersonate import ImpersonateTarget
+
 SUPPORTED_PLATFORMS = {
     "youtube": "YouTube",
     "facebook": "Facebook",
@@ -48,3 +50,16 @@ def browser_headers() -> dict[str, str]:
         ),
         "Accept-Language": "en-US,en;q=0.9",
     }
+
+
+def request_options(url: str) -> dict:
+    """Return yt-dlp request options appropriate for the detected platform.
+
+    Facebook and Instagram can use TLS/browser fingerprinting. curl_cffi-backed
+    Chrome impersonation avoids relying on Python urllib's TLS handshake for
+    those sites. YouTube keeps the standard request path.
+    """
+    options = {"http_headers": browser_headers()}
+    if detect_platform(url) in {"facebook", "instagram"}:
+        options["impersonate"] = ImpersonateTarget("chrome")
+    return options

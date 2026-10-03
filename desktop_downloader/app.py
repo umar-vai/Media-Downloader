@@ -22,7 +22,7 @@ from PIL import Image
 from imageio_ffmpeg import get_ffmpeg_exe
 from tkinter import filedialog, messagebox
 
-from media_sources import browser_headers, detect_platform, is_supported_media_url, platform_name
+from media_sources import browser_headers, detect_platform, is_supported_media_url, platform_name, request_options
 from update_manager import ReleaseInfo, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
 
@@ -903,7 +903,7 @@ class DownloaderApp(ctk.CTk):
                     "socket_timeout": 30,
                     "retries": 4,
                     "fragment_retries": 4,
-                    "http_headers": browser_headers(),
+                    **request_options(url),
                 }
             ) as ydl:
                 info = ydl.extract_info(url, download=False) or {}
@@ -933,7 +933,7 @@ class DownloaderApp(ctk.CTk):
                 )
             )
         except Exception as exc:
-            self.events.put(("error", f"Could not read this media link. Public links work best; private or login-required content is not supported.\n\n{exc}"))
+            self.events.put(("error", f"Could not read this media link. Public links work best. Facebook/Instagram use browser-compatible TLS; private or login-required content is not supported.\n\n{exc}"))
 
     def download(self) -> None:
         if self.is_busy:
@@ -989,7 +989,7 @@ class DownloaderApp(ctk.CTk):
             "retries": 3,
             "fragment_retries": 4,
             "concurrent_fragment_downloads": 4,
-            "http_headers": browser_headers(),
+            **request_options(url),
             "progress_hooks": [hook],
             "overwrites": True,
             "ffmpeg_location": get_ffmpeg_exe(),
