@@ -41,12 +41,12 @@ class MediaSourceTests(unittest.TestCase):
         self.assertEqual(platform_name("facebook"), "Facebook")
         self.assertEqual(platform_name("https://instagram.com/reel/ABC/"), "Instagram")
 
-    def test_social_request_options(self):
+    def test_platform_specific_request_options(self):
         facebook = request_options("https://www.facebook.com/reel/123")
         instagram = request_options("https://www.instagram.com/reel/ABC/")
         youtube = request_options("https://youtu.be/abc")
         self.assertEqual(facebook["impersonate"].client, "chrome")
-        self.assertEqual(instagram["impersonate"].client, "chrome")
+        self.assertNotIn("impersonate", instagram)
         self.assertNotIn("impersonate", youtube)
 
     def test_social_video_format_fallback(self):
