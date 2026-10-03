@@ -55,12 +55,14 @@ def browser_headers() -> dict[str, str]:
 def request_options(url: str) -> dict:
     """Return yt-dlp request options appropriate for the detected platform.
 
-    Facebook and Instagram can use TLS/browser fingerprinting. curl_cffi-backed
-    Chrome impersonation avoids relying on Python urllib's TLS handshake for
-    those sites. YouTube keeps the standard request path.
+    Facebook uses curl_cffi-backed Chrome impersonation because the standard
+    Python TLS path can be terminated early on some networks. Instagram stays
+    on yt-dlp's standard request path because curl_cffi/BoringSSL can itself be
+    terminated by Instagram on some Windows/network combinations. YouTube also
+    uses the standard path.
     """
     options = {"http_headers": browser_headers()}
-    if detect_platform(url) in {"facebook", "instagram"}:
+    if detect_platform(url) == "facebook":
         options["impersonate"] = ImpersonateTarget("chrome")
     return options
 
