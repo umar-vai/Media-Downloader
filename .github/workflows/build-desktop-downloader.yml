@@ -8,7 +8,6 @@ on:
     paths:
       - 'desktop_downloader/**'
       - '.github/workflows/build-desktop-downloader.yml'
-      - 'scripts/hotfix_v234_facebook_fallback.py'
   pull_request:
     paths:
       - 'desktop_downloader/**'
@@ -23,28 +22,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: Apply v2.3.4 Facebook fallback hotfix
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.4 Facebook fallback hotfix'
-        shell: pwsh
-        run: python scripts/hotfix_v234_facebook_fallback.py
-
-      - name: Commit v2.3.4 source
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.4 Facebook fallback hotfix'
-        shell: pwsh
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          Get-ChildItem -Path . -Directory -Filter __pycache__ -Recurse | Remove-Item -Recurse -Force
-          git add desktop_downloader
-          git commit -m "Add Facebook connection fallbacks v2.3.4"
-          git push origin main
 
       - name: Install dependencies
         shell: pwsh
@@ -112,34 +93,6 @@ jobs:
             dist/TeamFahadYouTubeDownloader.exe.sha256
           if-no-files-found: error
           retention-days: 30
-
-      - name: Create v2.3.4 tag once
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.4 Facebook fallback hotfix'
-        shell: pwsh
-        run: |
-          git tag v2.3.4
-          git push origin v2.3.4
-
-      - name: Publish v2.3.4 once
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.4 Facebook fallback hotfix'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v2.3.4
-          name: Media Downloader v2.3.4
-          body: |
-            Facebook connection compatibility hotfix.
-
-            - Converts Facebook Reel/video IDs to the mobile watch endpoint as the first fallback path.
-            - Forces IPv4 for Facebook fallback attempts to avoid problematic IPv6/edge routes.
-            - Retries Facebook through both standard yt-dlp TLS and Chrome/curl_cffi transport.
-            - Keeps Instagram on its working standard transport.
-            - Clears stale previous-media preview data before each new analysis.
-            - Keeps the resilient Facebook/Instagram format fallback from v2.3.2.
-          files: |
-            dist/MediaDownloader.exe
-            dist/MediaDownloader.exe.sha256
-            dist/TeamFahadYouTubeDownloader.exe
-            dist/TeamFahadYouTubeDownloader.exe.sha256
 
       - name: Publish GitHub Release assets
         if: startsWith(github.ref, 'refs/tags/v')
