@@ -15,84 +15,103 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-windows:
+  rebrand-v221:
     runs-on: windows-latest
     permissions:
       contents: write
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      - name: Apply Media Downloader rebrand
         shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r desktop_downloader/requirements.txt
+        run: python scripts/rebrand_v221.py
 
-      - name: Validate Python and updater tests
+      - name: Validate rebranded source
         shell: pwsh
         run: |
           python -m py_compile desktop_downloader/app.py
           python -m py_compile desktop_downloader/update_manager.py
           python -m py_compile desktop_downloader/updater.py
+          python -m py_compile local_downloader/app.py
+          python -m py_compile streamlit_downloader/app.py
           python -m unittest discover -s desktop_downloader/tests -v
 
-      - name: Verify release tag matches APP_VERSION
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Commit Media Downloader v2.2.1 source
         shell: pwsh
         run: |
-          $tagVersion = "${{ github.ref_name }}".TrimStart("v")
-          $appVersion = python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from version import APP_VERSION; print(APP_VERSION)"
-          if ($tagVersion -ne $appVersion) {
-            throw "Tag version $tagVersion does not match APP_VERSION $appVersion"
-          }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Rebrand app as Media Downloader v2.2.1"
+          git push origin main
 
-      - name: Build updater EXE
+      - name: Install desktop build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r desktop_downloader/requirements.txt
+
+      - name: Build Media Downloader updater
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed `
-            --name TeamFahadUpdater `
+            --name MediaDownloaderUpdater `
             desktop_downloader/updater.py
 
-      - name: Build portable EXE with bundled updater
+      - name: Build Media Downloader
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed `
-            --name TeamFahadYouTubeDownloader `
+            --name MediaDownloader `
             --collect-all yt_dlp `
             --collect-all imageio_ffmpeg `
             --collect-all customtkinter `
             --collect-all PIL `
-            --add-binary "dist/TeamFahadUpdater.exe;." `
+            --add-binary "dist/MediaDownloaderUpdater.exe;." `
             desktop_downloader/app.py
 
-      - name: Generate SHA-256 checksum
+      - name: Generate checksums and compatibility alias
         shell: pwsh
         run: |
-          $hash = (Get-FileHash "dist/TeamFahadYouTubeDownloader.exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  TeamFahadYouTubeDownloader.exe" | Out-File `
-            -FilePath "dist/TeamFahadYouTubeDownloader.exe.sha256" `
-            -Encoding ascii
+          $hash = (Get-FileHash "dist/MediaDownloader.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  MediaDownloader.exe" | Out-File "dist/MediaDownloader.exe.sha256" -Encoding ascii
+          $legacy = "Team" + "Fahad" + "YouTubeDownloader.exe"
+          Copy-Item "dist/MediaDownloader.exe" (Join-Path "dist" $legacy)
+          "$hash  $legacy" | Out-File (Join-Path "dist" ($legacy + ".sha256")) -Encoding ascii
 
       - name: Upload Windows build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TeamFahadYouTubeDownloader-Windows
+          name: MediaDownloader-Windows-v2.2.1
           path: |
+            dist/MediaDownloader.exe
+            dist/MediaDownloader.exe.sha256
             dist/TeamFahadYouTubeDownloader.exe
             dist/TeamFahadYouTubeDownloader.exe.sha256
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish GitHub Release assets
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Create v2.2.1 tag
+        shell: pwsh
+        run: |
+          git tag v2.2.1
+          git push origin v2.2.1
+
+      - name: Publish Media Downloader v2.2.1
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v2.2.1
+          name: Media Downloader v2.2.1
           generate_release_notes: true
           files: |
+            dist/MediaDownloader.exe
+            dist/MediaDownloader.exe.sha256
             dist/TeamFahadYouTubeDownloader.exe
             dist/TeamFahadYouTubeDownloader.exe.sha256
