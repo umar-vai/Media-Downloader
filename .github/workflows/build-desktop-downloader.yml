@@ -8,6 +8,10 @@ on:
     paths:
       - 'desktop_downloader/**'
       - '.github/workflows/build-desktop-downloader.yml'
+  pull_request:
+    paths:
+      - 'desktop_downloader/**'
+      - '.github/workflows/build-desktop-downloader.yml'
   workflow_dispatch:
 
 jobs:
