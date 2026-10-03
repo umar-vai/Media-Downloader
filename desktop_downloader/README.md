@@ -1,10 +1,67 @@
 # Team Fahad YouTube Downloader — Desktop App
 
-A portable Windows desktop build of the local downloader. By default, files are saved to:
+A portable Windows desktop downloader for Team Fahad. By default, downloaded media is saved to:
 
 `Downloads/Team Fahad YouTube`
 
-The desktop app includes a **Save Location** control. Use **Choose folder** to select any folder or drive. The selected folder is remembered for future launches. Use **Default** to switch back to the standard Team Fahad download folder.
+The desktop app includes a **Save Location** control. Use **Choose folder** to select any folder or drive. The selected folder is stored in `%APPDATA%\TeamFahadDownloader\settings.json` and is preserved across app updates.
+
+## Auto-update system
+
+Starting with **v2.2.0**, the Windows EXE can update itself through GitHub Releases.
+
+Update flow:
+
+1. The app checks the repository's latest GitHub Release in the background.
+2. If the release version is newer than the installed version, an in-app update notice appears.
+3. **Update Now** downloads `TeamFahadYouTubeDownloader.exe`.
+4. The matching `.sha256` release asset is downloaded and verified before installation.
+5. The bundled `TeamFahadUpdater.exe` is copied to the local update folder and launched.
+6. The main app closes.
+7. The updater stages the new EXE, backs up the current EXE, replaces it, and launches the new build.
+8. If the new build exits immediately, the updater restores and relaunches the previous executable.
+
+Update logs are written to:
+
+`%APPDATA%\TeamFahadDownloader\update.log`
+
+Temporary update downloads are written under:
+
+`%LOCALAPPDATA%\TeamFahadDownloader\updates\`
+
+User settings and downloaded media are not stored inside the EXE, so an update does not reset the selected download folder or other update preferences.
+
+### Update preferences
+
+The app includes:
+
+- **Automatically check for updates** — enabled by default.
+- **Automatically download updates** — disabled by default.
+- **Check for updates** — manual check at any time.
+- **Later** — snoozes the update reminder for 24 hours.
+- **View changes** — opens the current GitHub Release page.
+
+Automatic installation is only enabled in the packaged Windows EXE. Running `app.py` directly can check/download an update, but it will not replace source files.
+
+## Versioning
+
+The single source of truth is:
+
+`desktop_downloader/version.py`
+
+Example:
+
+```python
+APP_VERSION = "2.2.0"
+```
+
+Use semantic versions such as:
+
+- `2.2.0` — feature release
+- `2.2.1` — bug-fix release
+- `3.0.0` — major release
+
+The release tag must match `APP_VERSION`. The GitHub Actions workflow checks this automatically.
 
 ## Build locally
 
@@ -12,15 +69,87 @@ The desktop app includes a **Save Location** control. Use **Choose folder** to s
 py -3 -m venv .venv
 .venv\Scripts\activate
 pip install -r desktop_downloader\requirements.txt
-pyinstaller --noconfirm --clean --onefile --windowed --name TeamFahadYouTubeDownloader --collect-all yt_dlp --collect-all imageio_ffmpeg --collect-all customtkinter --collect-all PIL desktop_downloader\app.py
+
+pyinstaller --noconfirm --clean --onefile --windowed `
+  --name TeamFahadUpdater `
+  desktop_downloader\updater.py
+
+pyinstaller --noconfirm --clean --onefile --windowed `
+  --name TeamFahadYouTubeDownloader `
+  --collect-all yt_dlp `
+  --collect-all imageio_ffmpeg `
+  --collect-all customtkinter `
+  --collect-all PIL `
+  --add-binary "dist/TeamFahadUpdater.exe;." `
+  desktop_downloader\app.py
 ```
 
-The EXE will be created at:
+The distributable EXE is:
 
 `dist/TeamFahadYouTubeDownloader.exe`
 
+The updater is embedded inside that main EXE, so users still receive one portable application file.
+
 ## GitHub Actions build
 
-The workflow `.github/workflows/build-desktop-downloader.yml` builds a portable Windows EXE automatically whenever desktop downloader files change.
+`.github/workflows/build-desktop-downloader.yml` now:
+
+- validates Python files;
+- runs updater unit tests;
+- builds the updater;
+- embeds it in the main EXE;
+- creates a SHA-256 checksum;
+- uploads a normal Actions artifact on pushes to `main`;
+- publishes the EXE + checksum as GitHub Release assets when a `v*` tag is pushed.
+
+## Publishing a future update
+
+### 1. Change the version
+
+Edit:
+
+`desktop_downloader/version.py`
+
+For example:
+
+```python
+APP_VERSION = "2.3.0"
+```
+
+### 2. Commit and push
+
+```powershell
+git add .
+git commit -m "Release v2.3.0"
+git push origin main
+```
+
+### 3. Tag the exact same version
+
+```powershell
+git tag v2.3.0
+git push origin v2.3.0
+```
+
+GitHub Actions will build the Windows EXE, generate the SHA-256 file, and publish both files to the `v2.3.0` GitHub Release.
+
+Installed copies of an older version will detect that release the next time they perform an update check.
+
+## First auto-update-enabled release
+
+Because builds before v2.2.0 do not contain the updater logic, users must install/download **v2.2.0 once**. After they are running v2.2.0 or newer, later GitHub Releases can be installed from inside the app.
+
+## Security and rollback
+
+The app will not install a release if:
+
+- the expected EXE asset is missing;
+- the SHA-256 asset is missing;
+- the download is empty;
+- SHA-256 verification fails;
+- the current process does not close;
+- the updater cannot safely stage/replace the executable.
+
+The old EXE is backed up before replacement. If the newly launched EXE exits immediately, the updater restores the backup.
 
 Use the downloader only for content you own or have permission to download.
