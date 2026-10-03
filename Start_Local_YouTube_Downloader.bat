@@ -28,7 +28,7 @@ exit /b 1
 
 :python_ready
 if not exist "%VENV%\Scripts\python.exe" (
-    echo Setting up Team Fahad Local YouTube Downloader for the first time...
+    echo Setting up Media Downloader for the first time...
     %PY% -m venv "%VENV%"
     if errorlevel 1 goto :setup_error
 )
@@ -42,7 +42,7 @@ python -m pip install --disable-pip-version-check --quiet --upgrade -r "%REQ%"
 if errorlevel 1 goto :setup_error
 
 echo.
-echo Starting Team Fahad Local YouTube Downloader...
+echo Starting Media Downloader...
 echo Keep this window open while the downloader is running.
 echo Your browser should open automatically.
 echo.

@@ -1,6 +1,6 @@
-# Team Fahad Media Downloader
+# Media Downloader
 
-Standalone media-downloader project separated from `team-fahad-transcriber`.
+Standalone media-downloader project separated from `the original transcriber repository`.
 
 The transcriber repository is now focused only on transcription. Downloader-specific desktop/local/cloud files and the Windows build workflow live here.
 
@@ -54,10 +54,15 @@ streamlit run streamlit_downloader/app.py
 
 ## Windows EXE
 
-The workflow `.github/workflows/build-desktop-downloader.yml` builds `TeamFahadYouTubeDownloader.exe` and uploads it as a GitHub Actions artifact.
+The workflow `.github/workflows/build-desktop-downloader.yml` builds `MediaDownloader.exe` and uploads it as a GitHub Actions artifact.
 
 ## Project separation
 
-This repository contains downloader functionality only. `team-fahad-transcriber` remains focused on transcription workflows.
+This repository contains downloader functionality only. `the original transcriber repository` remains focused on transcription workflows.
 
 Use this software only for content you own, public-domain media, or content you have permission to download. It is not intended to bypass DRM, private access, login requirements or other platform restrictions.
+
+
+## Developer
+
+Developed by [Md Omar Faruk](https://github.com/umar-vai).

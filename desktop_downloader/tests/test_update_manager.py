@@ -24,7 +24,7 @@ class VersionTests(unittest.TestCase):
 
     def test_checksum_parser(self) -> None:
         digest = "a" * 64
-        self.assertEqual(parse_checksum(f"{digest}  TeamFahadYouTubeDownloader.exe"), digest)
+        self.assertEqual(parse_checksum(f"{digest}  MediaDownloader.exe"), digest)
         with self.assertRaises(UpdateError):
             parse_checksum("not-a-checksum")
 

@@ -10,7 +10,7 @@ import streamlit as st
 import yt_dlp
 from imageio_ffmpeg import get_ffmpeg_exe
 
-APP_NAME = "Team Fahad Local YouTube Downloader"
+APP_NAME = "Media Downloader"
 YOUTUBE_HOSTS = {
     "youtube.com",
     "www.youtube.com",
@@ -20,7 +20,7 @@ YOUTUBE_HOSTS = {
     "www.youtu.be",
 }
 
-DOWNLOAD_DIR = Path.home() / "Downloads" / "Team Fahad YouTube"
+DOWNLOAD_DIR = Path.home() / "Downloads" / "Media Downloader"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 st.set_page_config(page_title=APP_NAME, page_icon="⬇️", layout="wide")
@@ -64,7 +64,7 @@ st.markdown(
 st.markdown(
     """
     <div class="hero">
-      <div class="badge">TEAM FAHAD AI STUDIO · LOCAL MODE</div>
+      <div class="badge">MEDIA DOWNLOADER · LOCAL MODE</div>
       <h1>Local YouTube Audio & Video Downloader</h1>
       <p>Runs on your own computer and saves files directly to your Downloads folder.</p>
     </div>
@@ -316,3 +316,6 @@ st.caption(
     "Use this tool only for content you own, public-domain material, or media you have permission to download. "
     "The app does not bypass private, DRM-protected, login-only, or other access restrictions."
 )
+
+
+st.markdown("Developed by [Md Omar Faruk](https://github.com/umar-vai)")

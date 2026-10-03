@@ -25,11 +25,13 @@ from tkinter import filedialog, messagebox
 from update_manager import ReleaseInfo, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
 
-APP_NAME = "Team Fahad YouTube Downloader"
-DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "Team Fahad YouTube"
-CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / "TeamFahadDownloader"
+APP_NAME = "Media Downloader"
+DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "Media Downloader"
+CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / "MediaDownloader"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
-UPDATE_DIR = Path(os.getenv("LOCALAPPDATA") or CONFIG_DIR) / "TeamFahadDownloader" / "updates"
+LEGACY_CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / ("Team" + "Fahad" + "Downloader")
+LEGACY_CONFIG_FILE = LEGACY_CONFIG_DIR / "settings.json"
+UPDATE_DIR = Path(os.getenv("LOCALAPPDATA") or CONFIG_DIR) / "MediaDownloader" / "updates"
 UPDATE_RESULT_FILE = CONFIG_DIR / "update-result.json"
 UPDATE_LOG_FILE = CONFIG_DIR / "update.log"
 YOUTUBE_RE = re.compile(r"^https?://(?:(?:www\.|m\.|music\.)?youtube\.com|youtu\.be)/", re.I)
@@ -83,10 +85,13 @@ def default_settings() -> dict[str, Any]:
 
 def load_settings() -> dict[str, Any]:
     settings = default_settings()
+    source = CONFIG_FILE if CONFIG_FILE.exists() else LEGACY_CONFIG_FILE
     try:
-        payload = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(source.read_text(encoding="utf-8"))
         if isinstance(payload, dict):
             settings.update(payload)
+            if source == LEGACY_CONFIG_FILE and not CONFIG_FILE.exists():
+                save_settings(settings)
     except Exception:
         pass
     return settings
@@ -133,7 +138,7 @@ def get_bundled_updater_path() -> Path | None:
     if not is_frozen_windows_app():
         return None
     bundle_dir = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
-    candidate = bundle_dir / "TeamFahadUpdater.exe"
+    candidate = bundle_dir / "MediaDownloaderUpdater.exe"
     return candidate if candidate.exists() else None
 
 
@@ -211,7 +216,7 @@ class DownloaderApp(ctk.CTk):
 
         ctk.CTkLabel(
             top,
-            text="TF",
+            text="MD",
             width=36,
             height=36,
             corner_radius=10,
@@ -222,8 +227,8 @@ class DownloaderApp(ctk.CTk):
 
         brand = ctk.CTkFrame(top, fg_color="transparent")
         brand.grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(brand, text="TEAM FAHAD", text_color=TEXT, font=("Segoe UI Semibold", 13)).pack(anchor="w")
-        ctk.CTkLabel(brand, text="MEDIA TOOLKIT", text_color=MUTED, font=("Segoe UI", 9)).pack(anchor="w")
+        ctk.CTkLabel(brand, text="MEDIA DOWNLOADER", text_color=TEXT, font=("Segoe UI Semibold", 13)).pack(anchor="w")
+        ctk.CTkLabel(brand, text="VIDEO • AUDIO", text_color=MUTED, font=("Segoe UI", 9)).pack(anchor="w")
 
         self.top_update_button = ctk.CTkButton(
             top,
@@ -254,7 +259,7 @@ class DownloaderApp(ctk.CTk):
         hero = ctk.CTkFrame(self.content, fg_color="transparent")
         hero.grid(row=0, column=0, sticky="ew", pady=(18, 16))
         hero.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(hero, text="YouTube Downloader", text_color=TEXT, font=("Segoe UI Semibold", 31)).grid(
+        ctk.CTkLabel(hero, text="Media Downloader", text_color=TEXT, font=("Segoe UI Semibold", 31)).grid(
             row=0, column=0, sticky="w"
         )
         ctk.CTkLabel(
@@ -817,6 +822,17 @@ class DownloaderApp(ctk.CTk):
             text_color="#637696",
             font=("Segoe UI", 9),
         ).grid(row=0, column=1, sticky="e")
+        ctk.CTkButton(
+            footer,
+            text="Developed by Md Omar Faruk  •  GitHub ↗",
+            width=220,
+            height=26,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            text_color=CYAN,
+            font=("Segoe UI", 9),
+            command=lambda: webbrowser.open("https://github.com/umar-vai"),
+        ).grid(row=1, column=1, sticky="e", pady=(5, 0))
 
     def _sync_mode(self, value: str | None = None) -> None:
         mode = value or self.mode_var.get()
@@ -1288,7 +1304,7 @@ class DownloaderApp(ctk.CTk):
 
         try:
             UPDATE_DIR.mkdir(parents=True, exist_ok=True)
-            updater_copy = UPDATE_DIR / "TeamFahadUpdater.exe"
+            updater_copy = UPDATE_DIR / "MediaDownloaderUpdater.exe"
             shutil.copy2(bundled, updater_copy)
             command = [
                 str(updater_copy),

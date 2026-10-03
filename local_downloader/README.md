@@ -1,4 +1,4 @@
-# Team Fahad Local YouTube Downloader
+# Media Downloader
 
 This companion app runs on your own Windows PC instead of Streamlit Cloud. It is intended for public videos that you own or have permission to download.
 
@@ -12,7 +12,7 @@ This companion app runs on your own Windows PC instead of Streamlit Cloud. It is
 
 Files are saved automatically to:
 
-`Downloads/Team Fahad YouTube`
+`Downloads/Media Downloader`
 
 ## Requirements
 

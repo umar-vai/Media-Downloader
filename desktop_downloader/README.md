@@ -1,10 +1,10 @@
-# Team Fahad YouTube Downloader — Desktop App
+# Media Downloader — Desktop App
 
 A portable Windows desktop downloader for Team Fahad. By default, downloaded media is saved to:
 
-`Downloads/Team Fahad YouTube`
+`Downloads/Media Downloader`
 
-The desktop app includes a **Save Location** control. Use **Choose folder** to select any folder or drive. The selected folder is stored in `%APPDATA%\TeamFahadDownloader\settings.json` and is preserved across app updates.
+The desktop app includes a **Save Location** control. Use **Choose folder** to select any folder or drive. The selected folder is stored in `%APPDATA%\MediaDownloader\settings.json` and is preserved across app updates.
 
 ## Auto-update system
 
@@ -14,20 +14,20 @@ Update flow:
 
 1. The app checks the repository's latest GitHub Release in the background.
 2. If the release version is newer than the installed version, an in-app update notice appears.
-3. **Update Now** downloads `TeamFahadYouTubeDownloader.exe`.
+3. **Update Now** downloads `MediaDownloader.exe`.
 4. The matching `.sha256` release asset is downloaded and verified before installation.
-5. The bundled `TeamFahadUpdater.exe` is copied to the local update folder and launched.
+5. The bundled `MediaDownloaderUpdater.exe` is copied to the local update folder and launched.
 6. The main app closes.
 7. The updater stages the new EXE, backs up the current EXE, replaces it, and launches the new build.
 8. If the new build exits immediately, the updater restores and relaunches the previous executable.
 
 Update logs are written to:
 
-`%APPDATA%\TeamFahadDownloader\update.log`
+`%APPDATA%\MediaDownloader\update.log`
 
 Temporary update downloads are written under:
 
-`%LOCALAPPDATA%\TeamFahadDownloader\updates\`
+`%LOCALAPPDATA%\MediaDownloader\updates\`
 
 User settings and downloaded media are not stored inside the EXE, so an update does not reset the selected download folder or other update preferences.
 
@@ -71,22 +71,22 @@ py -3 -m venv .venv
 pip install -r desktop_downloader\requirements.txt
 
 pyinstaller --noconfirm --clean --onefile --windowed `
-  --name TeamFahadUpdater `
+  --name MediaDownloaderUpdater `
   desktop_downloader\updater.py
 
 pyinstaller --noconfirm --clean --onefile --windowed `
-  --name TeamFahadYouTubeDownloader `
+  --name MediaDownloader `
   --collect-all yt_dlp `
   --collect-all imageio_ffmpeg `
   --collect-all customtkinter `
   --collect-all PIL `
-  --add-binary "dist/TeamFahadUpdater.exe;." `
+  --add-binary "dist/MediaDownloaderUpdater.exe;." `
   desktop_downloader\app.py
 ```
 
 The distributable EXE is:
 
-`dist/TeamFahadYouTubeDownloader.exe`
+`dist/MediaDownloader.exe`
 
 The updater is embedded inside that main EXE, so users still receive one portable application file.
 

@@ -10,7 +10,7 @@ from typing import Any
 import streamlit as st
 import yt_dlp
 
-APP_NAME = "Team Fahad Media Downloader"
+APP_NAME = "Media Downloader"
 MAX_OUTPUT_MB = 450
 MAX_OUTPUT_BYTES = MAX_OUTPUT_MB * 1024 * 1024
 YOUTUBE_HOSTS = {
@@ -60,7 +60,7 @@ st.markdown(
 st.markdown(
     """
     <div class="hero">
-      <div class="badge">TEAM FAHAD MEDIA TOOLKIT</div>
+      <div class="badge">MEDIA DOWNLOADER</div>
       <h1>Audio & Video Downloader</h1>
       <p>Paste a supported public YouTube link, choose audio or video, then prepare the file.</p>
     </div>
@@ -294,3 +294,6 @@ st.caption(
     "Use this downloader only for content you own, public-domain material, or media you have permission to download. "
     "Private, DRM-protected, login-only or otherwise restricted media is not bypassed."
 )
+
+
+st.markdown("Developed by [Md Omar Faruk](https://github.com/umar-vai)")

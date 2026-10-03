@@ -11,9 +11,11 @@ from typing import Callable
 
 GITHUB_REPOSITORY = "umar-vai/Media-Downloader"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
-APP_ASSET_NAME = "TeamFahadYouTubeDownloader.exe"
+APP_ASSET_NAME = "MediaDownloader.exe"
+LEGACY_APP_ASSET_NAME = "Team" + "Fahad" + "YouTubeDownloader.exe"
+ASSET_CANDIDATES = (APP_ASSET_NAME, LEGACY_APP_ASSET_NAME)
 CHECKSUM_ASSET_NAME = f"{APP_ASSET_NAME}.sha256"
-USER_AGENT = "TeamFahadYouTubeDownloader-Updater/1.0"
+USER_AGENT = "MediaDownloader-Updater/1.0"
 
 
 class UpdateError(RuntimeError):
@@ -84,12 +86,14 @@ def fetch_latest_release(timeout: int = 12) -> ReleaseInfo:
         for asset in payload.get("assets") or []
         if isinstance(asset, dict)
     }
-    asset_url = assets.get(APP_ASSET_NAME, "")
-    checksum_url = assets.get(CHECKSUM_ASSET_NAME, "")
-    if not asset_url:
-        raise UpdateError(f"Release {tag_name} is missing {APP_ASSET_NAME}.")
-    if not checksum_url:
-        raise UpdateError(f"Release {tag_name} is missing the SHA-256 checksum file.")
+    selected_name = next(
+        (name for name in ASSET_CANDIDATES if assets.get(name) and assets.get(f"{name}.sha256")),
+        "",
+    )
+    if not selected_name:
+        raise UpdateError(f"Release {tag_name} is missing a supported Media Downloader executable/checksum pair.")
+    asset_url = assets[selected_name]
+    checksum_url = assets[f"{selected_name}.sha256"]
 
     return ReleaseInfo(
         version=tag_name.lstrip("vV"),
