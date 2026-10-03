@@ -6,6 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from yt_dlp.extractor.instagram import InstagramBaseIE
+
 from media_sources import detect_platform, extraction_attempts, facebook_mobile_watch_url, is_supported_media_url, platform_name, request_options, video_format_selector
 
 
@@ -48,6 +50,9 @@ class MediaSourceTests(unittest.TestCase):
         self.assertEqual(facebook["impersonate"].client, "chrome")
         self.assertNotIn("impersonate", instagram)
         self.assertNotIn("impersonate", youtube)
+
+    def test_instagram_auto_impersonation_is_disabled(self):
+        self.assertIs(InstagramBaseIE._can_impersonate, False)
 
     def test_social_video_format_fallback(self):
         instagram = video_format_selector("https://www.instagram.com/reel/ABC/", "720p")
