@@ -8,6 +8,7 @@ on:
     paths:
       - 'desktop_downloader/**'
       - '.github/workflows/build-desktop-downloader.yml'
+      - 'scripts/hotfix_v231_social_tls.py'
   pull_request:
     paths:
       - 'desktop_downloader/**'
@@ -22,10 +23,28 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Apply v2.3.1 social TLS hotfix
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.1 social TLS hotfix'
+        shell: pwsh
+        run: python scripts/hotfix_v231_social_tls.py
+
+      - name: Commit v2.3.1 source
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.1 social TLS hotfix'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          Get-ChildItem -Path . -Directory -Filter __pycache__ -Recurse | Remove-Item -Recurse -Force
+          git add desktop_downloader
+          git commit -m "Add browser TLS impersonation for social media v2.3.1"
+          git push origin main
 
       - name: Install dependencies
         shell: pwsh
@@ -41,6 +60,7 @@ jobs:
           python -m py_compile desktop_downloader/update_manager.py
           python -m py_compile desktop_downloader/updater.py
           python -m unittest discover -s desktop_downloader/tests -v
+          python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from yt_dlp import YoutubeDL; from yt_dlp.networking.impersonate import ImpersonateTarget; y=YoutubeDL({'quiet': True}); assert y._impersonate_target_available(ImpersonateTarget('chrome')), 'Chrome impersonation target unavailable'"
 
       - name: Verify release tag matches APP_VERSION
         if: startsWith(github.ref, 'refs/tags/v')
@@ -65,6 +85,7 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --windowed `
             --name MediaDownloader `
             --collect-all yt_dlp `
+            --collect-all curl_cffi `
             --collect-all imageio_ffmpeg `
             --collect-all customtkinter `
             --collect-all PIL `
@@ -91,6 +112,32 @@ jobs:
             dist/TeamFahadYouTubeDownloader.exe.sha256
           if-no-files-found: error
           retention-days: 30
+
+      - name: Create v2.3.1 tag once
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.1 social TLS hotfix'
+        shell: pwsh
+        run: |
+          git tag v2.3.1
+          git push origin v2.3.1
+
+      - name: Publish v2.3.1 once
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.3.1 social TLS hotfix'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.3.1
+          name: Media Downloader v2.3.1
+          body: |
+            Hotfix for Facebook/Instagram TLS failures on some Windows/network combinations.
+
+            - Adds yt-dlp curl_cffi browser impersonation support.
+            - Facebook and Instagram requests use Chrome-compatible TLS/browser fingerprints.
+            - YouTube keeps the standard request path.
+            - Includes CI verification that the Chrome impersonation target is available.
+          files: |
+            dist/MediaDownloader.exe
+            dist/MediaDownloader.exe.sha256
+            dist/TeamFahadYouTubeDownloader.exe
+            dist/TeamFahadYouTubeDownloader.exe.sha256
 
       - name: Publish GitHub Release assets
         if: startsWith(github.ref, 'refs/tags/v')
