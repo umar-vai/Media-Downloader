@@ -22,6 +22,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -90,6 +92,29 @@ jobs:
             dist/TeamFahadYouTubeDownloader.exe.sha256
           if-no-files-found: error
           retention-days: 30
+
+      - name: Create v2.2.2 hotfix tag once
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.2.2 network hotfix'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag v2.2.2
+          git push origin v2.2.2
+
+      - name: Publish v2.2.2 hotfix once
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Release v2.2.2 network hotfix'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.2.2
+          name: Media Downloader v2.2.2
+          body: |
+            Network-resilient updater hotfix with retry/backoff for GitHub update checks and downloads.
+          files: |
+            dist/MediaDownloader.exe
+            dist/MediaDownloader.exe.sha256
+            dist/TeamFahadYouTubeDownloader.exe
+            dist/TeamFahadYouTubeDownloader.exe.sha256
 
       - name: Publish GitHub Release assets
         if: startsWith(github.ref, 'refs/tags/v')
