@@ -11,6 +11,28 @@ SUPPORTED_PLATFORMS = {
 }
 
 
+def _disable_instagram_auto_impersonation() -> None:
+    """Keep Instagram off curl_cffi/BoringSSL on affected Windows networks.
+
+    Recent yt-dlp Instagram extractors automatically enable browser
+    impersonation whenever an impersonation-capable request handler is
+    available. Media Downloader bundles curl_cffi for Facebook compatibility,
+    so Instagram can otherwise select BoringSSL even when we do not request
+    impersonation ourselves. The standard yt-dlp transport is more reliable on
+    the tested network, so disable Instagram's automatic opt-in only.
+    """
+    try:
+        from yt_dlp.extractor.instagram import InstagramBaseIE
+
+        InstagramBaseIE._can_impersonate = False
+    except Exception:
+        # Do not make app startup dependent on yt-dlp's internal class layout.
+        pass
+
+
+_disable_instagram_auto_impersonation()
+
+
 def _hostname(url: str) -> str:
     try:
         parsed = urlparse((url or "").strip())
@@ -55,17 +77,15 @@ def browser_headers() -> dict[str, str]:
 def request_options(url: str) -> dict:
     """Return yt-dlp request options appropriate for the detected platform.
 
-    Facebook uses curl_cffi-backed Chrome impersonation because the standard
-    Python TLS path can be terminated early on some networks. Instagram stays
-    on yt-dlp's standard request path because curl_cffi/BoringSSL can itself be
-    terminated by Instagram on some Windows/network combinations. YouTube also
+    Facebook uses curl_cffi-backed Chrome impersonation as one of its fallback
+    transports. Instagram's extractor-level automatic impersonation is disabled
+    above so Instagram stays on the standard yt-dlp request path. YouTube also
     uses the standard path.
     """
     options = {"http_headers": browser_headers()}
     if detect_platform(url) == "facebook":
         options["impersonate"] = ImpersonateTarget("chrome")
     return options
-
 
 
 def facebook_mobile_watch_url(url: str) -> str:
@@ -103,7 +123,7 @@ def extraction_attempts(url: str) -> list[tuple[str, dict]]:
 
     Facebook is retried through the mobile watch endpoint, IPv4, and both
     standard yt-dlp TLS and Chrome/curl_cffi impersonation. Instagram and
-    YouTube keep their known-working standard paths.
+    YouTube keep their standard paths.
     """
     headers = {"http_headers": browser_headers()}
     if detect_platform(url) != "facebook":
@@ -123,6 +143,7 @@ def extraction_attempts(url: str) -> list[tuple[str, dict]]:
                 options["impersonate"] = ImpersonateTarget("chrome")
             candidates.append((candidate_url, options))
     return candidates
+
 
 def video_format_selector(url: str, quality: str) -> str:
     """Return a resilient yt-dlp video format selector.
