@@ -22,6 +22,7 @@ from PIL import Image
 from imageio_ffmpeg import get_ffmpeg_exe
 from tkinter import filedialog, messagebox
 
+from media_sources import browser_headers, detect_platform, is_supported_media_url, platform_name
 from update_manager import ReleaseInfo, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
 
@@ -34,7 +35,6 @@ LEGACY_CONFIG_FILE = LEGACY_CONFIG_DIR / "settings.json"
 UPDATE_DIR = Path(os.getenv("LOCALAPPDATA") or CONFIG_DIR) / "MediaDownloader" / "updates"
 UPDATE_RESULT_FILE = CONFIG_DIR / "update-result.json"
 UPDATE_LOG_FILE = CONFIG_DIR / "update.log"
-YOUTUBE_RE = re.compile(r"^https?://(?:(?:www\.|m\.|music\.)?youtube\.com|youtu\.be)/", re.I)
 
 BG = "#060B14"
 SURFACE = "#0B1323"
@@ -55,7 +55,7 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 
-def safe_filename(value: str, fallback: str = "youtube_download") -> str:
+def safe_filename(value: str, fallback: str = "media_download") -> str:
     text = (value or "").strip()
     text = re.sub(r"\.(mp3|m4a|mp4|webm|mkv|mov)$", "", text, flags=re.I)
     text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text)
@@ -228,7 +228,7 @@ class DownloaderApp(ctk.CTk):
         brand = ctk.CTkFrame(top, fg_color="transparent")
         brand.grid(row=0, column=1, sticky="w")
         ctk.CTkLabel(brand, text="MEDIA DOWNLOADER", text_color=TEXT, font=("Segoe UI Semibold", 13)).pack(anchor="w")
-        ctk.CTkLabel(brand, text="VIDEO • AUDIO", text_color=MUTED, font=("Segoe UI", 9)).pack(anchor="w")
+        ctk.CTkLabel(brand, text="YOUTUBE • FACEBOOK • INSTAGRAM", text_color=MUTED, font=("Segoe UI", 9)).pack(anchor="w")
 
         self.top_update_button = ctk.CTkButton(
             top,
@@ -264,7 +264,7 @@ class DownloaderApp(ctk.CTk):
         )
         ctk.CTkLabel(
             hero,
-            text="Fast local downloads. Clean controls. Your connection, your files.",
+            text="Download public videos and audio from YouTube, Facebook and Instagram.",
             text_color=MUTED,
             font=("Segoe UI", 13),
         ).grid(row=1, column=0, sticky="w", pady=(5, 0))
@@ -299,7 +299,7 @@ class DownloaderApp(ctk.CTk):
         card = self._card(self.content)
         card.grid(row=1, column=0, sticky="ew", pady=(0, 14))
         card.grid_columnconfigure(0, weight=1)
-        self._section_title(card, "01 / Source", "Paste a YouTube link")
+        self._section_title(card, "01 / Source", "Paste a media link")
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.grid(row=1, column=0, sticky="ew", padx=18, pady=(16, 18))
         row.grid_columnconfigure(0, weight=1)
@@ -313,12 +313,12 @@ class DownloaderApp(ctk.CTk):
             border_color="#2A4169",
             border_width=1,
             text_color=TEXT,
-            placeholder_text="https://www.youtube.com/watch?v=...",
+            placeholder_text="YouTube, Facebook or Instagram URL",
             placeholder_text_color="#667995",
             font=("Segoe UI", 11),
         )
         self.url_entry.grid(row=0, column=0, sticky="ew")
-        self.url_entry.bind("<Return>", lambda _event: self.read_video())
+        self.url_entry.bind("<Return>", lambda _event: self.analyze_media())
 
         self.paste_button = ctk.CTkButton(
             row,
@@ -336,7 +336,7 @@ class DownloaderApp(ctk.CTk):
 
         self.read_button = ctk.CTkButton(
             row,
-            text="Analyze video",
+            text="Analyze media",
             width=132,
             height=48,
             corner_radius=12,
@@ -344,7 +344,7 @@ class DownloaderApp(ctk.CTk):
             hover_color=PURPLE_HOVER,
             text_color="#FFFFFF",
             font=("Segoe UI Semibold", 11),
-            command=self.read_video,
+            command=self.analyze_media,
         )
         self.read_button.grid(row=0, column=2, padx=(10, 0))
 
@@ -381,7 +381,7 @@ class DownloaderApp(ctk.CTk):
         self.media_badge.grid(row=0, column=1, sticky="nw", pady=(20, 0), padx=(0, 18))
         self.title_label = ctk.CTkLabel(
             self.media_card,
-            text="Analyze a video to see its details here",
+            text="Analyze media to see its details here",
             text_color=TEXT,
             font=("Segoe UI Semibold", 18),
             anchor="w",
@@ -391,7 +391,7 @@ class DownloaderApp(ctk.CTk):
         self.title_label.grid(row=1, column=1, sticky="ew", padx=(0, 18), pady=(8, 2))
         self.meta_label = ctk.CTkLabel(
             self.media_card,
-            text="Title, channel and duration will appear after analysis.",
+            text="Title, creator, platform and duration will appear after analysis.",
             text_color=MUTED,
             font=("Segoe UI", 11),
             anchor="w",
@@ -878,19 +878,20 @@ class DownloaderApp(ctk.CTk):
         self.status_chip.configure(text=chip, fg_color=bg, text_color=fg)
         self.status_label.configure(text=text)
 
-    def read_video(self) -> None:
+    def analyze_media(self) -> None:
         if self.is_busy:
             return
         url = self.url_var.get().strip()
-        if not YOUTUBE_RE.match(url):
-            messagebox.showerror(APP_NAME, "Please paste a valid YouTube or youtu.be URL.")
+        platform = detect_platform(url)
+        if not platform:
+            messagebox.showerror(APP_NAME, "Please paste a valid YouTube, Facebook or Instagram URL.")
             return
         self._set_busy(True)
-        self._set_status("Reading video information…", "working")
-        self.media_badge.configure(text="ANALYZING", fg_color="#162344", text_color=CYAN)
-        threading.Thread(target=self._read_video_worker, args=(url,), daemon=True).start()
+        self._set_status(f"Reading {platform_name(platform)} media information…", "working")
+        self.media_badge.configure(text=f"{platform_name(platform).upper()} • ANALYZING", fg_color="#162344", text_color=CYAN)
+        threading.Thread(target=self._analyze_media_worker, args=(url,), daemon=True).start()
 
-    def _read_video_worker(self, url: str) -> None:
+    def _analyze_media_worker(self, url: str) -> None:
         try:
             with yt_dlp.YoutubeDL(
                 {
@@ -900,7 +901,9 @@ class DownloaderApp(ctk.CTk):
                     "noplaylist": True,
                     "cachedir": False,
                     "socket_timeout": 30,
-                    "retries": 2,
+                    "retries": 4,
+                    "fragment_retries": 4,
+                    "http_headers": browser_headers(),
                 }
             ) as ydl:
                 info = ydl.extract_info(url, download=False) or {}
@@ -919,33 +922,35 @@ class DownloaderApp(ctk.CTk):
                 (
                     "info",
                     {
-                        "title": str(info.get("title") or "YouTube video"),
-                        "channel": str(info.get("channel") or info.get("uploader") or "YouTube"),
+                        "title": str(info.get("title") or info.get("description") or "Media"),
+                        "channel": str(info.get("channel") or info.get("uploader") or info.get("uploader_id") or "Creator"),
                         "duration": format_duration(info.get("duration")),
                         "views": info.get("view_count"),
+                        "platform": detect_platform(url) or str(info.get("extractor_key") or "media").lower(),
                         "info": info,
                         "thumbnail": thumb_bytes,
                     },
                 )
             )
         except Exception as exc:
-            self.events.put(("error", f"Could not read this YouTube link.\n\n{exc}"))
+            self.events.put(("error", f"Could not read this media link. Public links work best; private or login-required content is not supported.\n\n{exc}"))
 
     def download(self) -> None:
         if self.is_busy:
             return
         url = self.url_var.get().strip()
-        if not YOUTUBE_RE.match(url):
-            messagebox.showerror(APP_NAME, "Please paste a valid YouTube or youtu.be URL.")
+        platform = detect_platform(url)
+        if not platform:
+            messagebox.showerror(APP_NAME, "Please paste a valid YouTube, Facebook or Instagram URL.")
             return
 
         self.download_dir.mkdir(parents=True, exist_ok=True)
-        name = safe_filename(self.name_var.get(), "youtube_download")
+        name = safe_filename(self.name_var.get(), "media_download")
         mode = self.mode_var.get()
         self.progress.set(0)
         self.progress_label.configure(text="0%")
         self.speed_label.configure(text="Starting…")
-        self._set_status("Connecting to YouTube…", "working")
+        self._set_status(f"Connecting to {platform_name(platform)}…", "working")
         self._set_busy(True)
         threading.Thread(
             target=self._download_worker,
@@ -982,8 +987,9 @@ class DownloaderApp(ctk.CTk):
             "cachedir": False,
             "socket_timeout": 30,
             "retries": 3,
-            "fragment_retries": 3,
+            "fragment_retries": 4,
             "concurrent_fragment_downloads": 4,
+            "http_headers": browser_headers(),
             "progress_hooks": [hook],
             "overwrites": True,
             "ffmpeg_location": get_ffmpeg_exe(),
@@ -992,7 +998,7 @@ class DownloaderApp(ctk.CTk):
         if mode == "Audio":
             opts.update(
                 {
-                    "format": "bestaudio[ext=m4a]/bestaudio/best",
+                    "format": "bestaudio/best",
                     "postprocessors": [
                         {
                             "key": "FFmpegExtractAudio",
@@ -1058,10 +1064,11 @@ class DownloaderApp(ctk.CTk):
                     self.current_info = payload["info"]
                     self.name_var.set(safe_filename(payload["title"]))
                     self.title_label.configure(text=payload["title"])
-                    self.meta_label.configure(text=f"{payload['channel']}  •  {payload['duration']}")
-                    self.media_badge.configure(text="VIDEO READY", fg_color="#0E3025", text_color=SUCCESS)
+                    platform_label = platform_name(str(payload.get("platform") or ""))
+                    self.meta_label.configure(text=f"{payload['channel']}  •  {platform_label}  •  {payload['duration']}")
+                    self.media_badge.configure(text=f"{platform_label.upper()} • READY", fg_color="#0E3025", text_color=SUCCESS)
                     self._apply_thumbnail(payload.get("thumbnail"))
-                    self._set_status("Video information loaded", "ready")
+                    self._set_status(f"{platform_label} media information loaded", "ready")
                     self._set_busy(False)
                 elif kind == "progress":
                     percent = max(0.0, min(100.0, float(payload.get("percent") or 0)))
@@ -1139,8 +1146,8 @@ class DownloaderApp(ctk.CTk):
         self.progress.set(0)
         self.progress_label.configure(text="0%")
         self.speed_label.configure(text="")
-        self.title_label.configure(text="Analyze a video to see its details here")
-        self.meta_label.configure(text="Title, channel and duration will appear after analysis.")
+        self.title_label.configure(text="Analyze media to see its details here")
+        self.meta_label.configure(text="Title, creator, platform and duration will appear after analysis.")
         self.media_badge.configure(text="WAITING FOR LINK", fg_color=SURFACE_2, text_color=MUTED)
         self._apply_thumbnail(None)
         self._set_status("Ready to download", "ready")

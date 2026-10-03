@@ -1,10 +1,18 @@
 # Media Downloader — Desktop App
 
-A portable Windows desktop media downloader. By default, downloaded media is saved to:
+A portable Windows desktop media downloader for public YouTube, Facebook and Instagram videos/reels. By default, downloaded media is saved to:
 
 `Downloads/Media Downloader`
 
 The desktop app includes a **Save Location** control. Use **Choose folder** to select any folder or drive. The selected folder is stored in `%APPDATA%\MediaDownloader\settings.json` and is preserved across app updates.
+
+## Supported platforms
+
+- YouTube videos and Shorts
+- Facebook public videos and Reels
+- Instagram public videos and Reels
+
+The app automatically detects the platform from the pasted URL. Private, friends-only, login-required, DRM-protected or otherwise access-restricted media is not bypassed. Platform changes can occasionally require a newer `yt-dlp` release.
 
 ## Auto-update system
 
