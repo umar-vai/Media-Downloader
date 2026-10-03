@@ -76,6 +76,21 @@ def launch_target(target: Path) -> subprocess.Popen[bytes]:
     return subprocess.Popen([str(target)], cwd=str(target.parent), creationflags=creationflags)
 
 
+def replace_with_retry(source: Path, destination: Path, timeout_seconds: int = 15) -> None:
+    deadline = time.time() + timeout_seconds
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        try:
+            os.replace(source, destination)
+            return
+        except (PermissionError, OSError) as exc:
+            last_error = exc
+            time.sleep(0.4)
+    if last_error:
+        raise last_error
+    raise RuntimeError("File replacement timed out.")
+
+
 def restore_backup(target: Path, backup: Path, log_file: Path) -> None:
     try:
         if target.exists():
@@ -83,7 +98,7 @@ def restore_backup(target: Path, backup: Path, log_file: Path) -> None:
     except Exception:
         pass
     if backup.exists():
-        os.replace(backup, target)
+        replace_with_retry(backup, target)
         append_log(log_file, "Restored previous executable after failed update.")
 
 
@@ -119,8 +134,8 @@ def install_update(
             raise RuntimeError("Staged update verification failed.")
 
         backup.unlink(missing_ok=True)
-        os.replace(target, backup)
-        os.replace(staged, target)
+        replace_with_retry(target, backup)
+        replace_with_retry(staged, target)
         append_log(log_file, "Executable replaced successfully.")
 
         process = launch_target(target)
@@ -144,10 +159,11 @@ def install_update(
         try:
             if backup.exists():
                 restore_backup(target, backup, log_file)
+            if target.exists():
                 try:
                     launch_target(target)
                 except Exception as relaunch_exc:
-                    append_log(log_file, f"Could not relaunch restored app: {relaunch_exc}")
+                    append_log(log_file, f"Could not relaunch working app: {relaunch_exc}")
         except Exception as rollback_exc:
             append_log(log_file, f"Rollback failed: {rollback_exc}")
 
