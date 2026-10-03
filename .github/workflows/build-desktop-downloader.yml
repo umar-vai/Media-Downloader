@@ -96,18 +96,25 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Create v2.3.5 tag once
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Publish v2.3.5 release'
+      - name: Create v2.3.5 tag once via REST
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Publish v2.3.5 release via REST'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          $target = git rev-parse HEAD^
-          git tag v2.3.5 $target
-          git push origin v2.3.5
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $body = @{
+            ref = "refs/tags/v2.3.5"
+            sha = "7767f3816a68f3b8634aeb2fe6d0a074384dfbd4"
+          } | ConvertTo-Json
+          Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/${{ github.repository }}/git/refs" -Headers $headers -Body $body -ContentType "application/json"
 
       - name: Publish v2.3.5 once
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Publish v2.3.5 release'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Publish v2.3.5 release via REST'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v2.3.5
