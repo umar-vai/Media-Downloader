@@ -3,6 +3,12 @@ name: Build Desktop Downloader
 on:
   push:
     branches: [main]
+    tags:
+      - 'v*'
+    paths:
+      - 'desktop_downloader/**'
+      - '.github/workflows/build-desktop-downloader.yml'
+  pull_request:
     paths:
       - 'desktop_downloader/**'
       - '.github/workflows/build-desktop-downloader.yml'
@@ -12,7 +18,8 @@ jobs:
   build-windows:
     runs-on: windows-latest
     permissions:
-      contents: read
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -26,12 +33,32 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r desktop_downloader/requirements.txt
 
-      - name: Validate Python
+      - name: Validate Python and updater tests
         shell: pwsh
         run: |
           python -m py_compile desktop_downloader/app.py
+          python -m py_compile desktop_downloader/update_manager.py
+          python -m py_compile desktop_downloader/updater.py
+          python -m unittest discover -s desktop_downloader/tests -v
 
-      - name: Build portable EXE
+      - name: Verify release tag matches APP_VERSION
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tagVersion = "${{ github.ref_name }}".TrimStart("v")
+          $appVersion = python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from version import APP_VERSION; print(APP_VERSION)"
+          if ($tagVersion -ne $appVersion) {
+            throw "Tag version $tagVersion does not match APP_VERSION $appVersion"
+          }
+
+      - name: Build updater EXE
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed `
+            --name TeamFahadUpdater `
+            desktop_downloader/updater.py
+
+      - name: Build portable EXE with bundled updater
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed `
@@ -40,12 +67,32 @@ jobs:
             --collect-all imageio_ffmpeg `
             --collect-all customtkinter `
             --collect-all PIL `
+            --add-binary "dist/TeamFahadUpdater.exe;." `
             desktop_downloader/app.py
 
-      - name: Upload Windows EXE
+      - name: Generate SHA-256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash "dist/TeamFahadYouTubeDownloader.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  TeamFahadYouTubeDownloader.exe" | Out-File `
+            -FilePath "dist/TeamFahadYouTubeDownloader.exe.sha256" `
+            -Encoding ascii
+
+      - name: Upload Windows build artifact
         uses: actions/upload-artifact@v4
         with:
           name: TeamFahadYouTubeDownloader-Windows
-          path: dist/TeamFahadYouTubeDownloader.exe
+          path: |
+            dist/TeamFahadYouTubeDownloader.exe
+            dist/TeamFahadYouTubeDownloader.exe.sha256
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish GitHub Release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/TeamFahadYouTubeDownloader.exe
+            dist/TeamFahadYouTubeDownloader.exe.sha256
