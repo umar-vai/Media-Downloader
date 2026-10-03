@@ -22,6 +22,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -93,6 +95,35 @@ jobs:
             dist/TeamFahadYouTubeDownloader.exe.sha256
           if-no-files-found: error
           retention-days: 30
+
+      - name: Create v2.3.5 tag once
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Publish v2.3.5 release'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          $target = git rev-parse HEAD^
+          git tag v2.3.5 $target
+          git push origin v2.3.5
+
+      - name: Publish v2.3.5 once
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Publish v2.3.5 release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.3.5
+          name: Media Downloader v2.3.5
+          body: |
+            Instagram transport isolation hotfix.
+
+            - Disables yt-dlp Instagram extractor auto-impersonation so Instagram does not switch to curl_cffi/BoringSSL on affected Windows networks.
+            - Keeps Facebook v2.3.4 multi-path fallback unchanged.
+            - Keeps YouTube on the standard request path.
+            - Preserves social-media format fallback behavior.
+          files: |
+            dist/MediaDownloader.exe
+            dist/MediaDownloader.exe.sha256
+            dist/TeamFahadYouTubeDownloader.exe
+            dist/TeamFahadYouTubeDownloader.exe.sha256
 
       - name: Publish GitHub Release assets
         if: startsWith(github.ref, 'refs/tags/v')
