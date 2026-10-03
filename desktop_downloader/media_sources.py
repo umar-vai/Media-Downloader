@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from yt_dlp.networking.impersonate import ImpersonateTarget
 
@@ -66,6 +66,63 @@ def request_options(url: str) -> dict:
         options["impersonate"] = ImpersonateTarget("chrome")
     return options
 
+
+
+def facebook_mobile_watch_url(url: str) -> str:
+    """Convert common Facebook video/Reel links to the mobile watch endpoint.
+
+    yt-dlp's own Facebook extractor uses m.facebook.com/watch for some Facebook
+    URL forms. On networks where www.facebook.com terminates TLS early, the
+    mobile watch endpoint can take a different edge/CDN path while preserving
+    the same public video id.
+    """
+    if detect_platform(url) != "facebook":
+        return url
+    parsed = urlparse((url or "").strip())
+    path_parts = [part for part in parsed.path.split("/") if part]
+    video_id = ""
+    if len(path_parts) >= 2 and path_parts[0].lower() == "reel" and path_parts[1].isdigit():
+        video_id = path_parts[1]
+    elif "videos" in [part.lower() for part in path_parts]:
+        for part in reversed(path_parts):
+            if part.isdigit():
+                video_id = part
+                break
+    if not video_id:
+        query = parse_qs(parsed.query)
+        candidate = (query.get("v") or query.get("video_id") or [""])[0]
+        if str(candidate).isdigit():
+            video_id = str(candidate)
+    if not video_id:
+        return url
+    return f"https://m.facebook.com/watch/?v={video_id}&_rdr"
+
+
+def extraction_attempts(url: str) -> list[tuple[str, dict]]:
+    """Return ordered extraction/network fallbacks for a media URL.
+
+    Facebook is retried through the mobile watch endpoint, IPv4, and both
+    standard yt-dlp TLS and Chrome/curl_cffi impersonation. Instagram and
+    YouTube keep their known-working standard paths.
+    """
+    headers = {"http_headers": browser_headers()}
+    if detect_platform(url) != "facebook":
+        return [(url, request_options(url))]
+
+    mobile_url = facebook_mobile_watch_url(url)
+    candidates: list[tuple[str, dict]] = []
+    seen: set[tuple[str, bool]] = set()
+    for candidate_url in (mobile_url, url):
+        for impersonate in (False, True):
+            key = (candidate_url, impersonate)
+            if key in seen:
+                continue
+            seen.add(key)
+            options = {**headers, "source_address": "0.0.0.0"}
+            if impersonate:
+                options["impersonate"] = ImpersonateTarget("chrome")
+            candidates.append((candidate_url, options))
+    return candidates
 
 def video_format_selector(url: str, quality: str) -> str:
     """Return a resilient yt-dlp video format selector.

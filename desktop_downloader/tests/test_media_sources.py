@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from media_sources import detect_platform, is_supported_media_url, platform_name, request_options, video_format_selector
+from media_sources import detect_platform, extraction_attempts, facebook_mobile_watch_url, is_supported_media_url, platform_name, request_options, video_format_selector
 
 
 class MediaSourceTests(unittest.TestCase):
@@ -60,6 +60,25 @@ class MediaSourceTests(unittest.TestCase):
     def test_social_best_available_selector(self):
         selector = video_format_selector("https://www.instagram.com/reel/ABC/", "Best available")
         self.assertTrue(selector.startswith("b[ext=mp4]/b/"))
+
+    def test_facebook_mobile_watch_url(self):
+        self.assertEqual(
+            facebook_mobile_watch_url("https://www.facebook.com/reel/1067651965750372"),
+            "https://m.facebook.com/watch/?v=1067651965750372&_rdr",
+        )
+
+    def test_facebook_connection_fallbacks(self):
+        attempts = extraction_attempts("https://www.facebook.com/reel/1067651965750372")
+        self.assertGreaterEqual(len(attempts), 4)
+        self.assertTrue(attempts[0][0].startswith("https://m.facebook.com/watch/"))
+        self.assertEqual(attempts[0][1].get("source_address"), "0.0.0.0")
+        self.assertNotIn("impersonate", attempts[0][1])
+        self.assertEqual(attempts[1][1]["impersonate"].client, "chrome")
+
+    def test_instagram_keeps_single_standard_path(self):
+        attempts = extraction_attempts("https://www.instagram.com/reel/ABC/")
+        self.assertEqual(len(attempts), 1)
+        self.assertNotIn("impersonate", attempts[0][1])
 
 
 if __name__ == "__main__":

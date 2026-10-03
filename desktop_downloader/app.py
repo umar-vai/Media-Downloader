@@ -22,7 +22,7 @@ from PIL import Image
 from imageio_ffmpeg import get_ffmpeg_exe
 from tkinter import filedialog, messagebox
 
-from media_sources import browser_headers, detect_platform, is_supported_media_url, platform_name, request_options, video_format_selector
+from media_sources import browser_headers, detect_platform, extraction_attempts, is_supported_media_url, platform_name, request_options, video_format_selector
 from update_manager import ReleaseInfo, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
 
@@ -887,26 +887,43 @@ class DownloaderApp(ctk.CTk):
             messagebox.showerror(APP_NAME, "Please paste a valid YouTube, Facebook or Instagram URL.")
             return
         self._set_busy(True)
+        self.current_info = None
+        self.title_label.configure(text=f"Analyzing {platform_name(platform)} media…")
+        self.meta_label.configure(text="Trying compatible connection paths…")
+        self._apply_thumbnail(None)
         self._set_status(f"Reading {platform_name(platform)} media information…", "working")
         self.media_badge.configure(text=f"{platform_name(platform).upper()} • ANALYZING", fg_color="#162344", text_color=CYAN)
         threading.Thread(target=self._analyze_media_worker, args=(url,), daemon=True).start()
 
     def _analyze_media_worker(self, url: str) -> None:
         try:
-            with yt_dlp.YoutubeDL(
-                {
-                    "quiet": True,
-                    "no_warnings": True,
-                    "skip_download": True,
-                    "noplaylist": True,
-                    "cachedir": False,
-                    "socket_timeout": 30,
-                    "retries": 4,
-                    "fragment_retries": 4,
-                    **request_options(url),
-                }
-            ) as ydl:
-                info = ydl.extract_info(url, download=False) or {}
+            attempts = extraction_attempts(url)
+            info: dict[str, Any] = {}
+            last_error: Exception | None = None
+            for index, (attempt_url, network_options) in enumerate(attempts, start=1):
+                if len(attempts) > 1:
+                    self.events.put(("status", f"Facebook connection attempt {index}/{len(attempts)}…"))
+                try:
+                    with yt_dlp.YoutubeDL(
+                        {
+                            "quiet": True,
+                            "no_warnings": True,
+                            "skip_download": True,
+                            "noplaylist": True,
+                            "cachedir": False,
+                            "socket_timeout": 30,
+                            "retries": 2,
+                            "fragment_retries": 2,
+                            **network_options,
+                        }
+                    ) as ydl:
+                        info = ydl.extract_info(attempt_url, download=False) or {}
+                    if info:
+                        break
+                except Exception as exc:
+                    last_error = exc
+            if not info:
+                raise last_error or RuntimeError("No compatible Facebook connection path succeeded.")
 
             thumb_bytes = None
             thumbnail_url = str(info.get("thumbnail") or "")
@@ -933,7 +950,7 @@ class DownloaderApp(ctk.CTk):
                 )
             )
         except Exception as exc:
-            self.events.put(("error", f"Could not read this media link. Public links work best. Facebook/Instagram use browser-compatible TLS; private or login-required content is not supported.\n\n{exc}"))
+            self.events.put(("error", f"Could not read this media link after trying the available connection paths. Public links work best; private or login-required content is not supported.\n\n{exc}"))
 
     def download(self) -> None:
         if self.is_busy:
@@ -989,7 +1006,6 @@ class DownloaderApp(ctk.CTk):
             "retries": 3,
             "fragment_retries": 4,
             "concurrent_fragment_downloads": 4,
-            **request_options(url),
             "progress_hooks": [hook],
             "overwrites": True,
             "ffmpeg_location": get_ffmpeg_exe(),
@@ -1014,8 +1030,28 @@ class DownloaderApp(ctk.CTk):
             opts["merge_output_format"] = "mp4"
 
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.extract_info(url, download=True)
+            attempts = extraction_attempts(url)
+            last_error: Exception | None = None
+            downloaded = False
+            for index, (attempt_url, network_options) in enumerate(attempts, start=1):
+                if len(attempts) > 1:
+                    self.events.put(("status", f"Facebook download connection {index}/{len(attempts)}…"))
+                attempt_opts = {**opts, **network_options}
+                try:
+                    with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+                        ydl.extract_info(attempt_url, download=True)
+                    downloaded = True
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    for partial in download_dir.glob(f"{name}.*"):
+                        if partial.suffix.lower() in {".part", ".ytdl", ".temp", ".tmp"}:
+                            try:
+                                partial.unlink()
+                            except OSError:
+                                pass
+            if not downloaded:
+                raise last_error or RuntimeError("No compatible Facebook connection path succeeded.")
             candidates = [
                 path
                 for path in download_dir.glob(f"{name}.*")
