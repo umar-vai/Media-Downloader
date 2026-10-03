@@ -7,6 +7,7 @@ on:
       - '.github/workflows/rebrand-v2.2.1.yml'
   workflow_dispatch:
 
+# Triggered after workflow registration so the rebrand runs as a normal push workflow.
 jobs:
   rebrand-release:
     runs-on: windows-latest
