@@ -12,6 +12,8 @@ from update_manager import (
     GITHUB_WEB_BASE,
     UpdateError,
     _headers_for_url,
+    _release_from_payload,
+    _release_from_redirect_result,
     is_newer_version,
     normalize_version,
     parse_checksum,
@@ -54,10 +56,37 @@ class VersionTests(unittest.TestCase):
 
     def test_binary_accept_header(self) -> None:
         headers = _headers_for_url(
-            f"{GITHUB_WEB_BASE}/releases/download/v2.3.6/MediaDownloader.exe",
+            f"{GITHUB_WEB_BASE}/releases/download/v2.3.8/MediaDownloader.exe",
             accept="application/octet-stream",
         )
         self.assertEqual(headers["Accept"], "application/octet-stream")
+
+    def test_release_payload_parser(self) -> None:
+        digest_url = f"{GITHUB_WEB_BASE}/releases/download/v2.3.8/MediaDownloader.exe.sha256"
+        exe_url = f"{GITHUB_WEB_BASE}/releases/download/v2.3.8/MediaDownloader.exe"
+        release = _release_from_payload(
+            {
+                "tag_name": "v2.3.8",
+                "body": "Updater reliability",
+                "html_url": f"{GITHUB_WEB_BASE}/releases/tag/v2.3.8",
+                "assets": [
+                    {"name": "MediaDownloader.exe", "browser_download_url": exe_url},
+                    {"name": "MediaDownloader.exe.sha256", "browser_download_url": digest_url},
+                ],
+            }
+        )
+        self.assertEqual(release.version, "2.3.8")
+        self.assertEqual(release.asset_url, exe_url)
+        self.assertEqual(release.checksum_url, digest_url)
+
+    def test_redirect_release_parser(self) -> None:
+        digest = "b" * 64
+        release = _release_from_redirect_result(
+            f"{GITHUB_WEB_BASE}/releases/download/v2.3.8/MediaDownloader.exe.sha256",
+            f"{digest}  MediaDownloader.exe",
+        )
+        self.assertEqual(release.version, "2.3.8")
+        self.assertTrue(release.asset_url.endswith("/v2.3.8/MediaDownloader.exe"))
 
 
 if __name__ == "__main__":
