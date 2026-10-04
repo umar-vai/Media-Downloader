@@ -6,18 +6,21 @@ import re
 import socket
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 GITHUB_REPOSITORY = "umar-vai/Media-Downloader"
+GITHUB_WEB_BASE = f"https://github.com/{GITHUB_REPOSITORY}"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 APP_ASSET_NAME = "MediaDownloader.exe"
 LEGACY_APP_ASSET_NAME = "Team" + "Fahad" + "YouTubeDownloader.exe"
 ASSET_CANDIDATES = (APP_ASSET_NAME, LEGACY_APP_ASSET_NAME)
 CHECKSUM_ASSET_NAME = f"{APP_ASSET_NAME}.sha256"
-USER_AGENT = "MediaDownloader-Updater/1.1"
+LATEST_CHECKSUM_REDIRECT = f"{GITHUB_WEB_BASE}/releases/latest/download/{CHECKSUM_ASSET_NAME}"
+USER_AGENT = "MediaDownloader-Updater/1.2"
 
 
 class UpdateError(RuntimeError):
@@ -75,16 +78,31 @@ def _open_with_retries(
     raise UpdateError("The network request could not be started.")
 
 
-def _request(url: str, timeout: int = 12, attempts: int = 4) -> urllib.response.addinfourl:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "Connection": "close",
-        },
-    )
+def _headers_for_url(url: str, accept: str | None = None) -> dict[str, str]:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Connection": "close",
+    }
+    if host == "api.github.com":
+        headers.update(
+            {
+                "Accept": accept or "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+        )
+    else:
+        headers["Accept"] = accept or "*/*"
+    return headers
+
+
+def _request(
+    url: str,
+    timeout: int = 12,
+    attempts: int = 4,
+    accept: str | None = None,
+) -> urllib.response.addinfourl:
+    request = urllib.request.Request(url, headers=_headers_for_url(url, accept=accept))
     try:
         return _open_with_retries(request, timeout=timeout, attempts=attempts)
     except urllib.error.HTTPError as exc:
@@ -95,7 +113,7 @@ def _request(url: str, timeout: int = 12, attempts: int = 4) -> urllib.response.
         raise UpdateError(f"Could not connect to the update server: {_reason_text(exc)}") from exc
 
 
-def fetch_latest_release(timeout: int = 15) -> ReleaseInfo:
+def _release_from_api(timeout: int) -> ReleaseInfo:
     with _request(LATEST_RELEASE_API, timeout=timeout, attempts=4) as response:
         try:
             payload = json.loads(response.read().decode("utf-8"))
@@ -122,17 +140,73 @@ def fetch_latest_release(timeout: int = 15) -> ReleaseInfo:
     )
     if not selected_name:
         raise UpdateError(f"Release {tag_name} is missing a supported Media Downloader executable/checksum pair.")
-    asset_url = assets[selected_name]
-    checksum_url = assets[f"{selected_name}.sha256"]
 
     return ReleaseInfo(
         version=tag_name.lstrip("vV"),
         tag_name=tag_name,
         notes=str(payload.get("body") or "").strip(),
-        asset_url=asset_url,
-        checksum_url=checksum_url,
+        asset_url=assets[selected_name],
+        checksum_url=assets[f"{selected_name}.sha256"],
         html_url=str(payload.get("html_url") or "").strip(),
     )
+
+
+def _release_from_web_redirect(timeout: int) -> ReleaseInfo:
+    """Resolve the latest release without api.github.com.
+
+    GitHub's /releases/latest/download/<asset> endpoint redirects to a versioned
+    /releases/download/<tag>/<asset> URL. Reading the tiny checksum file lets us
+    recover the published tag and construct the matching executable URL while
+    avoiding the GitHub REST API entirely.
+    """
+    with _request(
+        LATEST_CHECKSUM_REDIRECT,
+        timeout=max(timeout, 20),
+        attempts=4,
+        accept="application/octet-stream",
+    ) as response:
+        final_url = response.geturl()
+        checksum_text = response.read(16_384).decode("utf-8", errors="replace")
+
+    # Validate the checksum while we already have it, so a captive portal or
+    # HTML error page cannot masquerade as a valid release redirect.
+    parse_checksum(checksum_text)
+
+    match = re.search(r"/releases/download/([^/]+)/", final_url, re.I)
+    if not match:
+        raise UpdateError("The GitHub web fallback did not resolve a release tag.")
+
+    tag_name = urllib.parse.unquote(match.group(1)).strip()
+    try:
+        normalize_version(tag_name)
+    except ValueError as exc:
+        raise UpdateError(f"The fallback release version {tag_name!r} is not supported.") from exc
+
+    encoded_tag = urllib.parse.quote(tag_name, safe="")
+    base = f"{GITHUB_WEB_BASE}/releases/download/{encoded_tag}"
+    return ReleaseInfo(
+        version=tag_name.lstrip("vV"),
+        tag_name=tag_name,
+        notes="Latest release detected through the GitHub web fallback.",
+        asset_url=f"{base}/{APP_ASSET_NAME}",
+        checksum_url=f"{base}/{CHECKSUM_ASSET_NAME}",
+        html_url=f"{GITHUB_WEB_BASE}/releases/tag/{encoded_tag}",
+    )
+
+
+def fetch_latest_release(timeout: int = 15) -> ReleaseInfo:
+    api_error: UpdateError | None = None
+    try:
+        return _release_from_api(timeout)
+    except UpdateError as exc:
+        api_error = exc
+
+    try:
+        return _release_from_web_redirect(timeout)
+    except UpdateError as fallback_error:
+        raise UpdateError(
+            f"Both update paths failed. API: {api_error}. Web fallback: {fallback_error}"
+        ) from fallback_error
 
 
 def parse_checksum(text: str) -> str:
@@ -161,7 +235,12 @@ def download_release(
     final_path = destination_dir / APP_ASSET_NAME
 
     try:
-        with _request(release.checksum_url, timeout=timeout, attempts=5) as response:
+        with _request(
+            release.checksum_url,
+            timeout=timeout,
+            attempts=5,
+            accept="application/octet-stream",
+        ) as response:
             expected_hash = parse_checksum(response.read(16_384).decode("utf-8", errors="replace"))
 
         last_error: BaseException | None = None
@@ -170,11 +249,7 @@ def download_release(
                 partial_path.unlink(missing_ok=True)
                 request = urllib.request.Request(
                     release.asset_url,
-                    headers={
-                        "User-Agent": USER_AGENT,
-                        "Accept": "application/octet-stream",
-                        "Connection": "close",
-                    },
+                    headers=_headers_for_url(release.asset_url, accept="application/octet-stream"),
                 )
                 response = _open_with_retries(request, timeout=timeout, attempts=2)
                 downloaded = 0
