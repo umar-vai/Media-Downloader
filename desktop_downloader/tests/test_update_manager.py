@@ -8,7 +8,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from update_manager import UpdateError, is_newer_version, normalize_version, parse_checksum, sha256_file
+from update_manager import (
+    GITHUB_WEB_BASE,
+    UpdateError,
+    _headers_for_url,
+    is_newer_version,
+    normalize_version,
+    parse_checksum,
+    sha256_file,
+)
 
 
 class VersionTests(unittest.TestCase):
@@ -31,9 +39,25 @@ class VersionTests(unittest.TestCase):
     def test_sha256_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "payload.bin"
-            path.write_bytes(b"team-fahad")
-            expected = hashlib.sha256(b"team-fahad").hexdigest()
+            path.write_bytes(b"media-downloader")
+            expected = hashlib.sha256(b"media-downloader").hexdigest()
             self.assertEqual(sha256_file(path), expected)
+
+    def test_api_headers_are_only_used_for_api_github(self) -> None:
+        api_headers = _headers_for_url("https://api.github.com/repos/umar-vai/Media-Downloader/releases/latest")
+        self.assertEqual(api_headers["Accept"], "application/vnd.github+json")
+        self.assertIn("X-GitHub-Api-Version", api_headers)
+
+        web_headers = _headers_for_url(f"{GITHUB_WEB_BASE}/releases/latest/download/MediaDownloader.exe")
+        self.assertEqual(web_headers["Accept"], "*/*")
+        self.assertNotIn("X-GitHub-Api-Version", web_headers)
+
+    def test_binary_accept_header(self) -> None:
+        headers = _headers_for_url(
+            f"{GITHUB_WEB_BASE}/releases/download/v2.3.6/MediaDownloader.exe",
+            accept="application/octet-stream",
+        )
+        self.assertEqual(headers["Accept"], "application/octet-stream")
 
 
 if __name__ == "__main__":
