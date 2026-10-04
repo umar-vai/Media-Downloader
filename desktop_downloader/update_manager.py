@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import socket
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -20,7 +23,7 @@ LEGACY_APP_ASSET_NAME = "Team" + "Fahad" + "YouTubeDownloader.exe"
 ASSET_CANDIDATES = (APP_ASSET_NAME, LEGACY_APP_ASSET_NAME)
 CHECKSUM_ASSET_NAME = f"{APP_ASSET_NAME}.sha256"
 LATEST_CHECKSUM_REDIRECT = f"{GITHUB_WEB_BASE}/releases/latest/download/{CHECKSUM_ASSET_NAME}"
-USER_AGENT = "MediaDownloader-Updater/1.2"
+USER_AGENT = "MediaDownloader-Updater/1.3"
 
 
 class UpdateError(RuntimeError):
@@ -113,13 +116,84 @@ def _request(
         raise UpdateError(f"Could not connect to the update server: {_reason_text(exc)}") from exc
 
 
-def _release_from_api(timeout: int) -> ReleaseInfo:
-    with _request(LATEST_RELEASE_API, timeout=timeout, attempts=4) as response:
-        try:
-            payload = json.loads(response.read().decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise UpdateError("The update server returned an invalid response.") from exc
+def _curl_executable() -> str:
+    path = shutil.which("curl.exe") or shutil.which("curl")
+    if not path:
+        raise UpdateError("Windows curl.exe is not available on this system.")
+    return path
 
+
+def _curl_base_command(timeout: int, accept: str | None = None) -> list[str]:
+    command = [
+        _curl_executable(),
+        "--location",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--connect-timeout",
+        str(max(5, timeout)),
+        "--max-time",
+        str(max(30, timeout * 4)),
+        "--retry",
+        "3",
+        "--retry-delay",
+        "2",
+        "--user-agent",
+        USER_AGENT,
+        "-H",
+        f"Accept: {accept or '*/*'}",
+    ]
+    return command
+
+
+def _run_curl(command: list[str], timeout: int) -> subprocess.CompletedProcess[bytes]:
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(45, timeout * 5),
+            check=False,
+            creationflags=creationflags,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise UpdateError(f"Windows curl fallback could not run: {_reason_text(exc)}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise UpdateError(f"Windows curl fallback failed: {detail[:240] or f'exit {result.returncode}'}")
+    return result
+
+
+def _curl_read(url: str, timeout: int, accept: str | None = None) -> bytes:
+    command = _curl_base_command(timeout, accept=accept)
+    if "api.github.com" in url:
+        command.extend(["-H", "X-GitHub-Api-Version: 2022-11-28"])
+    command.append(url)
+    return _run_curl(command, timeout).stdout
+
+
+def _curl_read_with_final_url(url: str, timeout: int, accept: str | None = None) -> tuple[bytes, str]:
+    marker = b"\n__MEDIA_DOWNLOADER_FINAL_URL__="
+    command = _curl_base_command(timeout, accept=accept)
+    command.extend(["--write-out", "\n__MEDIA_DOWNLOADER_FINAL_URL__=%{url_effective}", url])
+    output = _run_curl(command, timeout).stdout
+    if marker not in output:
+        raise UpdateError("Windows curl fallback did not return the final release URL.")
+    body, final_url = output.rsplit(marker, 1)
+    return body, final_url.decode("utf-8", errors="replace").strip()
+
+
+def _curl_download(url: str, destination: Path, timeout: int) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    command = _curl_base_command(timeout, accept="application/octet-stream")
+    command.extend(["--output", str(destination), url])
+    _run_curl(command, timeout)
+    if not destination.exists() or destination.stat().st_size <= 0:
+        raise UpdateError("Windows curl fallback downloaded an empty update file.")
+
+
+def _release_from_payload(payload: dict) -> ReleaseInfo:
     tag_name = str(payload.get("tag_name") or "").strip()
     if not tag_name:
         raise UpdateError("The latest release does not contain a version tag.")
@@ -151,14 +225,24 @@ def _release_from_api(timeout: int) -> ReleaseInfo:
     )
 
 
-def _release_from_web_redirect(timeout: int) -> ReleaseInfo:
-    """Resolve the latest release without api.github.com.
+def _release_from_api(timeout: int) -> ReleaseInfo:
+    with _request(LATEST_RELEASE_API, timeout=timeout, attempts=4) as response:
+        try:
+            payload = json.loads(response.read().decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise UpdateError("The update server returned an invalid response.") from exc
+    return _release_from_payload(payload)
 
-    GitHub's /releases/latest/download/<asset> endpoint redirects to a versioned
-    /releases/download/<tag>/<asset> URL. Reading the tiny checksum file lets us
-    recover the published tag and construct the matching executable URL while
-    avoiding the GitHub REST API entirely.
-    """
+
+def _release_from_api_curl(timeout: int) -> ReleaseInfo:
+    try:
+        payload = json.loads(_curl_read(LATEST_RELEASE_API, timeout, "application/vnd.github+json").decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpdateError("Windows curl returned invalid GitHub release metadata.") from exc
+    return _release_from_payload(payload)
+
+
+def _release_from_web_redirect(timeout: int) -> ReleaseInfo:
     with _request(
         LATEST_CHECKSUM_REDIRECT,
         timeout=max(timeout, 20),
@@ -167,11 +251,21 @@ def _release_from_web_redirect(timeout: int) -> ReleaseInfo:
     ) as response:
         final_url = response.geturl()
         checksum_text = response.read(16_384).decode("utf-8", errors="replace")
+    return _release_from_redirect_result(final_url, checksum_text)
 
-    # Validate the checksum while we already have it, so a captive portal or
-    # HTML error page cannot masquerade as a valid release redirect.
+
+def _release_from_web_redirect_curl(timeout: int) -> ReleaseInfo:
+    body, final_url = _curl_read_with_final_url(
+        LATEST_CHECKSUM_REDIRECT,
+        max(timeout, 20),
+        accept="application/octet-stream",
+    )
+    checksum_text = body.decode("utf-8", errors="replace")
+    return _release_from_redirect_result(final_url, checksum_text)
+
+
+def _release_from_redirect_result(final_url: str, checksum_text: str) -> ReleaseInfo:
     parse_checksum(checksum_text)
-
     match = re.search(r"/releases/download/([^/]+)/", final_url, re.I)
     if not match:
         raise UpdateError("The GitHub web fallback did not resolve a release tag.")
@@ -187,7 +281,7 @@ def _release_from_web_redirect(timeout: int) -> ReleaseInfo:
     return ReleaseInfo(
         version=tag_name.lstrip("vV"),
         tag_name=tag_name,
-        notes="Latest release detected through the GitHub web fallback.",
+        notes="Latest release detected through the GitHub fallback path.",
         asset_url=f"{base}/{APP_ASSET_NAME}",
         checksum_url=f"{base}/{CHECKSUM_ASSET_NAME}",
         html_url=f"{GITHUB_WEB_BASE}/releases/tag/{encoded_tag}",
@@ -195,18 +289,18 @@ def _release_from_web_redirect(timeout: int) -> ReleaseInfo:
 
 
 def fetch_latest_release(timeout: int = 15) -> ReleaseInfo:
-    api_error: UpdateError | None = None
-    try:
-        return _release_from_api(timeout)
-    except UpdateError as exc:
-        api_error = exc
-
-    try:
-        return _release_from_web_redirect(timeout)
-    except UpdateError as fallback_error:
-        raise UpdateError(
-            f"Both update paths failed. API: {api_error}. Web fallback: {fallback_error}"
-        ) from fallback_error
+    errors: list[str] = []
+    for label, loader in (
+        ("urllib API", _release_from_api),
+        ("Windows curl API", _release_from_api_curl),
+        ("urllib web", _release_from_web_redirect),
+        ("Windows curl web", _release_from_web_redirect_curl),
+    ):
+        try:
+            return loader(timeout)
+        except UpdateError as exc:
+            errors.append(f"{label}: {exc}")
+    raise UpdateError("All update paths failed. " + " | ".join(errors))
 
 
 def parse_checksum(text: str) -> str:
@@ -224,6 +318,14 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def _fetch_checksum(url: str, timeout: int) -> str:
+    try:
+        with _request(url, timeout=timeout, attempts=5, accept="application/octet-stream") as response:
+            return parse_checksum(response.read(16_384).decode("utf-8", errors="replace"))
+    except UpdateError:
+        return parse_checksum(_curl_read(url, timeout, "application/octet-stream").decode("utf-8", errors="replace"))
+
+
 def download_release(
     release: ReleaseInfo,
     destination_dir: Path,
@@ -235,13 +337,7 @@ def download_release(
     final_path = destination_dir / APP_ASSET_NAME
 
     try:
-        with _request(
-            release.checksum_url,
-            timeout=timeout,
-            attempts=5,
-            accept="application/octet-stream",
-        ) as response:
-            expected_hash = parse_checksum(response.read(16_384).decode("utf-8", errors="replace"))
+        expected_hash = _fetch_checksum(release.checksum_url, timeout)
 
         last_error: BaseException | None = None
         for attempt in range(1, 6):
@@ -277,9 +373,21 @@ def download_release(
                 time.sleep(min(10.0, 1.5 * (2 ** (attempt - 1))))
 
         if last_error:
-            if isinstance(last_error, urllib.error.HTTPError):
-                raise UpdateError(f"Update download returned HTTP {last_error.code}.") from last_error
-            raise UpdateError(f"The update download could not be started: {_reason_text(last_error)}") from last_error
+            try:
+                partial_path.unlink(missing_ok=True)
+                _curl_download(release.asset_url, partial_path, timeout)
+                if progress_callback:
+                    size = partial_path.stat().st_size
+                    progress_callback(size, size)
+                last_error = None
+            except UpdateError as curl_error:
+                if isinstance(last_error, urllib.error.HTTPError):
+                    urllib_detail = f"HTTP {last_error.code}"
+                else:
+                    urllib_detail = _reason_text(last_error)
+                raise UpdateError(
+                    f"Both update download transports failed. urllib: {urllib_detail}. curl: {curl_error}"
+                ) from curl_error
 
         if not partial_path.exists() or partial_path.stat().st_size <= 0:
             raise UpdateError("The downloaded update file is empty.")
