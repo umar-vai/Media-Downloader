@@ -97,28 +97,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish v2.3.9 once
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Publish v2.3.9 release'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v2.3.9
-          target_commitish: ${{ github.sha }}
-          name: Media Downloader v2.3.9
-          body: |
-            Next-download reset UX release.
-
-            - Replaces the old Clear workspace action with Reset for next download.
-            - Highlights the reset button after a successful download.
-            - Fully clears the current media session: URL, metadata, preview, file name, progress, status, last-file state and busy state.
-            - Restores output controls to Video / 720p / MP3 / 192 defaults.
-            - Preserves the user's selected save folder and permanent app settings.
-            - Keeps Facebook, Instagram, YouTube, share-link fallbacks and the multi-transport updater.
-          files: |
-            dist/MediaDownloader.exe
-            dist/MediaDownloader.exe.sha256
-            dist/TeamFahadYouTubeDownloader.exe
-            dist/TeamFahadYouTubeDownloader.exe.sha256
-
       - name: Publish GitHub Release assets
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
