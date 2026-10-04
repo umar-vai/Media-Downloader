@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from yt_dlp.extractor.instagram import InstagramBaseIE
 
-from media_sources import detect_platform, extraction_attempts, facebook_mobile_watch_url, is_supported_media_url, platform_name, request_options, video_format_selector
+from media_sources import detect_platform, extraction_attempts, facebook_mobile_watch_url, facebook_share_variants, is_supported_media_url, platform_name, request_options, video_format_selector
 
 
 class MediaSourceTests(unittest.TestCase):
@@ -24,6 +24,9 @@ class MediaSourceTests(unittest.TestCase):
         for url in (
             "https://www.facebook.com/reel/123",
             "https://www.facebook.com/watch/?v=123",
+            "https://www.facebook.com/share/v/ABC123/",
+            "https://m.facebook.com/share/r/ABC123/",
+            "https://mbasic.facebook.com/share/p/ABC123/",
             "https://fb.watch/abc/",
         ):
             self.assertEqual(detect_platform(url), "facebook")
@@ -71,6 +74,19 @@ class MediaSourceTests(unittest.TestCase):
             facebook_mobile_watch_url("https://www.facebook.com/reel/1067651965750372"),
             "https://m.facebook.com/watch/?v=1067651965750372&_rdr",
         )
+
+    def test_facebook_share_variants(self):
+        variants = facebook_share_variants("https://www.facebook.com/share/v/1HsYiLvx31/")
+        self.assertEqual(variants[0], "https://m.facebook.com/share/v/1HsYiLvx31/")
+        self.assertEqual(variants[1], "https://mbasic.facebook.com/share/v/1HsYiLvx31/")
+
+    def test_facebook_share_connection_fallbacks(self):
+        attempts = extraction_attempts("https://www.facebook.com/share/v/1HsYiLvx31/")
+        urls = [url for url, _options in attempts]
+        self.assertIn("https://m.facebook.com/share/v/1HsYiLvx31/", urls)
+        self.assertIn("https://mbasic.facebook.com/share/v/1HsYiLvx31/", urls)
+        self.assertIn("https://www.facebook.com/share/v/1HsYiLvx31/", urls)
+        self.assertNotIn("impersonate", attempts[0][1])
 
     def test_facebook_connection_fallbacks(self):
         attempts = extraction_attempts("https://www.facebook.com/reel/1067651965750372")
