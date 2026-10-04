@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 from yt_dlp.networking.impersonate import ImpersonateTarget
 
@@ -47,7 +47,7 @@ def detect_platform(url: str) -> str | None:
     host = _hostname(url)
     if host in {"youtu.be", "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtube-nocookie.com", "www.youtube-nocookie.com"}:
         return "youtube"
-    if host in {"facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com", "fb.watch", "www.fb.watch"}:
+    if host in {"facebook.com", "www.facebook.com", "m.facebook.com", "mbasic.facebook.com", "web.facebook.com", "fb.watch", "www.fb.watch"}:
         return "facebook"
     if host in {"instagram.com", "www.instagram.com", "m.instagram.com"}:
         return "instagram"
@@ -118,21 +118,50 @@ def facebook_mobile_watch_url(url: str) -> str:
     return f"https://m.facebook.com/watch/?v={video_id}&_rdr"
 
 
+def facebook_share_variants(url: str) -> list[str]:
+    """Return alternate mobile hosts for Facebook share/short links.
+
+    Facebook's /share/v/, /share/r/ and /share/p/ URLs are redirect-style links
+    and are often handled by yt-dlp's generic extractor before they resolve to a
+    canonical Facebook video/Reel URL. Some Windows/ISP combinations terminate
+    TLS on www.facebook.com while the mobile/basic endpoints still resolve. Try
+    those endpoints first and let yt-dlp follow the redirect to the final public
+    media URL.
+    """
+    if detect_platform(url) != "facebook":
+        return []
+    parsed = urlparse((url or "").strip())
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 2 or parts[0].lower() != "share" or parts[1].lower() not in {"v", "r", "p"}:
+        return []
+
+    variants: list[str] = []
+    for host in ("m.facebook.com", "mbasic.facebook.com"):
+        variants.append(urlunparse((parsed.scheme or "https", host, parsed.path, parsed.params, parsed.query, parsed.fragment)))
+    return variants
+
+
 def extraction_attempts(url: str) -> list[tuple[str, dict]]:
     """Return ordered extraction/network fallbacks for a media URL.
 
-    Facebook is retried through the mobile watch endpoint, IPv4, and both
-    standard yt-dlp TLS and Chrome/curl_cffi impersonation. Instagram and
-    YouTube keep their standard paths.
+    Facebook is retried through share-link mobile variants (when applicable),
+    the mobile watch endpoint, IPv4, and both standard yt-dlp TLS and
+    Chrome/curl_cffi impersonation. Instagram and YouTube keep their standard
+    paths.
     """
     headers = {"http_headers": browser_headers()}
     if detect_platform(url) != "facebook":
         return [(url, request_options(url))]
 
     mobile_url = facebook_mobile_watch_url(url)
+    ordered_urls: list[str] = []
+    for candidate_url in (*facebook_share_variants(url), mobile_url, url):
+        if candidate_url not in ordered_urls:
+            ordered_urls.append(candidate_url)
+
     candidates: list[tuple[str, dict]] = []
     seen: set[tuple[str, bool]] = set()
-    for candidate_url in (mobile_url, url):
+    for candidate_url in ordered_urls:
         for impersonate in (False, True):
             key = (candidate_url, impersonate)
             if key in seen:
