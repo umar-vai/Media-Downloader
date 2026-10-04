@@ -96,6 +96,25 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Publish v2.3.7 once
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Publish v2.3.7 release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.3.7
+          target_commitish: ${{ github.sha }}
+          name: Media Downloader v2.3.7
+          body: |
+            Facebook share-link compatibility hotfix.
+
+            - Adds support fallbacks for facebook.com/share/v/, /share/r/ and /share/p/ links.
+            - Tries mobile and basic Facebook endpoints before the original share URL to improve redirect resolution on affected Windows/ISP TLS paths.
+            - Keeps the v2.3.6 repeated-download busy-state fix, updater fallback, Instagram support, and working Reel/Watch Facebook paths.
+          files: |
+            dist/MediaDownloader.exe
+            dist/MediaDownloader.exe.sha256
+            dist/TeamFahadYouTubeDownloader.exe
+            dist/TeamFahadYouTubeDownloader.exe.sha256
+
       - name: Publish GitHub Release assets
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
