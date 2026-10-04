@@ -25,19 +25,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply repeated-download UI hotfix once
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        shell: pwsh
-        run: |
-          python scripts/fix_v236_busy_state.py
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add desktop_downloader/app.py
-          if (-not (git diff --cached --quiet)) {
-            git commit -m "Fix repeated download button busy state"
-            git push origin HEAD:main
-          }
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
