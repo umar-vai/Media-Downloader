@@ -96,6 +96,27 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Publish v2.3.6 once
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Publish v2.3.6 release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.3.6
+          target_commitish: ${{ github.sha }}
+          name: Media Downloader v2.3.6
+          body: |
+            Reliability hotfix.
+
+            - Fixes the Download button getting stuck disabled after repeated Facebook downloads.
+            - Adds guaranteed UI busy-state release after analysis/download workers finish.
+            - Keeps the UI event loop alive if a stale/malformed background event raises unexpectedly.
+            - Adds updater fallback logic so update checks can use GitHub Releases web redirects when the GitHub API is temporarily unreachable.
+            - Keeps the working Facebook and Instagram download paths from v2.3.5.
+          files: |
+            dist/MediaDownloader.exe
+            dist/MediaDownloader.exe.sha256
+            dist/TeamFahadYouTubeDownloader.exe
+            dist/TeamFahadYouTubeDownloader.exe.sha256
+
       - name: Publish GitHub Release assets
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
