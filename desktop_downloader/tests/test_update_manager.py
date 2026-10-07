@@ -84,6 +84,25 @@ class VersionTests(unittest.TestCase):
         self.assertEqual(release.checksum_url, digest_url)
 
 
+    def test_release_payload_exposes_installer_assets(self) -> None:
+        tag = "v3.0.0"
+        base = f"{GITHUB_WEB_BASE}/releases/download/{tag}"
+        release = _release_from_payload(
+            {
+                "tag_name": tag,
+                "body": "Installer release",
+                "html_url": f"{GITHUB_WEB_BASE}/releases/tag/{tag}",
+                "assets": [
+                    {"name": "MediaDownloader.exe", "browser_download_url": f"{base}/MediaDownloader.exe"},
+                    {"name": "MediaDownloader.exe.sha256", "browser_download_url": f"{base}/MediaDownloader.exe.sha256"},
+                    {"name": "MediaDownloaderSetup.exe", "browser_download_url": f"{base}/MediaDownloaderSetup.exe"},
+                    {"name": "MediaDownloaderSetup.exe.sha256", "browser_download_url": f"{base}/MediaDownloaderSetup.exe.sha256"},
+                ],
+            }
+        )
+        self.assertTrue(release.installer_url.endswith("/MediaDownloaderSetup.exe"))
+        self.assertTrue(release.installer_checksum_url.endswith("/MediaDownloaderSetup.exe.sha256"))
+
     def test_select_best_release_ignores_malformed_and_old_entries(self) -> None:
         def payload(tag: str) -> dict:
             return {
