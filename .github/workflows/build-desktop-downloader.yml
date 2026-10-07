@@ -45,12 +45,14 @@ jobs:
           python -m py_compile desktop_downloader/app.py
           python -m py_compile desktop_downloader/app_logging.py
           python -m py_compile desktop_downloader/editor_history.py
+          python -m py_compile desktop_downloader/install_mode.py
           python -m py_compile desktop_downloader/media_editor.py
           python -m py_compile desktop_downloader/media_player.py
           python -m py_compile desktop_downloader/media_editor_engine.py
           python -m py_compile desktop_downloader/media_editor_widgets.py
           python -m py_compile desktop_downloader/launcher.py
           python -m py_compile desktop_downloader/media_sources.py
+          python -m py_compile desktop_downloader/self_test.py
           python -m py_compile desktop_downloader/update_manager.py
           python -m py_compile desktop_downloader/updater.py
           python -m py_compile desktop_downloader/version.py
@@ -88,6 +90,13 @@ jobs:
         run: |
           python desktop_downloader/tests/smoke_mpv.py dist/mpv.exe
 
+      - name: Run source runtime self-test
+        shell: pwsh
+        run: |
+          $env:MEDIA_DOWNLOADER_MPV = (Resolve-Path "dist\mpv.exe").Path
+          python desktop_downloader/self_test.py --report dist/source-self-test.json
+          Get-Content dist/source-self-test.json
+
       - name: Build updater EXE
         shell: pwsh
         run: |
@@ -95,7 +104,7 @@ jobs:
             --name MediaDownloaderUpdater `
             desktop_downloader/updater.py
 
-      - name: Build Media Downloader EXE
+      - name: Build portable Media Downloader EXE
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed `
@@ -109,6 +118,120 @@ jobs:
             --add-binary "dist/mpv.exe;." `
             desktop_downloader/launcher.py
 
+      - name: Run portable packaged self-test
+        shell: pwsh
+        run: |
+          $report = (Join-Path $PWD "dist\portable-self-test.json")
+          $process = Start-Process -FilePath (Resolve-Path "dist\MediaDownloader.exe").Path `
+            -ArgumentList @("--self-test", "--report", $report) `
+            -Wait -PassThru
+          if (-not (Test-Path $report)) {
+            throw "Portable runtime self-test did not produce a report."
+          }
+          Get-Content $report
+          if ($process.ExitCode -ne 0) {
+            throw "Portable runtime self-test failed with exit code $($process.ExitCode)."
+          }
+          $payload = Get-Content $report -Raw | ConvertFrom-Json
+          if ($payload.install_mode -ne "portable") {
+            throw "Expected portable install mode, got '$($payload.install_mode)'."
+          }
+
+      - name: Build installed onedir package
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onedir --windowed `
+            --name MediaDownloader `
+            --distpath "dist/installed" `
+            --workpath "build/installed" `
+            --specpath "build/installed" `
+            --collect-all yt_dlp `
+            --collect-all curl_cffi `
+            --collect-all imageio_ffmpeg `
+            --collect-all customtkinter `
+            --collect-all PIL `
+            --add-binary "dist/MediaDownloaderUpdater.exe;." `
+            --add-binary "dist/mpv.exe;." `
+            desktop_downloader/launcher.py
+
+      - name: Run onedir packaged self-test
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "dist\installed\MediaDownloader\MediaDownloader.exe").Path
+          $report = (Join-Path $PWD "dist\onedir-self-test.json")
+          $process = Start-Process -FilePath $exe -ArgumentList @("--self-test", "--report", $report) -Wait -PassThru
+          if (-not (Test-Path $report)) {
+            throw "Onedir runtime self-test did not produce a report."
+          }
+          Get-Content $report
+          if ($process.ExitCode -ne 0) {
+            throw "Onedir runtime self-test failed with exit code $($process.ExitCode)."
+          }
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup*" -Recurse -File -Filter "ISCC.exe" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $iscc) {
+            $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          }
+          if (-not $iscc) {
+            throw "Inno Setup compiler was not found."
+          }
+          $appVersion = python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from version import APP_VERSION; print(APP_VERSION)"
+          $sourceDir = (Resolve-Path "dist\installed\MediaDownloader").Path
+          $outputDir = (Resolve-Path "dist").Path
+          & $iscc.FullName "/DAppVersion=$appVersion" "/DSourceDir=$sourceDir" "/DOutputDir=$outputDir" "desktop_downloader\installer\MediaDownloader.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup build failed."
+          }
+          if (-not (Test-Path "dist\MediaDownloaderSetup.exe")) {
+            throw "Installer output is missing."
+          }
+
+      - name: Smoke test installer install and uninstall
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP "MediaDownloaderInstalledTest"
+          if (Test-Path $installDir) {
+            Remove-Item $installDir -Recurse -Force
+          }
+          $setup = (Resolve-Path "dist\MediaDownloaderSetup.exe").Path
+          $install = Start-Process -FilePath $setup `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir") `
+            -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            throw "Installer smoke install failed with exit code $($install.ExitCode)."
+          }
+
+          $installedExe = Join-Path $installDir "MediaDownloader.exe"
+          if (-not (Test-Path $installedExe)) {
+            throw "Installed MediaDownloader.exe is missing."
+          }
+          $report = Join-Path $env:RUNNER_TEMP "installed-self-test.json"
+          $test = Start-Process -FilePath $installedExe -ArgumentList @("--self-test", "--report", $report) -Wait -PassThru
+          if ($test.ExitCode -ne 0 -or -not (Test-Path $report)) {
+            throw "Installed runtime self-test failed."
+          }
+          Get-Content $report
+          $payload = Get-Content $report -Raw | ConvertFrom-Json
+          if ($payload.install_mode -ne "installer") {
+            throw "Expected installer mode, got '$($payload.install_mode)'."
+          }
+
+          $uninstaller = Join-Path $installDir "unins000.exe"
+          if (-not (Test-Path $uninstaller)) {
+            throw "Installer did not create an uninstaller."
+          }
+          $uninstall = Start-Process -FilePath $uninstaller `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") `
+            -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) {
+            throw "Installer smoke uninstall failed with exit code $($uninstall.ExitCode)."
+          }
+
       - name: Generate SHA-256 checksums and compatibility alias
         shell: pwsh
         run: |
@@ -118,6 +241,9 @@ jobs:
           Copy-Item "dist/MediaDownloader.exe" (Join-Path "dist" $legacy)
           "$hash  $legacy" | Out-File (Join-Path "dist" ($legacy + ".sha256")) -Encoding ascii
 
+          $setupHash = (Get-FileHash "dist/MediaDownloaderSetup.exe" -Algorithm SHA256).Hash.ToLower()
+          "$setupHash  MediaDownloaderSetup.exe" | Out-File "dist/MediaDownloaderSetup.exe.sha256" -Encoding ascii
+
       - name: Upload Windows build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -125,8 +251,12 @@ jobs:
           path: |
             dist/MediaDownloader.exe
             dist/MediaDownloader.exe.sha256
+            dist/MediaDownloaderSetup.exe
+            dist/MediaDownloaderSetup.exe.sha256
             dist/TeamFahadYouTubeDownloader.exe
             dist/TeamFahadYouTubeDownloader.exe.sha256
+            dist/portable-self-test.json
+            dist/onedir-self-test.json
           if-no-files-found: error
           retention-days: 30
 
@@ -158,7 +288,15 @@ jobs:
             Write-Host "Release $tag already exists; skipping."
             exit 0
           }
-          gh release create $tag "dist/MediaDownloader.exe" "dist/MediaDownloader.exe.sha256" "dist/TeamFahadYouTubeDownloader.exe" "dist/TeamFahadYouTubeDownloader.exe.sha256" --repo $repo --target "${{ github.sha }}" --title "Media Downloader $tag" --generate-notes
+          gh release create $tag `
+            "dist/MediaDownloader.exe" `
+            "dist/MediaDownloader.exe.sha256" `
+            "dist/MediaDownloaderSetup.exe" `
+            "dist/MediaDownloaderSetup.exe.sha256" `
+            "dist/TeamFahadYouTubeDownloader.exe" `
+            "dist/TeamFahadYouTubeDownloader.exe.sha256" `
+            --repo $repo --target "${{ github.sha }}" --title "Media Downloader $tag" --generate-notes
+
       - name: Publish GitHub Release assets
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
@@ -167,5 +305,7 @@ jobs:
           files: |
             dist/MediaDownloader.exe
             dist/MediaDownloader.exe.sha256
+            dist/MediaDownloaderSetup.exe
+            dist/MediaDownloaderSetup.exe.sha256
             dist/TeamFahadYouTubeDownloader.exe
             dist/TeamFahadYouTubeDownloader.exe.sha256
