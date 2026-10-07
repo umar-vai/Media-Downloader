@@ -18,6 +18,9 @@ from typing import Callable
 GITHUB_REPOSITORY = "umar-vai/Media-Downloader"
 GITHUB_WEB_BASE = f"https://github.com/{GITHUB_REPOSITORY}"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
+RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases?per_page=20"
+RELEASES_WEB = f"{GITHUB_WEB_BASE}/releases"
+LATEST_RELEASE_WEB = f"{GITHUB_WEB_BASE}/releases/latest"
 APP_ASSET_NAME = "MediaDownloader.exe"
 LEGACY_APP_ASSET_NAME = "Team" + "Fahad" + "YouTubeDownloader.exe"
 ASSET_CANDIDATES = (APP_ASSET_NAME, LEGACY_APP_ASSET_NAME)
@@ -117,10 +120,38 @@ def _request(
 
 
 def _curl_executable() -> str:
-    path = shutil.which("curl.exe") or shutil.which("curl")
-    if not path:
-        raise UpdateError("Windows curl.exe is not available on this system.")
-    return path
+    candidates = [
+        shutil.which("curl.exe"),
+        shutil.which("curl"),
+    ]
+    if os.name == "nt":
+        system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+        candidates.extend(
+            [
+                str(system_root / "System32" / "curl.exe"),
+                r"C:\Windows\System32\curl.exe",
+            ]
+        )
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return str(candidate)
+    raise UpdateError("Windows curl.exe is not available on this system.")
+
+
+def _powershell_executable() -> str:
+    candidates = [
+        shutil.which("powershell.exe"),
+        shutil.which("powershell"),
+        shutil.which("pwsh.exe"),
+        shutil.which("pwsh"),
+    ]
+    if os.name == "nt":
+        system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+        candidates.append(str(system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"))
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return str(candidate)
+    raise UpdateError("PowerShell is not available on this system.")
 
 
 def _curl_base_command(timeout: int, accept: str | None = None) -> list[str]:
@@ -193,6 +224,43 @@ def _curl_download(url: str, destination: Path, timeout: int) -> None:
         raise UpdateError("Windows curl fallback downloaded an empty update file.")
 
 
+def _select_best_release(payloads: list[dict]) -> ReleaseInfo:
+    candidates: list[ReleaseInfo] = []
+    errors: list[str] = []
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("draft") or payload.get("prerelease"):
+            continue
+        try:
+            candidates.append(_release_from_payload(payload))
+        except UpdateError as exc:
+            tag = str(payload.get("tag_name") or "?")
+            errors.append(f"{tag}: {exc}")
+    if not candidates:
+        detail = " | ".join(errors[:5])
+        raise UpdateError("No valid published Media Downloader release was found." + (f" {detail}" if detail else ""))
+    candidates.sort(key=lambda item: normalize_version(item.version), reverse=True)
+    return candidates[0]
+
+
+def _release_from_web_html(html: str) -> ReleaseInfo:
+    tags = set(re.findall(r'/releases/tag/(v?\d+\.\d+\.\d+)', html or "", re.I))
+    if not tags:
+        raise UpdateError("The GitHub releases page did not contain a valid semantic version.")
+    tag_name = max(tags, key=normalize_version)
+    encoded_tag = urllib.parse.quote(tag_name, safe="")
+    base = f"{GITHUB_WEB_BASE}/releases/download/{encoded_tag}"
+    return ReleaseInfo(
+        version=tag_name.lstrip("vV"),
+        tag_name=tag_name,
+        notes="Latest valid release detected from the GitHub releases page.",
+        asset_url=f"{base}/{APP_ASSET_NAME}",
+        checksum_url=f"{base}/{CHECKSUM_ASSET_NAME}",
+        html_url=f"{GITHUB_WEB_BASE}/releases/tag/{encoded_tag}",
+    )
+
+
 def _release_from_payload(payload: dict) -> ReleaseInfo:
     tag_name = str(payload.get("tag_name") or "").strip()
     if not tag_name:
@@ -225,6 +293,27 @@ def _release_from_payload(payload: dict) -> ReleaseInfo:
     )
 
 
+def _release_from_list_api(timeout: int) -> ReleaseInfo:
+    with _request(RELEASES_API, timeout=timeout, attempts=2) as response:
+        try:
+            payload = json.loads(response.read().decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise UpdateError("The update server returned an invalid releases list.") from exc
+    if not isinstance(payload, list):
+        raise UpdateError("The update server returned an unexpected releases list.")
+    return _select_best_release(payload)
+
+
+def _release_from_list_api_curl(timeout: int) -> ReleaseInfo:
+    try:
+        payload = json.loads(_curl_read(RELEASES_API, timeout, "application/vnd.github+json").decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpdateError("Windows curl returned invalid GitHub releases metadata.") from exc
+    if not isinstance(payload, list):
+        raise UpdateError("Windows curl returned an unexpected releases list.")
+    return _select_best_release(payload)
+
+
 def _release_from_api(timeout: int) -> ReleaseInfo:
     with _request(LATEST_RELEASE_API, timeout=timeout, attempts=4) as response:
         try:
@@ -240,6 +329,43 @@ def _release_from_api_curl(timeout: int) -> ReleaseInfo:
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise UpdateError("Windows curl returned invalid GitHub release metadata.") from exc
     return _release_from_payload(payload)
+
+
+def _release_from_web_page(timeout: int) -> ReleaseInfo:
+    with _request(RELEASES_WEB, timeout=max(timeout, 15), attempts=2, accept="text/html") as response:
+        html = response.read(2_000_000).decode("utf-8", errors="replace")
+    return _release_from_web_html(html)
+
+
+def _release_from_web_page_curl(timeout: int) -> ReleaseInfo:
+    html = _curl_read(RELEASES_WEB, max(timeout, 15), "text/html").decode("utf-8", errors="replace")
+    return _release_from_web_html(html)
+
+
+def _release_from_web_page_powershell(timeout: int) -> ReleaseInfo:
+    executable = _powershell_executable()
+    script = (
+        "$ProgressPreference='SilentlyContinue'; "
+        "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; "
+        f"$r=Invoke-WebRequest -UseBasicParsing -Uri '{RELEASES_WEB}' -TimeoutSec {max(15, timeout)}; "
+        "[Console]::Out.Write($r.Content)"
+    )
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        result = subprocess.run(
+            [executable, "-NoProfile", "-NonInteractive", "-Command", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(45, timeout * 4),
+            check=False,
+            creationflags=creationflags,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise UpdateError(f"PowerShell release fallback could not run: {_reason_text(exc)}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise UpdateError(f"PowerShell release fallback failed: {detail[:240] or f'exit {result.returncode}'}")
+    return _release_from_web_html(result.stdout.decode("utf-8", errors="replace"))
 
 
 def _release_from_web_redirect(timeout: int) -> ReleaseInfo:
@@ -288,13 +414,18 @@ def _release_from_redirect_result(final_url: str, checksum_text: str) -> Release
     )
 
 
-def fetch_latest_release(timeout: int = 15) -> ReleaseInfo:
+def fetch_latest_release(timeout: int = 12) -> ReleaseInfo:
     errors: list[str] = []
     for label, loader in (
-        ("urllib API", _release_from_api),
-        ("Windows curl API", _release_from_api_curl),
-        ("urllib web", _release_from_web_redirect),
-        ("Windows curl web", _release_from_web_redirect_curl),
+        ("urllib releases list", _release_from_list_api),
+        ("Windows curl releases list", _release_from_list_api_curl),
+        ("urllib latest API", _release_from_api),
+        ("Windows curl latest API", _release_from_api_curl),
+        ("urllib releases page", _release_from_web_page),
+        ("Windows curl releases page", _release_from_web_page_curl),
+        ("PowerShell releases page", _release_from_web_page_powershell),
+        ("urllib latest asset redirect", _release_from_web_redirect),
+        ("Windows curl latest asset redirect", _release_from_web_redirect_curl),
     ):
         try:
             return loader(timeout)
