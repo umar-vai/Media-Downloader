@@ -15,6 +15,7 @@ import tkinter as tk
 from PIL import Image, ImageTk
 from tkinter import filedialog, messagebox
 
+from app_logging import get_logger
 from media_editor_engine import (
     CROP_PRESETS,
     CREATE_NO_WINDOW,
@@ -54,6 +55,8 @@ DANGER = "#FF647C"
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus"}
+
+LOGGER = get_logger("editor")
 
 
 def _open_path(path: Path) -> None:
@@ -96,6 +99,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.export_process: subprocess.Popen[str] | None = None
         self.export_cancelled = False
         self.preview_clip_busy = False
+        self.render_busy = False
         self.last_export: Path | None = None
         self.ui_queue: queue.Queue[tuple[Any, tuple[Any, ...]]] = queue.Queue()
         self._closing = False
@@ -617,14 +621,15 @@ class MediaEditorWindow(ctk.CTkToplevel):
         )
         self.quality_menu.pack(fill="x", pady=(4, 0))
 
-        ctk.CTkButton(
+        self.choose_output_button = ctk.CTkButton(
             tab,
             text="Choose output folder",
             height=36,
             fg_color=SURFACE_2,
             hover_color=SURFACE_3,
             command=self.choose_output_folder,
-        ).grid(row=4, column=0, sticky="ew", pady=(14, 6))
+        )
+        self.choose_output_button.grid(row=4, column=0, sticky="ew", pady=(14, 6))
 
         self.output_dir_label = ctk.CTkLabel(
             tab,
@@ -1042,7 +1047,47 @@ class MediaEditorWindow(ctk.CTkToplevel):
             failed_player = self.player
             self._player_failed(failed_player, str(exc))
 
+    def _set_render_busy(self, busy: bool) -> None:
+        self.render_busy = busy
+        state = "disabled" if busy else "normal"
+        controls = [
+            self.crop_menu,
+            self.rotate_menu,
+            self.speed_menu,
+            self.audio_speed_menu,
+            self.mute_switch,
+            self.volume_slider,
+            self.fade_in_entry,
+            self.fade_out_entry,
+            self.output_name_entry,
+            self.format_menu,
+            self.quality_menu,
+            self.choose_output_button,
+            self.start_entry,
+            self.end_entry,
+        ]
+        for widget in controls:
+            try:
+                widget.configure(state=state)
+            except Exception:
+                pass
+        try:
+            self.timeline.configure(state="disabled" if busy else "normal")
+        except Exception:
+            pass
+
+        if busy:
+            self.pause_playback()
+            self.play_button.configure(state="disabled")
+        else:
+            if self.player is not None and self.player.ready:
+                self.play_button.configure(state="normal")
+            self._crop_changed(self.crop_var.get())
+            self._sync_audio_state()
+
     def toggle_playback(self) -> None:
+        if self.render_busy:
+            return
         if self.player is None:
             messagebox.showinfo(
                 APP_TITLE,
@@ -1056,6 +1101,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
             self.start_playback()
 
     def start_playback(self) -> None:
+        if self.render_busy:
+            return
         if self.player is None or not self.info:
             return
         if not self.player.ready:
@@ -1097,6 +1144,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
             self.preview_status_label.configure(text="Paused • Space = Play/Pause", text_color=MUTED)
 
     def _seek_player(self, value: float) -> None:
+        if self.render_busy:
+            return
         if not self.info:
             return
         value = max(0.0, min(self.info.duration, float(value)))
@@ -1368,6 +1417,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         )
 
     def apply_custom_crop(self) -> None:
+        if self.render_busy:
+            return
         if not self.info:
             return
         try:
@@ -1410,6 +1461,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
             self.preview_status_label.configure(text="Speed change will apply on export", text_color=WARNING)
 
     def reset_video_edits(self) -> None:
+        if self.render_busy:
+            return
         self.crop_var.set("Original")
         self.rotate_var.set("0°")
         self.speed_var.set("1.0x")
@@ -1426,6 +1479,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.schedule_preview(delay=40)
 
     def reset_audio_edits(self) -> None:
+        if self.render_busy:
+            return
         self.mute_var.set(False)
         self.volume_var.set(100)
         self.speed_var.set("1.0x")
@@ -1436,6 +1491,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self._sync_audio_state()
 
     def reset_edits(self) -> None:
+        if self.render_busy:
+            return
         self.reset_video_edits()
         self.reset_audio_edits()
         self.reset_range()
@@ -1509,7 +1566,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             index += 1
 
     def preview_edit_clip(self) -> None:
-        if self.preview_clip_busy or self.export_process is not None:
+        if self.preview_clip_busy or self.export_process is not None or self.render_busy:
             return
         try:
             settings = self._validated_settings()
@@ -1541,6 +1598,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             return
 
         self.preview_clip_busy = True
+        self._set_render_busy(True)
         self.preview_clip_button.configure(state="disabled", text="Rendering preview…")
         self.export_button.configure(state="disabled")
         self.progress.configure(mode="indeterminate")
@@ -1596,7 +1654,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
         messagebox.showerror(APP_TITLE, error, parent=self)
 
     def export_media(self) -> None:
-        if self.export_process is not None or self.preview_clip_busy:
+        if self.export_process is not None or self.preview_clip_busy or self.render_busy:
             return
         try:
             settings = self._validated_settings()
@@ -1624,6 +1682,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             return
 
         self.export_cancelled = False
+        self._set_render_busy(True)
         self.export_button.configure(state="disabled", text="Exporting…")
         self.preview_clip_button.configure(state="disabled")
         self.cancel_button.configure(state="normal")
