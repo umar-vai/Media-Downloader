@@ -41,6 +41,7 @@ jobs:
           python -m py_compile desktop_downloader/app.py
           python -m py_compile desktop_downloader/media_editor.py
           python -m py_compile desktop_downloader/media_player.py
+          python -m py_compile desktop_downloader/media_player_worker.py
           python -m py_compile desktop_downloader/media_editor_engine.py
           python -m py_compile desktop_downloader/media_editor_widgets.py
           python -m py_compile desktop_downloader/launcher.py
@@ -62,6 +63,20 @@ jobs:
             throw "Tag version $tagVersion does not match APP_VERSION $appVersion"
           }
 
+      - name: Build playback worker EXE
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --console `
+            --name MediaPlaybackWorker `
+            --collect-all ffpyplayer `
+            --collect-all PIL `
+            desktop_downloader/media_player_worker.py
+
+      - name: Smoke test playback worker
+        shell: pwsh
+        run: |
+          python desktop_downloader/tests/smoke_player_worker.py dist/MediaPlaybackWorker.exe
+
       - name: Build updater EXE
         shell: pwsh
         run: |
@@ -77,10 +92,10 @@ jobs:
             --collect-all yt_dlp `
             --collect-all curl_cffi `
             --collect-all imageio_ffmpeg `
-            --collect-all ffpyplayer `
             --collect-all customtkinter `
             --collect-all PIL `
             --add-binary "dist/MediaDownloaderUpdater.exe;." `
+            --add-binary "dist/MediaPlaybackWorker.exe;." `
             desktop_downloader/launcher.py
 
       - name: Generate SHA-256 checksums and compatibility alias
