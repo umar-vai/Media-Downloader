@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import customtkinter as ctk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
 from install_mode import install_mode_name
 from version import APP_VERSION
@@ -295,7 +295,8 @@ class SettingsWindow(ctk.CTkToplevel):
 
         actions = ctk.CTkFrame(tab, fg_color=SURFACE_2, corner_radius=10)
         actions.grid(row=3, column=0, sticky="ew", padx=10, pady=(10, 5))
-        actions.grid_columnconfigure((0, 1), weight=1)
+        actions.grid_columnconfigure(0, weight=1)
+        actions.grid_columnconfigure(1, weight=1)
         ctk.CTkButton(
             actions,
             text="Check for updates now",
@@ -452,4 +453,11 @@ class SettingsWindow(ctk.CTkToplevel):
         self._on_check_updates()
 
     def _close(self) -> None:
+        if self._dirty:
+            if not messagebox.askyesno(
+                "Media Downloader Settings",
+                "Discard unsaved settings changes?",
+                parent=self,
+            ):
+                return
         self.destroy()
