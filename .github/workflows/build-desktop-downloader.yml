@@ -46,6 +46,7 @@ jobs:
           python -m py_compile desktop_downloader/media_sources.py
           python -m py_compile desktop_downloader/update_manager.py
           python -m py_compile desktop_downloader/updater.py
+          python -m py_compile desktop_downloader/version.py
           python -m unittest discover -s desktop_downloader/tests -v
           python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from yt_dlp import YoutubeDL; from yt_dlp.networking.impersonate import ImpersonateTarget; y=YoutubeDL({'quiet': True}); assert y._impersonate_target_available(ImpersonateTarget('chrome')), 'Chrome impersonation target unavailable'"
 
@@ -107,6 +108,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $appVersion = python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from version import APP_VERSION; print(APP_VERSION)"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not read APP_VERSION."
+          }
+          $appVersion = "$appVersion".Trim()
+          $versionParts = $appVersion.Split(".")
+          if ($versionParts.Count -ne 3) {
+            throw "APP_VERSION must be semantic x.y.z, got '$appVersion'."
+          }
+          foreach ($part in $versionParts) {
+            $parsed = 0
+            if (-not [int]::TryParse($part, [ref]$parsed)) {
+              throw "APP_VERSION must be semantic x.y.z, got '$appVersion'."
+            }
+          }
           $tag = "v$appVersion"
           $repo = "${{ github.repository }}"
           gh release view $tag --repo $repo *> $null
