@@ -41,7 +41,6 @@ jobs:
           python -m py_compile desktop_downloader/app.py
           python -m py_compile desktop_downloader/media_editor.py
           python -m py_compile desktop_downloader/media_player.py
-          python -m py_compile desktop_downloader/media_player_worker.py
           python -m py_compile desktop_downloader/media_editor_engine.py
           python -m py_compile desktop_downloader/media_editor_widgets.py
           python -m py_compile desktop_downloader/launcher.py
@@ -51,7 +50,6 @@ jobs:
           python -m py_compile desktop_downloader/version.py
           python -m unittest discover -s desktop_downloader/tests -v
           python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from yt_dlp import YoutubeDL; from yt_dlp.networking.impersonate import ImpersonateTarget; y=YoutubeDL({'quiet': True}); assert y._impersonate_target_available(ImpersonateTarget('chrome')), 'Chrome impersonation target unavailable'"
-          python -c "from ffpyplayer.player import MediaPlayer; print('ffpyplayer import OK')"
 
       - name: Verify release tag matches APP_VERSION
         if: startsWith(github.ref, 'refs/tags/v')
@@ -63,19 +61,25 @@ jobs:
             throw "Tag version $tagVersion does not match APP_VERSION $appVersion"
           }
 
-      - name: Build playback worker EXE
+      - name: Install bundled mpv playback engine
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onefile --console `
-            --name MediaPlaybackWorker `
-            --collect-all ffpyplayer `
-            --collect-all PIL `
-            desktop_downloader/media_player_worker.py
+          choco install mpv -y --no-progress
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $candidates = Get-ChildItem "$env:ChocolateyInstall\lib" -Recurse -File -Filter "mpv.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt 1000000 } |
+            Sort-Object Length -Descending
+          if (-not $candidates) {
+            throw "Could not locate the real mpv.exe installed by Chocolatey."
+          }
+          Copy-Item $candidates[0].FullName "dist\mpv.exe" -Force
+          Write-Host "Bundling mpv from $($candidates[0].FullName)"
+          & "dist\mpv.exe" --version
 
-      - name: Smoke test playback worker
+      - name: Smoke test bundled mpv
         shell: pwsh
         run: |
-          python desktop_downloader/tests/smoke_player_worker.py dist/MediaPlaybackWorker.exe
+          python desktop_downloader/tests/smoke_mpv.py dist/mpv.exe
 
       - name: Build updater EXE
         shell: pwsh
@@ -95,7 +99,7 @@ jobs:
             --collect-all customtkinter `
             --collect-all PIL `
             --add-binary "dist/MediaDownloaderUpdater.exe;." `
-            --add-binary "dist/MediaPlaybackWorker.exe;." `
+            --add-binary "dist/mpv.exe;." `
             desktop_downloader/launcher.py
 
       - name: Generate SHA-256 checksums and compatibility alias
