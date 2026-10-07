@@ -1088,6 +1088,17 @@ class MediaEditorWindow(ctk.CTkToplevel):
                 self.play_button.configure(state="normal")
             self._crop_changed(self.crop_var.get())
             self._sync_audio_state()
+            if self.info is not None and not self.info.has_video:
+                self.crop_menu.configure(state="disabled")
+                self.rotate_menu.configure(state="disabled")
+                self.apply_crop_button.configure(state="disabled")
+                for entry in self.custom_entries:
+                    entry.configure(state="disabled")
+            if self.info is not None and not self.info.has_audio:
+                self.mute_switch.configure(state="disabled")
+                self.volume_slider.configure(state="disabled")
+                self.fade_in_entry.configure(state="disabled")
+                self.fade_out_entry.configure(state="disabled")
 
     def toggle_playback(self) -> None:
         if self.render_busy:
