@@ -1447,6 +1447,23 @@ class DownloaderApp(ctk.CTk):
     def open_editor(self, source_path: Path | None = None) -> None:
         if self.is_busy:
             return
+
+        existing = self.editor_window
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    messagebox.showinfo(
+                        APP_NAME,
+                        "An editor window is already open. Close it before opening another file.",
+                        parent=self,
+                    )
+                    return
+            except Exception:
+                self.editor_window = None
+
         path = Path(source_path) if source_path else None
         if path is None:
             selected = filedialog.askopenfilename(
@@ -1467,9 +1484,23 @@ class DownloaderApp(ctk.CTk):
             return
         try:
             self.editor_window = MediaEditorWindow(self, path, output_dir=self.download_dir)
+            self.editor_window.bind(
+                "<Destroy>",
+                lambda event: self._editor_destroyed(event),
+                add="+",
+            )
             self.editor_window.focus()
+            LOGGER.info("Editor opened source=%s", path)
         except Exception as exc:
+            LOGGER.exception("Could not open Media Editor source=%s", path)
+            self.editor_window = None
             messagebox.showerror(APP_NAME, f"Could not open Media Editor.\n\n{exc}")
+
+    def _editor_destroyed(self, event: Any) -> None:
+        window = self.editor_window
+        if window is not None and event.widget is window:
+            self.editor_window = None
+            LOGGER.info("Editor window closed")
 
     def open_last_file(self) -> None:
         if self.last_file and self.last_file.exists():
