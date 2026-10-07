@@ -122,18 +122,20 @@ def load_settings() -> dict[str, Any]:
     return settings
 
 
-def save_settings(settings: dict[str, Any]) -> None:
+def save_settings(settings: dict[str, Any]) -> bool:
     temp_file = CONFIG_FILE.with_suffix(".json.tmp")
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         temp_file.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
         temp_file.replace(CONFIG_FILE)
+        return True
     except Exception:
         LOGGER.exception("Could not save settings")
         try:
             temp_file.unlink(missing_ok=True)
         except OSError:
             pass
+        return False
 
 
 def human_bytes(value: Any) -> str:
@@ -2049,6 +2051,13 @@ class DownloaderApp(ctk.CTk):
 
         raw_dir = str(payload.get("download_dir") or DEFAULT_DOWNLOAD_DIR).strip()
         download_dir = Path(raw_dir).expanduser() if raw_dir else DEFAULT_DOWNLOAD_DIR
+        try:
+            download_dir.mkdir(parents=True, exist_ok=True)
+            probe = download_dir / ".media_downloader_write_test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+        except Exception as exc:
+            raise RuntimeError(f"The selected download folder is not writable: {download_dir}\n\n{exc}") from exc
 
         normalized = dict(self.settings)
         normalized.update(
@@ -2066,8 +2075,9 @@ class DownloaderApp(ctk.CTk):
             }
         )
 
+        if not save_settings(normalized):
+            raise RuntimeError(f"Could not save settings to {CONFIG_FILE}.")
         self.settings = normalized
-        save_settings(self.settings)
 
         self.download_dir = download_dir
         self.download_dir_var.set(str(download_dir))
@@ -2099,6 +2109,14 @@ class DownloaderApp(ctk.CTk):
             download_dir,
             normalized["auto_analyze_links"],
         )
+
+        if (
+            self.latest_release
+            and self.auto_download_updates_var.get()
+            and not self.downloaded_update
+            and not self.update_downloading
+        ):
+            self.after(150, lambda: self._start_update_download(manual=False))
 
     def open_diagnostics(self) -> None:
         existing = self.diagnostics_window
