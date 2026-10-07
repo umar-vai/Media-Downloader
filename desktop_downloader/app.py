@@ -1366,6 +1366,10 @@ class DownloaderApp(ctk.CTk):
 
         name = safe_filename(self.name_var.get(), "media_download")
         info = self.current_info if isinstance(self.current_info, dict) else {}
+        try:
+            history_duration = max(0, int(float(info.get("duration") or 0)))
+        except (TypeError, ValueError):
+            history_duration = 0
         mode = self.mode_var.get()
         audio_format = self.audio_format_var.get()
         audio_quality = self.audio_quality_var.get()
@@ -1379,7 +1383,7 @@ class DownloaderApp(ctk.CTk):
             "history_title": str(info.get("title") or self.name_var.get() or name),
             "history_creator": str(info.get("channel") or info.get("uploader") or info.get("creator") or ""),
             "history_platform": platform,
-            "history_duration": int(info.get("duration") or 0) if str(info.get("duration") or "").replace(".", "", 1).isdigit() else 0,
+            "history_duration": history_duration,
             "history_quality": (
                 str(video_quality)
                 if mode == "Video"
