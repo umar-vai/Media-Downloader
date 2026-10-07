@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import base64
 import json
 import os
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -23,51 +23,88 @@ def _resource_path(name: str) -> Path:
     return base / name
 
 
-def _worker_command(path: Path) -> list[str]:
-    if getattr(sys, "frozen", False):
-        worker = _resource_path("MediaPlaybackWorker.exe")
-        if not worker.exists():
-            raise PlayerUnavailableError(f"Playback worker is missing: {worker}")
-        return [str(worker), str(path)]
+def _mpv_executable() -> Path:
+    override = os.environ.get("MEDIA_DOWNLOADER_MPV")
+    if override:
+        candidate = Path(override)
+        if candidate.exists():
+            return candidate
 
-    worker_py = Path(__file__).resolve().with_name("media_player_worker.py")
-    if not worker_py.exists():
-        raise PlayerUnavailableError(f"Playback worker source is missing: {worker_py}")
-    return [sys.executable, str(worker_py), str(path)]
+    bundled = _resource_path("mpv.exe")
+    if bundled.exists():
+        return bundled
+
+    local = Path(__file__).resolve().with_name("mpv.exe")
+    if local.exists():
+        return local
+
+    raise PlayerUnavailableError("Bundled mpv playback engine is missing.")
 
 
 class EmbeddedMediaPlayer:
-    """Crash-isolated playback client.
+    """Crash-isolated mpv player embedded into a Windows HWND."""
 
-    ffpyplayer runs in a child process. If the native decoder crashes,
-    the editor process stays alive and can fall back to frame preview.
-    """
-
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        window_id: int | None = None,
+        audio_only: bool = False,
+    ) -> None:
         self.path = Path(path)
+        self.window_id = int(window_id) if window_id else None
+        self.audio_only = bool(audio_only)
+
         self._lock = threading.RLock()
+        self._write_lock = threading.Lock()
         self._closed = False
         self._ready = threading.Event()
-        self._latest_frame: tuple[bytes, float | None, float | None] | None = None
         self._latest_position: float | None = None
+        self._paused = True
         self._last_error = ""
         self._last_status = ""
-        self._stderr_tail = ""
+        self._ipc = None
+
+        pipe_name = f"media_downloader_mpv_{os.getpid()}_{uuid.uuid4().hex}"
+        self._ipc_path = rf"\\.\pipe\{pipe_name}"
+
+        command = [
+            str(_mpv_executable()),
+            "--no-config",
+            "--idle=yes",
+            "--keep-open=yes",
+            "--pause=yes",
+            "--input-terminal=no",
+            "--osc=no",
+            "--osd-bar=no",
+            "--terminal=no",
+            "--msg-level=all=no",
+            f"--input-ipc-server={self._ipc_path}",
+        ]
+
+        if self.audio_only:
+            command += ["--video=no", "--vo=null"]
+        elif self.window_id is not None:
+            command += [
+                f"--wid={self.window_id}",
+                "--force-window=yes",
+                "--hwdec=auto-safe",
+                "--keepaspect=yes",
+                "--background-color=#030812",
+            ]
+        else:
+            command += ["--vo=null"]
+
         self._process = subprocess.Popen(
-            _worker_command(self.path),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             creationflags=CREATE_NO_WINDOW,
         )
-        self._reader = threading.Thread(target=self._read_loop, daemon=True)
-        self._reader.start()
-        self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
-        self._stderr_reader.start()
+
+        self._connect_thread = threading.Thread(target=self._connect_worker, daemon=True)
+        self._connect_thread.start()
 
     @property
     def available(self) -> bool:
@@ -80,25 +117,25 @@ class EmbeddedMediaPlayer:
     @property
     def last_error(self) -> str:
         with self._lock:
-            return self._last_error or self._stderr_tail
+            return self._last_error
 
-    def wait_until_ready(self, timeout: float = 3.0) -> bool:
+    def wait_until_ready(self, timeout: float = 5.0) -> bool:
         self._ready.wait(max(0.0, timeout))
         return self.ready
 
     def play(self) -> None:
-        self._send({"cmd": "play"})
+        self._command(["set_property", "pause", False])
 
     def pause(self) -> None:
         if self.available:
-            self._send({"cmd": "pause"}, tolerate_dead=True)
+            self._command(["set_property", "pause", True], tolerate_dead=True)
 
     def is_paused(self) -> bool:
         with self._lock:
-            return self._last_status != "playing"
+            return self._paused
 
     def seek(self, seconds: float) -> None:
-        self._send({"cmd": "seek", "seconds": max(0.0, float(seconds))})
+        self._command(["set_property", "time-pos", max(0.0, float(seconds))])
 
     def position(self) -> float | None:
         self._check_alive()
@@ -106,35 +143,66 @@ class EmbeddedMediaPlayer:
             return self._latest_position
 
     def set_volume(self, value: float) -> None:
-        self._send(
-            {"cmd": "volume", "value": max(0.0, min(1.0, float(value)))},
+        self._command(
+            ["set_property", "volume", max(0.0, min(200.0, float(value) * 100.0))],
             tolerate_dead=True,
         )
 
+    def set_mute(self, muted: bool) -> None:
+        self._command(["set_property", "mute", bool(muted)], tolerate_dead=True)
+
     def set_rate(self, value: float) -> bool:
-        self._send(
-            {"cmd": "rate", "value": max(0.25, min(4.0, float(value)))},
+        self._command(
+            ["set_property", "speed", max(0.25, min(4.0, float(value)))],
             tolerate_dead=True,
         )
         return True
 
-    def next_frame(self, force_refresh: bool = False) -> tuple[bytes, float | None, float | None] | None:
+    def set_video_transform(
+        self,
+        *,
+        crop: tuple[int, int, int, int] | None,
+        rotate_degrees: int,
+    ) -> None:
+        if self.audio_only:
+            return
+
+        if crop:
+            x, y, width, height = crop
+            self._command(
+                ["vf", "set", f"crop={int(width)}:{int(height)}:{int(x)}:{int(y)}"],
+                tolerate_dead=True,
+            )
+        else:
+            self._command(["vf", "clr"], tolerate_dead=True)
+
+        self._command(
+            ["set_property", "video-rotate", int(rotate_degrees) % 360],
+            tolerate_dead=True,
+        )
+
+    def next_frame(self, force_refresh: bool = False) -> None:
         del force_refresh
         self._check_alive()
-        with self._lock:
-            frame = self._latest_frame
-            self._latest_frame = None
-            return frame
+        return None
 
     def close(self) -> None:
         with self._lock:
             if self._closed:
                 return
             self._closed = True
+
         try:
-            self._send({"cmd": "close"}, tolerate_dead=True)
+            self._command(["quit"], tolerate_dead=True)
         except Exception:
             pass
+
+        try:
+            if self._ipc is not None:
+                self._ipc.close()
+        except Exception:
+            pass
+
         try:
             self._process.wait(timeout=1.5)
         except Exception:
@@ -142,11 +210,105 @@ class EmbeddedMediaPlayer:
                 self._process.terminate()
             except Exception:
                 pass
+
         try:
             if self._process.poll() is None:
                 self._process.kill()
         except Exception:
             pass
+
+    def _connect_worker(self) -> None:
+        deadline = time.monotonic() + 6.0
+        last_error = ""
+        while time.monotonic() < deadline and self.available and not self._closed:
+            try:
+                self._ipc = open(self._ipc_path, "r+b", buffering=0)
+                break
+            except OSError as exc:
+                last_error = str(exc)
+                time.sleep(0.05)
+
+        if self._ipc is None:
+            with self._lock:
+                self._last_error = last_error or "Could not connect to mpv IPC."
+            self._ready.set()
+            return
+
+        reader = threading.Thread(target=self._reader_loop, daemon=True)
+        reader.start()
+
+        try:
+            self._command(["observe_property", 1, "time-pos"])
+            self._command(["observe_property", 2, "pause"])
+            self._command(["observe_property", 3, "eof-reached"])
+            self._command(["loadfile", str(self.path), "replace"])
+        except Exception as exc:
+            with self._lock:
+                self._last_error = str(exc)
+            self._ready.set()
+
+    def _reader_loop(self) -> None:
+        buffer = b""
+        try:
+            while not self._closed and self.available and self._ipc is not None:
+                chunk = self._ipc.read(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    raw, buffer = buffer.split(b"\n", 1)
+                    if not raw.strip():
+                        continue
+                    try:
+                        message = json.loads(raw.decode("utf-8", errors="replace"))
+                    except json.JSONDecodeError:
+                        continue
+                    self._handle_message(message)
+        except Exception as exc:
+            with self._lock:
+                if not self._last_error:
+                    self._last_error = str(exc)
+        finally:
+            if not self._ready.is_set():
+                self._ready.set()
+
+    def _handle_message(self, message: dict[str, Any]) -> None:
+        event = str(message.get("event") or "")
+
+        if event == "file-loaded":
+            with self._lock:
+                self._last_status = "paused"
+            self._ready.set()
+            return
+
+        if event == "end-file":
+            reason = str(message.get("reason") or "")
+            if reason == "error":
+                with self._lock:
+                    self._last_error = "mpv could not decode the selected media."
+            return
+
+        if event == "property-change":
+            name = str(message.get("name") or "")
+            data = message.get("data")
+            if name == "time-pos":
+                try:
+                    value = float(data)
+                except (TypeError, ValueError):
+                    return
+                with self._lock:
+                    self._latest_position = max(0.0, value)
+            elif name == "pause":
+                paused = bool(data)
+                with self._lock:
+                    self._paused = paused
+                    self._last_status = "paused" if paused else "playing"
+            return
+
+        error = message.get("error")
+        if error not in (None, "success"):
+            with self._lock:
+                self._last_error = str(error)
 
     def _check_alive(self) -> None:
         if self._closed:
@@ -155,97 +317,25 @@ class EmbeddedMediaPlayer:
         if code is not None:
             detail = self.last_error.strip()
             suffix = f" {detail}" if detail else ""
-            raise PlayerUnavailableError(
-                f"Playback worker stopped unexpectedly (exit {code}).{suffix}"
-            )
+            raise PlayerUnavailableError(f"mpv playback process stopped (exit {code}).{suffix}")
 
-    def _send(self, payload: dict[str, Any], tolerate_dead: bool = False) -> None:
+    def _command(self, command: list[Any], tolerate_dead: bool = False) -> None:
         if not tolerate_dead:
             self._check_alive()
         elif self._process.poll() is not None:
             return
-        stream = self._process.stdin
+
+        stream = self._ipc
         if stream is None:
             if tolerate_dead:
                 return
-            raise PlayerUnavailableError("Playback worker command pipe is unavailable.")
+            raise PlayerUnavailableError("mpv IPC is not connected yet.")
+
+        payload = (json.dumps({"command": command}, separators=(",", ":")) + "\n").encode("utf-8")
         try:
-            stream.write(json.dumps(payload, separators=(",", ":")) + "\n")
-            stream.flush()
+            with self._write_lock:
+                stream.write(payload)
         except (BrokenPipeError, OSError, ValueError) as exc:
             if tolerate_dead:
                 return
-            raise PlayerUnavailableError(f"Playback worker command failed: {exc}") from exc
-
-    def _read_loop(self) -> None:
-        stream = self._process.stdout
-        if stream is None:
-            return
-        try:
-            for raw in stream:
-                line = raw.strip()
-                if not line:
-                    continue
-                try:
-                    message = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                msg_type = str(message.get("type") or "")
-                if msg_type == "ready":
-                    with self._lock:
-                        self._last_status = "paused"
-                    self._ready.set()
-                elif msg_type == "status":
-                    with self._lock:
-                        self._last_status = str(message.get("state") or "")
-                elif msg_type == "position":
-                    try:
-                        value = float(message.get("pts"))
-                    except (TypeError, ValueError):
-                        continue
-                    with self._lock:
-                        self._latest_position = max(0.0, value)
-                elif msg_type == "frame":
-                    encoded = message.get("jpeg")
-                    if not isinstance(encoded, str):
-                        continue
-                    try:
-                        data = base64.b64decode(encoded, validate=True)
-                    except Exception:
-                        continue
-                    pts = message.get("pts")
-                    delay = message.get("delay")
-                    try:
-                        pts_value = float(pts) if pts is not None else None
-                    except (TypeError, ValueError):
-                        pts_value = None
-                    try:
-                        delay_value = float(delay) if delay is not None else None
-                    except (TypeError, ValueError):
-                        delay_value = None
-                    with self._lock:
-                        self._latest_frame = (data, pts_value, delay_value)
-                        if pts_value is not None:
-                            self._latest_position = max(0.0, pts_value)
-                elif msg_type == "error":
-                    with self._lock:
-                        self._last_error = str(message.get("message") or "Playback worker error")
-        finally:
-            if not self._ready.is_set():
-                self._ready.set()
-
-    def _read_stderr(self) -> None:
-        stream = self._process.stderr
-        if stream is None:
-            return
-        tail: list[str] = []
-        try:
-            for raw in stream:
-                line = raw.strip()
-                if line:
-                    tail.append(line)
-                    tail = tail[-12:]
-                    with self._lock:
-                        self._stderr_tail = " | ".join(tail)[-1200:]
-        except Exception:
-            pass
+            raise PlayerUnavailableError(f"mpv IPC command failed: {exc}") from exc
