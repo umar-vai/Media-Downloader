@@ -1365,12 +1365,27 @@ class DownloaderApp(ctk.CTk):
             return
 
         name = safe_filename(self.name_var.get(), "media_download")
+        info = self.current_info if isinstance(self.current_info, dict) else {}
+        mode = self.mode_var.get()
+        audio_format = self.audio_format_var.get()
+        audio_quality = self.audio_quality_var.get()
+        video_quality = self.video_quality_var.get()
         request_settings = {
-            "mode": self.mode_var.get(),
-            "video_quality": self.video_quality_var.get(),
-            "audio_format": self.audio_format_var.get().lower(),
-            "audio_quality": self.audio_quality_var.get(),
+            "mode": mode,
+            "video_quality": video_quality,
+            "audio_format": audio_format.lower(),
+            "audio_quality": audio_quality,
             "edit_after_download": bool(edit_after_download),
+            "history_title": str(info.get("title") or self.name_var.get() or name),
+            "history_creator": str(info.get("channel") or info.get("uploader") or info.get("creator") or ""),
+            "history_platform": platform,
+            "history_duration": int(info.get("duration") or 0) if str(info.get("duration") or "").replace(".", "", 1).isdigit() else 0,
+            "history_quality": (
+                str(video_quality)
+                if mode == "Video"
+                else f"{audio_format.upper()} {audio_quality} kbps"
+            ),
+            "source_url": url,
         }
         job_id, cancel_event = self._begin_job(TaskState.DOWNLOADING)
         self.edit_after_download = bool(edit_after_download)
@@ -1507,7 +1522,20 @@ class DownloaderApp(ctk.CTk):
                 raise RuntimeError("Download finished, but the final file could not be located.")
 
             final_path = max(candidates, key=lambda path: path.stat().st_mtime)
-            self._put_job_event("done", job_id, str(final_path))
+            self._put_job_event(
+                "done",
+                job_id,
+                {
+                    "path": str(final_path),
+                    "title": request_settings.get("history_title") or name,
+                    "source_url": request_settings.get("source_url") or url,
+                    "platform": request_settings.get("history_platform") or "",
+                    "creator": request_settings.get("history_creator") or "",
+                    "mode": request_settings.get("mode") or "Video",
+                    "quality": request_settings.get("history_quality") or "",
+                    "duration_seconds": request_settings.get("history_duration") or 0,
+                },
+            )
         except Exception as exc:
             if cancel_event.is_set():
                 self._put_job_event("cancelled", job_id, "Download cancelled.")
@@ -1601,16 +1629,41 @@ class DownloaderApp(ctk.CTk):
                     self._set_status(str(data or ""), "working")
 
                 elif kind == "done":
-                    self.last_file = Path(str(data))
+                    detail = dict(data) if isinstance(data, dict) else {"path": str(data)}
+                    completed_path = Path(str(detail.get("path") or ""))
+                    self.last_file = completed_path
                     self.progress.set(1)
                     self.progress_label.configure(text="100%")
-                    self.speed_label.configure(text=self.last_file.name)
+                    self.speed_label.configure(text=completed_path.name)
                     self.task_state = TaskState.DOWNLOADED
                     self._set_status("Download completed successfully", "success")
-                    self.open_file_button.configure(state="normal")
+
+                    try:
+                        entry = make_history_entry(
+                            completed_path,
+                            title=str(detail.get("title") or completed_path.stem),
+                            source_url=str(detail.get("source_url") or ""),
+                            platform=str(detail.get("platform") or ""),
+                            creator=str(detail.get("creator") or ""),
+                            mode=str(detail.get("mode") or "Video"),
+                            quality=str(detail.get("quality") or ""),
+                            duration_seconds=int(detail.get("duration_seconds") or 0),
+                        )
+                        self.history_store.add(entry)
+                        LOGGER.info("Download history recorded file=%s", completed_path)
+                    except Exception:
+                        LOGGER.exception("Could not save download history file=%s", completed_path)
+
+                    self._sync_recent_file()
+                    if self.history_window is not None:
+                        try:
+                            if self.history_window.winfo_exists():
+                                self.history_window.refresh()
+                        except Exception:
+                            self.history_window = None
+
                     should_edit = self.edit_after_download
                     self.edit_after_download = False
-                    completed_path = self.last_file
                     self._finish_job(job_id)
                     if should_edit:
                         self.after(200, lambda path=completed_path: self.open_editor(path))
