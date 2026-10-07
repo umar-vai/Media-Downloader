@@ -13,6 +13,7 @@ from typing import Any
 import yt_dlp
 from imageio_ffmpeg import get_ffmpeg_exe
 
+from install_mode import install_mode_name
 from media_player import _mpv_executable
 from version import APP_VERSION
 
@@ -131,6 +132,7 @@ def run_self_test() -> dict[str, Any]:
         "ok": all_ok,
         "version": APP_VERSION,
         "frozen": bool(getattr(sys, "frozen", False)),
+        "install_mode": install_mode_name(),
         "python": sys.version.split()[0],
         "checks": [asdict(check) for check in checks],
     }
