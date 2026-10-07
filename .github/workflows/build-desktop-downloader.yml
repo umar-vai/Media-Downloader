@@ -112,8 +112,15 @@ jobs:
             throw "Could not read APP_VERSION."
           }
           $appVersion = "$appVersion".Trim()
-          if ($appVersion -notmatch '^\\d+\\.\\d+\\.\\d+$') {
+          $versionParts = $appVersion.Split(".")
+          if ($versionParts.Count -ne 3) {
             throw "APP_VERSION must be semantic x.y.z, got '$appVersion'."
+          }
+          foreach ($part in $versionParts) {
+            $parsed = 0
+            if (-not [int]::TryParse($part, [ref]$parsed)) {
+              throw "APP_VERSION must be semantic x.y.z, got '$appVersion'."
+            }
           }
           $tag = "v$appVersion"
           $repo = "${{ github.repository }}"
