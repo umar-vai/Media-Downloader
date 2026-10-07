@@ -1482,7 +1482,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
 
     def _thumbnail_worker(self, generation: int, info: MediaInfo) -> None:
         images: list[Image.Image] = []
-        count = 9
+        times: list[float] = []
+        count = 12
         for index in range(count):
             if generation != self.thumbnail_generation:
                 return
@@ -1494,10 +1495,11 @@ class MediaEditorWindow(ctk.CTkToplevel):
                 ]
                 data = extract_preview_frame(self.source_path, position, filters, timeout=7)
                 images.append(Image.open(io.BytesIO(data)).convert("RGB"))
+                times.append(position)
             except Exception:
                 continue
         if generation == self.thumbnail_generation and images:
-            self._post_ui(self.timeline.set_thumbnails, images)
+            self._post_ui(self.timeline.set_thumbnails, images, times)
 
     def _start_waveform_generation(self) -> None:
         threading.Thread(target=self._waveform_worker, daemon=True).start()
