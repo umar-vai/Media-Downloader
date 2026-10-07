@@ -436,5 +436,5 @@ def build_preview_clip_command(
     )
     # Preview generation is not parsed for progress, so remove progress output.
     progress_index = command.index("-progress")
-    command = command[:progress_index] + command[progress_index + 4 :]
+    command = command[:progress_index] + [str(output)]
     return command
