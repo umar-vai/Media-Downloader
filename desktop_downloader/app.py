@@ -28,6 +28,7 @@ from diagnostics_window import DiagnosticsWindow
 from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
 from media_sources import browser_headers, detect_platform, extraction_attempts, is_supported_media_url, platform_name, request_options, video_format_selector
+from settings_window import SettingsWindow
 from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_installer_release, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
 
@@ -95,31 +96,91 @@ def default_settings() -> dict[str, Any]:
         "download_dir": str(DEFAULT_DOWNLOAD_DIR),
         "auto_check_updates": True,
         "auto_download_updates": False,
+        "auto_analyze_links": True,
+        "open_editor_after_download": False,
+        "confirm_before_exit": True,
+        "default_mode": "Video",
+        "video_quality": "720p",
+        "audio_format": "MP3",
+        "audio_quality": "192",
         "snooze_version": "",
         "snooze_until": 0,
     }
 
 
-def load_settings() -> dict[str, Any]:
+def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
     settings = default_settings()
-    source = CONFIG_FILE if CONFIG_FILE.exists() else LEGACY_CONFIG_FILE
+    if isinstance(payload, dict):
+        settings.update(payload)
+
+    mode = str(settings.get("default_mode") or "Video")
+    settings["default_mode"] = mode if mode in {"Video", "Audio"} else "Video"
+
+    video_quality = str(settings.get("video_quality") or "720p")
+    settings["video_quality"] = (
+        video_quality
+        if video_quality in {"Best available", "1080p", "720p", "480p", "360p"}
+        else "720p"
+    )
+
+    audio_format = str(settings.get("audio_format") or "MP3").upper()
+    settings["audio_format"] = audio_format if audio_format in {"MP3", "M4A"} else "MP3"
+
+    audio_quality = str(settings.get("audio_quality") or "192")
+    settings["audio_quality"] = audio_quality if audio_quality in {"320", "256", "192", "128"} else "192"
+
+    download_dir = str(settings.get("download_dir") or DEFAULT_DOWNLOAD_DIR).strip()
+    settings["download_dir"] = download_dir or str(DEFAULT_DOWNLOAD_DIR)
+
+    for key, fallback in (
+        ("auto_check_updates", True),
+        ("auto_download_updates", False),
+        ("auto_analyze_links", True),
+        ("open_editor_after_download", False),
+        ("confirm_before_exit", True),
+    ):
+        value = settings.get(key, fallback)
+        settings[key] = value if isinstance(value, bool) else fallback
+
+    settings["snooze_version"] = str(settings.get("snooze_version") or "")
     try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
-        if isinstance(payload, dict):
-            settings.update(payload)
-            if source == LEGACY_CONFIG_FILE and not CONFIG_FILE.exists():
-                save_settings(settings)
-    except Exception:
-        pass
+        settings["snooze_until"] = float(settings.get("snooze_until") or 0)
+    except (TypeError, ValueError):
+        settings["snooze_until"] = 0
+
     return settings
 
 
-def save_settings(settings: dict[str, Any]) -> None:
+def load_settings() -> dict[str, Any]:
+    source = CONFIG_FILE if CONFIG_FILE.exists() else LEGACY_CONFIG_FILE
+    payload: dict[str, Any] | None = None
+    try:
+        raw = json.loads(source.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            payload = raw
+    except Exception:
+        payload = None
+
+    settings = normalize_settings(payload)
+    if source == LEGACY_CONFIG_FILE and source.exists() and not CONFIG_FILE.exists():
+        save_settings(settings)
+    return settings
+
+
+def save_settings(settings: dict[str, Any]) -> bool:
+    temp_file = CONFIG_FILE.with_suffix(".json.tmp")
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp_file.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp_file.replace(CONFIG_FILE)
+        return True
     except Exception:
-        pass
+        LOGGER.exception("Could not save settings")
+        try:
+            temp_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
 
 
 def human_bytes(value: Any) -> str:
@@ -176,6 +237,7 @@ class DownloaderApp(ctk.CTk):
         self.edit_after_download = False
         self.editor_window: MediaEditorWindow | None = None
         self.diagnostics_window: DiagnosticsWindow | None = None
+        self.settings_window: SettingsWindow | None = None
         self.task_state = TaskState.IDLE
         self._job_counter = 0
         self.active_job_id: int | None = None
@@ -191,14 +253,14 @@ class DownloaderApp(ctk.CTk):
 
         self.url_var = ctk.StringVar()
         self.name_var = ctk.StringVar()
-        self.open_editor_after_var = ctk.BooleanVar(value=False)
+        self.open_editor_after_var = ctk.BooleanVar(value=bool(self.settings.get("open_editor_after_download", False)))
         self.url_auto_after_id: str | None = None
         self.last_analyzed_url = ""
         self.update_expanded = False
-        self.mode_var = ctk.StringVar(value="Video")
-        self.video_quality_var = ctk.StringVar(value="720p")
-        self.audio_format_var = ctk.StringVar(value="MP3")
-        self.audio_quality_var = ctk.StringVar(value="192")
+        self.mode_var = ctk.StringVar(value=str(self.settings.get("default_mode") or "Video"))
+        self.video_quality_var = ctk.StringVar(value=str(self.settings.get("video_quality") or "720p"))
+        self.audio_format_var = ctk.StringVar(value=str(self.settings.get("audio_format") or "MP3"))
+        self.audio_quality_var = ctk.StringVar(value=str(self.settings.get("audio_quality") or "192"))
         self.download_dir_var = ctk.StringVar(value=str(self.download_dir))
         self.auto_check_updates_var = ctk.BooleanVar(value=bool(self.settings.get("auto_check_updates", True)))
         self.auto_download_updates_var = ctk.BooleanVar(value=bool(self.settings.get("auto_download_updates", False)))
@@ -214,7 +276,8 @@ class DownloaderApp(ctk.CTk):
     def _close_app(self) -> None:
         active = self.is_busy or self.update_downloading
         if active:
-            if not messagebox.askyesno(
+            should_confirm = bool(self.settings.get("confirm_before_exit", True))
+            if should_confirm and not messagebox.askyesno(
                 APP_NAME,
                 "A task is still running. Cancel it and close Media Downloader?",
                 parent=self,
@@ -258,7 +321,7 @@ class DownloaderApp(ctk.CTk):
         self._build_update_card()
         self._build_footer()
         self.url_entry.focus_set()
-        self._sync_mode("Video")
+        self._sync_mode(self.mode_var.get())
 
     def _build_topbar(self) -> None:
         top = ctk.CTkFrame(self, height=62, corner_radius=0, fg_color=SURFACE, border_width=0)
@@ -296,6 +359,21 @@ class DownloaderApp(ctk.CTk):
         self.top_update_button.grid(row=0, column=2, padx=(12, 0))
         self.top_update_button.grid_remove()
 
+        ctk.CTkButton(
+            top,
+            text="Settings",
+            width=88,
+            height=30,
+            corner_radius=9,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 9),
+            command=self.open_settings,
+        ).grid(row=0, column=3, padx=(12, 0))
+
         ctk.CTkLabel(
             top,
             text=f"DESKTOP  •  v{APP_VERSION}",
@@ -304,7 +382,7 @@ class DownloaderApp(ctk.CTk):
             fg_color=SURFACE_2,
             text_color=CYAN,
             font=("Segoe UI Semibold", 10),
-        ).grid(row=0, column=3, padx=(12, 24))
+        ).grid(row=0, column=4, padx=(12, 24))
 
     def _build_hero(self) -> None:
         hero = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -769,11 +847,11 @@ class DownloaderApp(ctk.CTk):
         card = self.update_card
         card.grid(row=5, column=0, sticky="ew", pady=(0, 14))
         card.grid_columnconfigure(0, weight=1)
-        self._section_title(card, "03 / Updates", "Updates & preferences")
+        self._section_title(card, "03 / Updates", "Update status")
 
         self.update_toggle_button = ctk.CTkButton(
             card,
-            text="Show settings",
+            text="Show details",
             width=108,
             height=32,
             corner_radius=9,
@@ -849,31 +927,28 @@ class DownloaderApp(ctk.CTk):
         self.update_progress.grid(row=3, column=0, sticky="ew", pady=(10, 6))
         self.update_progress.set(0)
 
-        preferences = ctk.CTkFrame(body, fg_color="transparent")
-        preferences.grid(row=4, column=0, sticky="ew", pady=(7, 0))
-        preferences.grid_columnconfigure(2, weight=1)
-        self.auto_check_switch = ctk.CTkSwitch(
-            preferences,
-            text="Automatically check for updates",
-            variable=self.auto_check_updates_var,
-            command=self._save_update_preferences,
+        preferences_hint = ctk.CTkFrame(body, fg_color="transparent")
+        preferences_hint.grid(row=4, column=0, sticky="ew", pady=(7, 0))
+        preferences_hint.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            preferences_hint,
+            text="Automatic update preferences are managed in Settings.",
             text_color=MUTED,
-            progress_color=PURPLE,
-            button_color=TEXT,
-            button_hover_color=CYAN,
-        )
-        self.auto_check_switch.grid(row=0, column=0, sticky="w")
-        self.auto_download_switch = ctk.CTkSwitch(
-            preferences,
-            text="Automatically download updates",
-            variable=self.auto_download_updates_var,
-            command=self._save_update_preferences,
-            text_color=MUTED,
-            progress_color=PURPLE,
-            button_color=TEXT,
-            button_hover_color=CYAN,
-        )
-        self.auto_download_switch.grid(row=0, column=1, sticky="w", padx=(22, 0))
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            preferences_hint,
+            text="Open Settings",
+            width=100,
+            height=30,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            command=self.open_settings,
+        ).grid(row=0, column=1, sticky="e")
 
         buttons = ctk.CTkFrame(body, fg_color="transparent")
         buttons.grid(row=5, column=0, sticky="ew", pady=(12, 0))
@@ -946,10 +1021,10 @@ class DownloaderApp(ctk.CTk):
         self.update_expanded = not self.update_expanded
         if self.update_expanded:
             self.update_body.grid()
-            self.update_toggle_button.configure(text="Hide settings")
+            self.update_toggle_button.configure(text="Hide details")
         else:
             self.update_body.grid_remove()
-            self.update_toggle_button.configure(text="Show settings")
+            self.update_toggle_button.configure(text="Show details")
 
     def _build_footer(self) -> None:
         footer = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -1051,7 +1126,11 @@ class DownloaderApp(ctk.CTk):
             )
             self._apply_thumbnail(None)
 
-        if detect_platform(url) and url != self.last_analyzed_url:
+        if (
+            bool(self.settings.get("auto_analyze_links", True))
+            and detect_platform(url)
+            and url != self.last_analyzed_url
+        ):
             self.url_auto_after_id = self.after(650, self._auto_analyze_now)
 
     def _auto_analyze_now(self) -> None:
@@ -1651,7 +1730,7 @@ class DownloaderApp(ctk.CTk):
     def clear_form(self) -> None:
         self._cancel_auto_analyze()
         self.last_analyzed_url = ""
-        self.open_editor_after_var.set(False)
+        self.open_editor_after_var.set(bool(self.settings.get("open_editor_after_download", False)))
         self.task_state = TaskState.IDLE
         self.active_job_id = None
         self.active_job_cancel = None
@@ -1957,6 +2036,106 @@ class DownloaderApp(ctk.CTk):
         save_settings(self.settings)
         self.top_update_button.grid_remove()
         self.update_detail_label.configure(text="Update reminder snoozed for 24 hours.")
+
+    def open_settings(self) -> None:
+        existing = self.settings_window
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                self.settings_window = None
+
+        try:
+            self.settings_window = SettingsWindow(
+                self,
+                self.settings,
+                on_save=self._apply_settings,
+                on_check_updates=lambda: self.check_for_updates(manual=True),
+                on_open_diagnostics=self.open_diagnostics,
+                on_open_log=self.open_app_log,
+                on_open_release=self.open_release_page,
+            )
+            self.settings_window.bind(
+                "<Destroy>",
+                lambda event: self._settings_destroyed(event),
+                add="+",
+            )
+            self.settings_window.focus()
+            LOGGER.info("Settings window opened")
+        except Exception as exc:
+            LOGGER.exception("Could not open settings window")
+            self.settings_window = None
+            messagebox.showerror(APP_NAME, f"Could not open Settings.\n\n{exc}")
+
+    def _settings_destroyed(self, event: Any) -> None:
+        window = self.settings_window
+        if window is not None and event.widget is window:
+            self.settings_window = None
+            LOGGER.info("Settings window closed")
+
+    def _apply_settings(self, payload: dict[str, Any]) -> None:
+        candidate = dict(self.settings)
+        candidate.update(payload)
+        normalized = normalize_settings(candidate)
+
+        download_dir = Path(str(normalized["download_dir"])).expanduser()
+        if download_dir != self.download_dir:
+            try:
+                download_dir.mkdir(parents=True, exist_ok=True)
+                probe = download_dir / ".media_downloader_write_test"
+                probe.write_text("ok", encoding="utf-8")
+                probe.unlink(missing_ok=True)
+            except Exception as exc:
+                raise RuntimeError(f"The selected download folder is not writable: {download_dir}\n\n{exc}") from exc
+
+        normalized["download_dir"] = str(download_dir)
+        if not save_settings(normalized):
+            raise RuntimeError(f"Could not save settings to {CONFIG_FILE}.")
+        self.settings = normalized
+
+        self.download_dir = download_dir
+        self.download_dir_var.set(str(download_dir))
+        self.mode_var.set(str(normalized["default_mode"]))
+        self.video_quality_var.set(str(normalized["video_quality"]))
+        self.audio_format_var.set(str(normalized["audio_format"]))
+        self.audio_quality_var.set(str(normalized["audio_quality"]))
+        self.open_editor_after_var.set(bool(normalized["open_editor_after_download"]))
+        self.auto_check_updates_var.set(bool(normalized["auto_check_updates"]))
+        self.auto_download_updates_var.set(bool(normalized["auto_download_updates"]))
+
+        self.save_location_label.configure(text=f"SAVE LOCATION  •  {self.download_dir}")
+        self._sync_mode(str(normalized["default_mode"]))
+
+        if not self.latest_release:
+            self.update_detail_label.configure(
+                text=(
+                    "Automatic update checks are enabled."
+                    if self.auto_check_updates_var.get()
+                    else "Automatic update checks are disabled."
+                )
+            )
+
+        LOGGER.info(
+            "Settings applied mode=%s video_quality=%s audio_format=%s download_dir=%s auto_analyze=%s",
+            normalized["default_mode"],
+            normalized["video_quality"],
+            normalized["audio_format"],
+            download_dir,
+            normalized["auto_analyze_links"],
+        )
+
+        if (
+            self.latest_release
+            and self.auto_download_updates_var.get()
+            and not self.downloaded_update
+            and not self.update_downloading
+        ):
+            self.after(150, lambda: self._start_update_download(manual=False))
+
 
     def open_diagnostics(self) -> None:
         existing = self.diagnostics_window
