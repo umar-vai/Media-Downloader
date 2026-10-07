@@ -171,6 +171,69 @@ def install_update(
         return 4
 
 
+def install_with_setup(
+    target: Path,
+    source: Path,
+    pid: int,
+    version: str,
+    result_file: Path,
+    log_file: Path,
+) -> int:
+    append_log(log_file, f"Installer updater started for version {version}. Target={target}")
+
+    if not source.exists():
+        message = "Downloaded installer file is missing."
+        append_log(log_file, message)
+        write_result(result_file, "failed", version, message)
+        return 5
+
+    if not wait_for_process_exit(pid, timeout_seconds=45):
+        message = "The application did not close in time."
+        append_log(log_file, message)
+        write_result(result_file, "failed", version, message)
+        return 6
+
+    command = [
+        str(source),
+        "/VERYSILENT",
+        "/SUPPRESSMSGBOXES",
+        "/NORESTART",
+        "/CLOSEAPPLICATIONS",
+    ]
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
+    try:
+        append_log(log_file, f"Launching installer: {' '.join(command)}")
+        result = subprocess.run(
+            command,
+            cwd=str(source.parent),
+            timeout=600,
+            check=False,
+            creationflags=creationflags,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Installer exited with code {result.returncode}.")
+
+        if not target.exists():
+            raise RuntimeError("Installer completed, but the application executable is missing.")
+
+        source.unlink(missing_ok=True)
+        write_result(result_file, "success", version, "Installer update completed successfully.")
+        append_log(log_file, f"Installer update {version} completed successfully.")
+        launch_target(target)
+        return 0
+    except Exception as exc:
+        message = str(exc) or exc.__class__.__name__
+        append_log(log_file, f"Installer update failed: {message}")
+        write_result(result_file, "failed", version, message)
+        try:
+            if target.exists():
+                launch_target(target)
+        except Exception as relaunch_exc:
+            append_log(log_file, f"Could not relaunch app after installer failure: {relaunch_exc}")
+        return 7
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Team Fahad Downloader updater")
     parser.add_argument("--target", required=True)
@@ -179,16 +242,20 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--result-file", required=True)
     parser.add_argument("--log-file", required=True)
+    parser.add_argument("--installer", action="store_true")
     args = parser.parse_args()
 
-    return install_update(
-        target=Path(args.target).resolve(),
-        source=Path(args.source).resolve(),
-        pid=args.pid,
-        version=args.version,
-        result_file=Path(args.result_file).resolve(),
-        log_file=Path(args.log_file).resolve(),
-    )
+    kwargs = {
+        "target": Path(args.target).resolve(),
+        "source": Path(args.source).resolve(),
+        "pid": args.pid,
+        "version": args.version,
+        "result_file": Path(args.result_file).resolve(),
+        "log_file": Path(args.log_file).resolve(),
+    }
+    if args.installer:
+        return install_with_setup(**kwargs)
+    return install_update(**kwargs)
 
 
 if __name__ == "__main__":

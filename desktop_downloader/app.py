@@ -24,9 +24,10 @@ from imageio_ffmpeg import get_ffmpeg_exe
 from tkinter import filedialog, messagebox
 
 from app_logging import get_logger, log_path
+from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
 from media_sources import browser_headers, detect_platform, extraction_attempts, is_supported_media_url, platform_name, request_options, video_format_selector
-from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_release, fetch_latest_release, is_newer_version
+from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_installer_release, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
 
 APP_NAME = "Media Downloader"
@@ -1813,7 +1814,10 @@ class DownloaderApp(ctk.CTk):
         release = payload["release"]
         self.latest_release = release
         self.update_progress.set(1)
-        self.update_detail_label.configure(text="Update downloaded and verified. Restart to install it.")
+        if is_installed_mode():
+            self.update_detail_label.configure(text="Installer update downloaded and verified. Restart to install it.")
+        else:
+            self.update_detail_label.configure(text="Portable update downloaded and verified. Restart to install it.")
         self.update_action_button.configure(text="Restart & Update", state="normal")
         self.top_update_button.configure(text="RESTART & UPDATE")
         self.top_update_button.grid()
@@ -1866,7 +1870,10 @@ class DownloaderApp(ctk.CTk):
 
         try:
             version_dir = UPDATE_DIR / release.version
-            path = download_release(release, version_dir, progress_callback=progress)
+            if is_installed_mode():
+                path = download_installer_release(release, version_dir, progress_callback=progress)
+            else:
+                path = download_release(release, version_dir, progress_callback=progress)
             if cancel_event.is_set():
                 try:
                     Path(path).unlink(missing_ok=True)
@@ -1925,9 +1932,12 @@ class DownloaderApp(ctk.CTk):
                 "--log-file",
                 str(UPDATE_LOG_FILE.resolve()),
             ]
+            if is_installed_mode():
+                command.append("--installer")
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             subprocess.Popen(command, close_fds=True, creationflags=creationflags)
-            append_update_log(f"Updater launched for version {self.latest_release.version}.")
+            mode = "installer" if is_installed_mode() else "portable"
+            append_update_log(f"Updater launched for version {self.latest_release.version} in {mode} mode.")
             self.update_detail_label.configure(text="Restarting to complete the update…")
             self.after(250, self.destroy)
         except Exception as exc:
@@ -1961,11 +1971,15 @@ class DownloaderApp(ctk.CTk):
 
     def open_update_asset_in_browser(self) -> None:
         release = self.latest_release
-        if release and release.asset_url:
-            append_update_log(f"Opening browser download for version {release.version}.")
-            webbrowser.open(release.asset_url)
-        else:
-            self.open_release_page()
+        if release:
+            url = release.installer_url if is_installed_mode() and release.installer_url else release.asset_url
+            if url:
+                append_update_log(
+                    f"Opening browser download for version {release.version} ({'installer' if is_installed_mode() else 'portable'} mode)."
+                )
+                webbrowser.open(url)
+                return
+        self.open_release_page()
 
     def open_release_page(self) -> None:
         if self.latest_release and self.latest_release.html_url:
