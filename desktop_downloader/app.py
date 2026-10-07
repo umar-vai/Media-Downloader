@@ -223,7 +223,8 @@ class DownloaderApp(ctk.CTk):
     def _close_app(self) -> None:
         active = self.is_busy or self.update_downloading
         if active:
-            if not messagebox.askyesno(
+            should_confirm = bool(self.settings.get("confirm_before_exit", True))
+            if should_confirm and not messagebox.askyesno(
                 APP_NAME,
                 "A task is still running. Cancel it and close Media Downloader?",
                 parent=self,
@@ -305,6 +306,21 @@ class DownloaderApp(ctk.CTk):
         self.top_update_button.grid(row=0, column=2, padx=(12, 0))
         self.top_update_button.grid_remove()
 
+        ctk.CTkButton(
+            top,
+            text="Settings",
+            width=88,
+            height=30,
+            corner_radius=9,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 9),
+            command=self.open_settings,
+        ).grid(row=0, column=3, padx=(12, 0))
+
         ctk.CTkLabel(
             top,
             text=f"DESKTOP  •  v{APP_VERSION}",
@@ -313,7 +329,7 @@ class DownloaderApp(ctk.CTk):
             fg_color=SURFACE_2,
             text_color=CYAN,
             font=("Segoe UI Semibold", 10),
-        ).grid(row=0, column=3, padx=(12, 24))
+        ).grid(row=0, column=4, padx=(12, 24))
 
     def _build_hero(self) -> None:
         hero = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -1060,7 +1076,11 @@ class DownloaderApp(ctk.CTk):
             )
             self._apply_thumbnail(None)
 
-        if detect_platform(url) and url != self.last_analyzed_url:
+        if (
+            bool(self.settings.get("auto_analyze_links", True))
+            and detect_platform(url)
+            and url != self.last_analyzed_url
+        ):
             self.url_auto_after_id = self.after(650, self._auto_analyze_now)
 
     def _auto_analyze_now(self) -> None:
