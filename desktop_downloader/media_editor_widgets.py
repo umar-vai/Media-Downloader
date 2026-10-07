@@ -157,6 +157,7 @@ class TimelineCanvas(tk.Canvas):
         strip_top = 10
         strip_bottom = 74
         ruler_y = 94
+        visible_span = max(0.001, self.view_end - self.view_start)
 
         self.create_rectangle(left, strip_top, right, strip_bottom, fill=SURFACE_2, outline=BORDER)
 
@@ -165,80 +166,117 @@ class TimelineCanvas(tk.Canvas):
         if self.waveform_pil is not None:
             available = max(1, int(right - left))
             tile_h = strip_bottom - strip_top
-            waveform = self.waveform_pil.copy().resize((available, tile_h))
+            source = self.waveform_pil
+            source_w, source_h = source.size
+            crop_left = int((self.view_start / self.duration) * source_w)
+            crop_right = int((self.view_end / self.duration) * source_w)
+            crop_left = max(0, min(crop_left, source_w - 1))
+            crop_right = max(crop_left + 1, min(crop_right, source_w))
+            waveform = source.crop((crop_left, 0, crop_right, source_h)).resize((available, tile_h))
             self.waveform_ref = ImageTk.PhotoImage(waveform)
             self.create_image(left, strip_top, anchor="nw", image=self.waveform_ref)
         elif self.thumbnail_pils:
-            count = len(self.thumbnail_pils)
-            available = max(1, right - left)
-            tile_w = max(20, int(available / count))
             tile_h = strip_bottom - strip_top
-            for index, source in enumerate(self.thumbnail_pils):
-                image = source.copy()
-                image.thumbnail((tile_w, tile_h))
+            samples = list(zip(self.thumbnail_times, self.thumbnail_pils))
+            if not samples:
+                samples = [
+                    (
+                        0.0 if len(self.thumbnail_pils) == 1 else self.duration * index / (len(self.thumbnail_pils) - 1),
+                        image,
+                    )
+                    for index, image in enumerate(self.thumbnail_pils)
+                ]
+            for index, (sample_time, source) in enumerate(samples):
+                previous_time = samples[index - 1][0] if index > 0 else 0.0
+                next_time = samples[index + 1][0] if index + 1 < len(samples) else self.duration
+                interval_start = 0.0 if index == 0 else (previous_time + sample_time) / 2
+                interval_end = self.duration if index == len(samples) - 1 else (sample_time + next_time) / 2
+                visible_start = max(interval_start, self.view_start)
+                visible_end = min(interval_end, self.view_end)
+                if visible_end <= visible_start:
+                    continue
+                x1 = self._time_to_x(visible_start)
+                x2 = self._time_to_x(visible_end)
+                tile_w = max(1, int(x2 - x1) + 1)
+                image = source.copy().resize((tile_w, tile_h))
                 canvas_image = ImageTk.PhotoImage(image)
                 self.thumbnail_refs.append(canvas_image)
-                x = left + index * tile_w
-                self.create_image(x, strip_top, anchor="nw", image=canvas_image)
+                self.create_image(x1, strip_top, anchor="nw", image=canvas_image)
 
-        start_x = self._time_to_x(self.start)
-        end_x = self._time_to_x(self.end)
-        play_x = self._time_to_x(self.playhead)
+        visible_selection_start = max(self.start, self.view_start)
+        visible_selection_end = min(self.end, self.view_end)
+        if visible_selection_end > visible_selection_start:
+            start_x = self._time_to_x(visible_selection_start)
+            end_x = self._time_to_x(visible_selection_end)
+            if self.start > self.view_start:
+                self.create_rectangle(left, strip_top, start_x, strip_bottom, fill="#020712", stipple="gray50", outline="")
+            if self.end < self.view_end:
+                self.create_rectangle(end_x, strip_top, right, strip_bottom, fill="#020712", stipple="gray50", outline="")
+            self.create_rectangle(start_x, strip_top, end_x, strip_bottom, outline=CYAN, width=2)
+        else:
+            self.create_rectangle(left, strip_top, right, strip_bottom, fill="#020712", stipple="gray50", outline="")
+            start_x = self._time_to_x(self.start)
+            end_x = self._time_to_x(self.end)
 
-        self.create_rectangle(left, strip_top, start_x, strip_bottom, fill="#020712", stipple="gray50", outline="")
-        self.create_rectangle(end_x, strip_top, right, strip_bottom, fill="#020712", stipple="gray50", outline="")
-        self.create_rectangle(start_x, strip_top, end_x, strip_bottom, outline=CYAN, width=2)
+        if self.view_start <= self.start <= self.view_end:
+            start_x = self._time_to_x(self.start)
+            self.create_line(start_x, strip_top - 2, start_x, strip_bottom + 9, fill=PURPLE, width=4)
+            self.create_polygon(
+                start_x - 7,
+                strip_top - 2,
+                start_x + 7,
+                strip_top - 2,
+                start_x,
+                strip_top + 8,
+                fill=PURPLE,
+                outline=PURPLE,
+            )
+        if self.view_start <= self.end <= self.view_end:
+            end_x = self._time_to_x(self.end)
+            self.create_line(end_x, strip_top - 2, end_x, strip_bottom + 9, fill=PURPLE, width=4)
+            self.create_polygon(
+                end_x - 7,
+                strip_top - 2,
+                end_x + 7,
+                strip_top - 2,
+                end_x,
+                strip_top + 8,
+                fill=PURPLE,
+                outline=PURPLE,
+            )
 
-        self.create_line(start_x, strip_top - 2, start_x, strip_bottom + 9, fill=PURPLE, width=4)
-        self.create_polygon(
-            start_x - 7,
-            strip_top - 2,
-            start_x + 7,
-            strip_top - 2,
-            start_x,
-            strip_top + 8,
-            fill=PURPLE,
-            outline=PURPLE,
-        )
-        self.create_line(end_x, strip_top - 2, end_x, strip_bottom + 9, fill=PURPLE, width=4)
-        self.create_polygon(
-            end_x - 7,
-            strip_top - 2,
-            end_x + 7,
-            strip_top - 2,
-            end_x,
-            strip_top + 8,
-            fill=PURPLE,
-            outline=PURPLE,
-        )
-
-        self.create_line(play_x, strip_top - 6, play_x, ruler_y + 12, fill=CYAN, width=2)
-        self.create_polygon(
-            play_x - 6,
-            strip_top - 6,
-            play_x + 6,
-            strip_top - 6,
-            play_x,
-            strip_top + 2,
-            fill=CYAN,
-            outline=CYAN,
-        )
+        if self.view_start <= self.playhead <= self.view_end:
+            play_x = self._time_to_x(self.playhead)
+            self.create_line(play_x, strip_top - 6, play_x, ruler_y + 12, fill=CYAN, width=2)
+            self.create_polygon(
+                play_x - 6,
+                strip_top - 6,
+                play_x + 6,
+                strip_top - 6,
+                play_x,
+                strip_top + 2,
+                fill=CYAN,
+                outline=CYAN,
+            )
 
         tick_count = 6
         for index in range(tick_count + 1):
             fraction = index / tick_count
             x = left + fraction * (right - left)
-            seconds = fraction * self.duration
-            minutes = int(seconds // 60)
+            seconds = self.view_start + fraction * visible_span
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
             secs = int(seconds % 60)
-            label = f"{minutes}:{secs:02d}"
+            label = f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
             self.create_line(x, ruler_y - 3, x, ruler_y + 3, fill=BORDER)
             self.create_text(x, ruler_y + 15, text=label, fill=MUTED, font=("Segoe UI", 8))
 
+        zoomed = visible_span < self.duration - 0.001
+        hint = "Zoomed timeline • drag cyan playhead to scrub" if zoomed else "Drag purple handles to trim • Drag cyan playhead to scrub"
         self.create_text(
             width / 2,
             strip_bottom + 9,
-            text="Drag purple handles to trim • Drag cyan playhead to scrub",
+            text=hint,
             fill=MUTED,
             font=("Segoe UI", 8),
             anchor="n",
