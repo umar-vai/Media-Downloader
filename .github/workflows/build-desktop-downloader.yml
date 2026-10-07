@@ -112,18 +112,7 @@ jobs:
             throw "Could not read APP_VERSION."
           }
           $appVersion = "$appVersion".Trim()
-          if ($appVersion -notmatch '^\d+\.\d+\.\d+
-      - name: Publish GitHub Release assets
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            dist/MediaDownloader.exe
-            dist/MediaDownloader.exe.sha256
-            dist/TeamFahadYouTubeDownloader.exe
-            dist/TeamFahadYouTubeDownloader.exe.sha256
-) {
+          if ($appVersion -notmatch '^\\d+\\.\\d+\\.\\d+$') {
             throw "APP_VERSION must be semantic x.y.z, got '$appVersion'."
           }
           $tag = "v$appVersion"
