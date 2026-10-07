@@ -948,10 +948,11 @@ class MediaEditorWindow(ctk.CTkToplevel):
         if self._closing or self.player is None:
             return
         try:
-            frame = self.player.next_frame()
+            frame = self.player.next_frame(force_refresh=not self.playing)
             frame_pts: float | None = None
+            frame_schedule: Any = None
             if frame is not None:
-                data, size, frame_pts, _schedule = frame
+                data, size, frame_pts, frame_schedule = frame
                 if self.info and self.info.has_video:
                     image = Image.frombytes("RGB", size, data)
                     self.preview_pil = self._transform_live_frame(image)
@@ -975,7 +976,11 @@ class MediaEditorWindow(ctk.CTkToplevel):
                 self.timeline.set_playhead(position)
                 self._update_current_time_label()
 
-            self._schedule_player_tick(15 if self.playing else 90)
+            if self.playing and isinstance(frame_schedule, (int, float)):
+                wait_ms = max(5, min(120, int(max(0.0, float(frame_schedule)) * 1000)))
+            else:
+                wait_ms = 12 if self.playing else 90
+            self._schedule_player_tick(wait_ms)
         except Exception as exc:
             self.pause_playback()
             self.preview_status_label.configure(text="Embedded playback error; frame preview still available", text_color=DANGER)
