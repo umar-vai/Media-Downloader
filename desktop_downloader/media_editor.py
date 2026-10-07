@@ -1067,6 +1067,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
             self.choose_output_button,
             self.start_entry,
             self.end_entry,
+            self.apply_crop_button,
+            *self.custom_entries,
         ]
         for widget in controls:
             try:
