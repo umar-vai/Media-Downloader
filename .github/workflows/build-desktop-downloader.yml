@@ -98,6 +98,21 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Publish version release from main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $appVersion = python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from version import APP_VERSION; print(APP_VERSION)"
+          $tag = "v$appVersion"
+          $repo = "${{ github.repository }}"
+          gh release view $tag --repo $repo *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists; skipping."
+            exit 0
+          }
+          gh release create $tag "dist/MediaDownloader.exe" "dist/MediaDownloader.exe.sha256" "dist/TeamFahadYouTubeDownloader.exe" "dist/TeamFahadYouTubeDownloader.exe.sha256" --repo $repo --target "${{ github.sha }}" --title "Media Downloader $tag" --generate-notes
       - name: Publish GitHub Release assets
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
