@@ -1718,7 +1718,11 @@ class DownloaderApp(ctk.CTk):
         self.update_detail_label.configure(text="Verified update metadata found on GitHub Releases.")
         self.update_action_button.configure(text="Update Now", state="normal")
         self.update_later_button.configure(state="normal")
-        self.release_button.configure(state="normal")
+        self.release_button.configure(
+            text="Open latest release",
+            command=self.open_release_page,
+            state="normal",
+        )
         append_update_log(f"Update available: {release.version}")
 
         if manual or not self._is_update_snoozed(release.version):
@@ -1745,24 +1749,49 @@ class DownloaderApp(ctk.CTk):
         self.update_downloading = False
         self.update_check_button.configure(text="Check for updates", state="normal")
         self.update_action_button.configure(state="normal" if self.latest_release else "disabled")
-        self.update_cancel_button.configure(state="disabled")
+        self.update_cancel_button.configure(state="disabled", text="Cancel download")
         self.update_cancel_event = None
-        self.release_button.configure(text="Open latest release", state="normal")
+
         error = str(payload.get("error") or "Unknown update error").strip()
         display_error = error if len(error) <= 360 else error[:357].rstrip() + "…"
-        self.update_detail_label.configure(
-            text="Automatic update check failed. "
-            + display_error
-            + "\nYou can still open the latest GitHub release manually."
-        )
         append_update_log(f"Update error: {error}")
-        if payload.get("manual"):
-            messagebox.showwarning(
-                APP_NAME,
-                "Automatic update check failed.\n\n"
-                + display_error
-                + "\n\nUse ‘Open latest release’ for a manual update if needed.",
+
+        if self.latest_release:
+            self.release_button.configure(
+                text="Download in browser",
+                command=self.open_update_asset_in_browser,
+                state="normal",
             )
+            self.update_detail_label.configure(
+                text="Update found, but automatic download failed. "
+                + display_error
+                + "\nUse ‘Download in browser’ to download the verified release manually."
+            )
+            if payload.get("manual"):
+                messagebox.showwarning(
+                    APP_NAME,
+                    "The update was found, but the automatic download failed.\n\n"
+                    + display_error
+                    + "\n\nUse ‘Download in browser’ to continue manually.",
+                )
+        else:
+            self.release_button.configure(
+                text="Open latest release",
+                command=self.open_release_page,
+                state="normal",
+            )
+            self.update_detail_label.configure(
+                text="Update check failed. "
+                + display_error
+                + "\nYou can still open the latest GitHub release manually."
+            )
+            if payload.get("manual"):
+                messagebox.showwarning(
+                    APP_NAME,
+                    "Update check failed.\n\n"
+                    + display_error
+                    + "\n\nUse ‘Open latest release’ for a manual update if needed.",
+                )
 
     def _handle_update_progress(self, payload: dict[str, Any]) -> None:
         downloaded = int(payload.get("downloaded") or 0)
@@ -1929,6 +1958,14 @@ class DownloaderApp(ctk.CTk):
         except Exception as exc:
             LOGGER.exception("Could not open diagnostics log")
             messagebox.showerror(APP_NAME, f"Could not open diagnostics log.\n\n{exc}")
+
+    def open_update_asset_in_browser(self) -> None:
+        release = self.latest_release
+        if release and release.asset_url:
+            append_update_log(f"Opening browser download for version {release.version}.")
+            webbrowser.open(release.asset_url)
+        else:
+            self.open_release_page()
 
     def open_release_page(self) -> None:
         if self.latest_release and self.latest_release.html_url:

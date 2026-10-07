@@ -4,6 +4,7 @@ import hashlib
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -11,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from update_manager import (
     GITHUB_WEB_BASE,
     UpdateError,
+    _fetch_checksum,
     _headers_for_url,
     _release_from_payload,
     _release_from_redirect_result,
@@ -120,6 +122,26 @@ class VersionTests(unittest.TestCase):
         release = _release_from_web_html(html)
         self.assertEqual(release.version, "2.5.1")
         self.assertTrue(release.asset_url.endswith("/v2.5.1/MediaDownloader.exe"))
+
+    @patch("update_manager._bits_read")
+    @patch("update_manager._powershell_read")
+    @patch("update_manager._curl_read")
+    @patch("update_manager._request")
+    def test_checksum_uses_bits_as_final_windows_transport(
+        self,
+        request_mock,
+        curl_mock,
+        powershell_mock,
+        bits_mock,
+    ) -> None:
+        digest = "c" * 64
+        request_mock.side_effect = UpdateError("urllib failed")
+        curl_mock.side_effect = UpdateError("curl failed")
+        powershell_mock.side_effect = UpdateError("PowerShell failed")
+        bits_mock.return_value = f"{digest}  MediaDownloader.exe\n".encode("utf-8")
+
+        self.assertEqual(_fetch_checksum("https://example.invalid/checksum", 5), digest)
+        bits_mock.assert_called_once()
 
     def test_redirect_release_parser(self) -> None:
         digest = "b" * 64

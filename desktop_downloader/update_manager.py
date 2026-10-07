@@ -7,6 +7,7 @@ import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -248,6 +249,56 @@ def _powershell_read(url: str, timeout: int) -> bytes:
         detail = result.stderr.decode("utf-8", errors="replace").strip()
         raise UpdateError(f"PowerShell fallback failed: {detail[:240] or f'exit {result.returncode}'}")
     return result.stdout
+
+
+def _bits_download(url: str, destination: Path, timeout: int) -> None:
+    if os.name != "nt":
+        raise UpdateError("BITS is only available on Windows.")
+
+    executable = _powershell_executable()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    escaped_url = url.replace("'", "''")
+    escaped_destination = str(destination).replace("'", "''")
+    script = (
+        "$ErrorActionPreference='Stop'; "
+        "$ProgressPreference='SilentlyContinue'; "
+        "Import-Module BitsTransfer -ErrorAction Stop; "
+        f"Start-BitsTransfer -Source '{escaped_url}' -Destination '{escaped_destination}' "
+        "-TransferType Download -Priority Foreground -ErrorAction Stop"
+    )
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        result = subprocess.run(
+            [executable, "-NoProfile", "-NonInteractive", "-Command", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(120, timeout * 8),
+            check=False,
+            creationflags=creationflags,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise UpdateError(f"Windows BITS fallback could not run: {_reason_text(exc)}") from exc
+
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise UpdateError(f"Windows BITS fallback failed: {detail[:240] or f'exit {result.returncode}'}")
+    if not destination.exists() or destination.stat().st_size <= 0:
+        raise UpdateError("Windows BITS fallback downloaded an empty file.")
+
+
+def _bits_read(url: str, timeout: int) -> bytes:
+    handle = tempfile.NamedTemporaryFile(prefix="media-downloader-update-", suffix=".tmp", delete=False)
+    path = Path(handle.name)
+    handle.close()
+    try:
+        path.unlink(missing_ok=True)
+        _bits_download(url, path, timeout)
+        return path.read_bytes()
+    finally:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _powershell_download(url: str, destination: Path, timeout: int) -> None:
@@ -520,6 +571,10 @@ def _fetch_checksum(url: str, timeout: int) -> str:
         return parse_checksum(_powershell_read(url, timeout).decode("utf-8", errors="replace"))
     except UpdateError as exc:
         errors.append(f"PowerShell: {exc}")
+    try:
+        return parse_checksum(_bits_read(url, timeout).decode("utf-8", errors="replace"))
+    except UpdateError as exc:
+        errors.append(f"BITS: {exc}")
     raise UpdateError("Could not download the update checksum. " + " | ".join(errors))
 
 
@@ -582,6 +637,7 @@ def download_release(
                 curl_error = exc
 
             if last_error:
+                powershell_error: UpdateError | None = None
                 try:
                     partial_path.unlink(missing_ok=True)
                     _powershell_download(release.asset_url, partial_path, timeout)
@@ -589,17 +645,33 @@ def download_release(
                         size = partial_path.stat().st_size
                         progress_callback(size, size)
                     last_error = None
-                except UpdateError as powershell_error:
-                    if isinstance(last_error, urllib.error.HTTPError):
-                        urllib_detail = f"HTTP {last_error.code}"
-                    else:
-                        urllib_detail = _reason_text(last_error)
-                    raise UpdateError(
-                        "All update download transports failed. "
-                        f"urllib: {urllib_detail}. "
-                        f"curl: {curl_error or 'not available'}. "
-                        f"PowerShell: {powershell_error}"
-                    ) from powershell_error
+                except UpdateError as exc:
+                    powershell_error = exc
+
+            if last_error:
+                bits_error: UpdateError | None = None
+                try:
+                    partial_path.unlink(missing_ok=True)
+                    _bits_download(release.asset_url, partial_path, timeout)
+                    if progress_callback:
+                        size = partial_path.stat().st_size
+                        progress_callback(size, size)
+                    last_error = None
+                except UpdateError as exc:
+                    bits_error = exc
+
+            if last_error:
+                if isinstance(last_error, urllib.error.HTTPError):
+                    urllib_detail = f"HTTP {last_error.code}"
+                else:
+                    urllib_detail = _reason_text(last_error)
+                raise UpdateError(
+                    "All automatic update download transports failed. "
+                    f"urllib: {urllib_detail}. "
+                    f"curl: {curl_error or 'not available'}. "
+                    f"PowerShell: {powershell_error or 'not available'}. "
+                    f"BITS: {bits_error or 'not available'}"
+                )
 
         if not partial_path.exists() or partial_path.stat().st_size <= 0:
             raise UpdateError("The downloaded update file is empty.")
