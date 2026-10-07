@@ -25,6 +25,8 @@ from tkinter import filedialog, messagebox
 
 from app_logging import get_logger, log_path
 from diagnostics_window import DiagnosticsWindow
+from history_store import HistoryStore, make_history_entry
+from history_window import HistoryWindow
 from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
 from media_sources import browser_headers, detect_platform, extraction_attempts, is_supported_media_url, platform_name, request_options, video_format_selector
@@ -36,6 +38,7 @@ APP_NAME = "Media Downloader"
 DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "Media Downloader"
 CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / "MediaDownloader"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
+HISTORY_FILE = CONFIG_DIR / "history.json"
 LEGACY_CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / ("Team" + "Fahad" + "Downloader")
 LEGACY_CONFIG_FILE = LEGACY_CONFIG_DIR / "settings.json"
 UPDATE_DIR = Path(os.getenv("LOCALAPPDATA") or CONFIG_DIR) / "MediaDownloader" / "updates"
@@ -238,12 +241,14 @@ class DownloaderApp(ctk.CTk):
         self.editor_window: MediaEditorWindow | None = None
         self.diagnostics_window: DiagnosticsWindow | None = None
         self.settings_window: SettingsWindow | None = None
+        self.history_window: HistoryWindow | None = None
         self.task_state = TaskState.IDLE
         self._job_counter = 0
         self.active_job_id: int | None = None
         self.active_job_cancel: threading.Event | None = None
 
         self.settings = load_settings()
+        self.history_store = HistoryStore(HISTORY_FILE)
         self.download_dir = Path(str(self.settings.get("download_dir") or DEFAULT_DOWNLOAD_DIR)).expanduser()
         self.latest_release: ReleaseInfo | None = None
         self.downloaded_update: Path | None = None
@@ -267,6 +272,7 @@ class DownloaderApp(ctk.CTk):
 
         self._center_window()
         self._build_ui()
+        self._sync_recent_file()
         LOGGER.info("App started version=%s executable=%s", APP_VERSION, sys.executable)
         self.after(120, self._drain_events)
         self.after(700, lambda: self._show_update_result(attempt=0))
