@@ -283,17 +283,17 @@ class TimelineCanvas(tk.Canvas):
         )
 
     def _closest_target(self, x: float) -> str:
-        start_x = self._time_to_x(self.start)
-        end_x = self._time_to_x(self.end)
-        play_x = self._time_to_x(self.playhead)
-        distances = {
-            "start": abs(x - start_x),
-            "end": abs(x - end_x),
-            "playhead": abs(x - play_x),
-        }
-        target, distance = min(distances.items(), key=lambda item: item[1])
-        if distance <= 14:
-            return target
+        distances: dict[str, float] = {}
+        if self.view_start <= self.start <= self.view_end:
+            distances["start"] = abs(x - self._time_to_x(self.start))
+        if self.view_start <= self.end <= self.view_end:
+            distances["end"] = abs(x - self._time_to_x(self.end))
+        if self.view_start <= self.playhead <= self.view_end:
+            distances["playhead"] = abs(x - self._time_to_x(self.playhead))
+        if distances:
+            target, distance = min(distances.items(), key=lambda item: item[1])
+            if distance <= 14:
+                return target
         return "playhead"
 
     def _on_press(self, event) -> None:
