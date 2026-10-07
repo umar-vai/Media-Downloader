@@ -762,12 +762,29 @@ class DownloaderApp(ctk.CTk):
         ).grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
     def _build_update_card(self) -> None:
-        card = self._card(self.content)
+        self.update_card = self._card(self.content)
+        card = self.update_card
         card.grid(row=5, column=0, sticky="ew", pady=(0, 14))
         card.grid_columnconfigure(0, weight=1)
-        self._section_title(card, "03 / Updates", "Keep the app up to date")
+        self._section_title(card, "03 / Updates", "Updates & preferences")
 
-        body = ctk.CTkFrame(card, fg_color="transparent")
+        self.update_toggle_button = ctk.CTkButton(
+            card,
+            text="Show settings",
+            width=108,
+            height=32,
+            corner_radius=9,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.toggle_update_panel,
+        )
+        self.update_toggle_button.grid(row=0, column=0, sticky="e", padx=18, pady=(4, 0))
+
+        self.update_body = ctk.CTkFrame(card, fg_color="transparent")
+        body = self.update_body
         body.grid(row=1, column=0, sticky="ew", padx=18, pady=(14, 18))
         body.grid_columnconfigure(0, weight=1)
 
@@ -919,6 +936,17 @@ class DownloaderApp(ctk.CTk):
             state="normal",
         )
         self.release_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
+
+        self.update_body.grid_remove()
+
+    def toggle_update_panel(self) -> None:
+        self.update_expanded = not self.update_expanded
+        if self.update_expanded:
+            self.update_body.grid()
+            self.update_toggle_button.configure(text="Hide settings")
+        else:
+            self.update_body.grid_remove()
+            self.update_toggle_button.configure(text="Show settings")
 
     def _build_footer(self) -> None:
         footer = ctk.CTkFrame(self.content, fg_color="transparent")
