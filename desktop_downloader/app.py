@@ -24,7 +24,7 @@ from tkinter import filedialog, messagebox
 
 from media_editor import MediaEditorWindow
 from media_sources import browser_headers, detect_platform, extraction_attempts, is_supported_media_url, platform_name, request_options, video_format_selector
-from update_manager import ReleaseInfo, download_release, fetch_latest_release, is_newer_version
+from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
 
 APP_NAME = "Media Downloader"
@@ -825,7 +825,7 @@ class DownloaderApp(ctk.CTk):
         self.update_later_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
         self.release_button = ctk.CTkButton(
             buttons,
-            text="View changes",
+            text="Open latest release",
             width=105,
             height=40,
             corner_radius=10,
@@ -835,7 +835,7 @@ class DownloaderApp(ctk.CTk):
             border_color=BORDER,
             text_color=MUTED,
             command=self.open_release_page,
-            state="disabled",
+            state="normal",
         )
         self.release_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
 
@@ -1367,12 +1367,21 @@ class DownloaderApp(ctk.CTk):
         self.update_downloading = False
         self.update_check_button.configure(text="Check for updates", state="normal")
         self.update_action_button.configure(state="normal" if self.latest_release else "disabled")
-        self.update_detail_label.configure(text="Unable to check or download updates right now. Please try again later.")
-        append_update_log(f"Update error: {payload.get('error')}")
+        self.release_button.configure(text="Open latest release", state="normal")
+        error = str(payload.get("error") or "Unknown update error").strip()
+        display_error = error if len(error) <= 360 else error[:357].rstrip() + "…"
+        self.update_detail_label.configure(
+            text="Automatic update check failed. "
+            + display_error
+            + "\nYou can still open the latest GitHub release manually."
+        )
+        append_update_log(f"Update error: {error}")
         if payload.get("manual"):
             messagebox.showwarning(
                 APP_NAME,
-                "Unable to check or download updates right now.\n\nPlease try again later.",
+                "Automatic update check failed.\n\n"
+                + display_error
+                + "\n\nUse ‘Open latest release’ for a manual update if needed.",
             )
 
     def _handle_update_progress(self, payload: dict[str, Any]) -> None:
@@ -1487,6 +1496,8 @@ class DownloaderApp(ctk.CTk):
     def open_release_page(self) -> None:
         if self.latest_release and self.latest_release.html_url:
             webbrowser.open(self.latest_release.html_url)
+        else:
+            webbrowser.open(LATEST_RELEASE_WEB)
 
     def _show_update_result(self) -> None:
         if not UPDATE_RESULT_FILE.exists():
