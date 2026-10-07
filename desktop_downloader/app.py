@@ -183,6 +183,7 @@ class DownloaderApp(ctk.CTk):
         self.downloaded_update: Path | None = None
         self.update_checking = False
         self.update_downloading = False
+        self.update_cancel_event: threading.Event | None = None
 
         self.url_var = ctk.StringVar()
         self.name_var = ctk.StringVar()
@@ -857,6 +858,23 @@ class DownloaderApp(ctk.CTk):
             state="disabled",
         )
         self.update_later_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+        self.update_cancel_button = ctk.CTkButton(
+            buttons,
+            text="Cancel download",
+            width=112,
+            height=40,
+            corner_radius=10,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.cancel_update_download,
+            state="disabled",
+        )
+        self.update_cancel_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+
         self.release_button = ctk.CTkButton(
             buttons,
             text="Open latest release",
@@ -871,7 +889,7 @@ class DownloaderApp(ctk.CTk):
             command=self.open_release_page,
             state="normal",
         )
-        self.release_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        self.release_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
 
     def _build_footer(self) -> None:
         footer = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -1409,6 +1427,8 @@ class DownloaderApp(ctk.CTk):
                     self._handle_update_progress(payload)
                 elif kind == "update_ready":
                     self._handle_update_ready(payload)
+                elif kind == "update_cancelled":
+                    self._handle_update_cancelled()
 
         except queue.Empty:
             pass
@@ -1606,6 +1626,8 @@ class DownloaderApp(ctk.CTk):
         self.update_downloading = False
         self.update_check_button.configure(text="Check for updates", state="normal")
         self.update_action_button.configure(state="normal" if self.latest_release else "disabled")
+        self.update_cancel_button.configure(state="disabled")
+        self.update_cancel_event = None
         self.release_button.configure(text="Open latest release", state="normal")
         error = str(payload.get("error") or "Unknown update error").strip()
         display_error = error if len(error) <= 360 else error[:357].rstrip() + "…"
@@ -1637,6 +1659,8 @@ class DownloaderApp(ctk.CTk):
 
     def _handle_update_ready(self, payload: dict[str, Any]) -> None:
         self.update_downloading = False
+        self.update_cancel_event = None
+        self.update_cancel_button.configure(state="disabled")
         self.downloaded_update = Path(str(payload["path"]))
         release = payload["release"]
         self.latest_release = release
@@ -1660,21 +1684,59 @@ class DownloaderApp(ctk.CTk):
         if self.update_downloading or not self.latest_release:
             return
         self.update_downloading = True
+        self.update_cancel_event = threading.Event()
         self.update_action_button.configure(text="Downloading…", state="disabled")
+        self.update_cancel_button.configure(state="normal")
         self.update_progress.set(0)
         release = self.latest_release
-        threading.Thread(target=self._download_update_worker, args=(release, manual), daemon=True).start()
+        cancel_event = self.update_cancel_event
+        threading.Thread(
+            target=self._download_update_worker,
+            args=(release, manual, cancel_event),
+            daemon=True,
+        ).start()
 
-    def _download_update_worker(self, release: ReleaseInfo, manual: bool) -> None:
+    def cancel_update_download(self) -> None:
+        event = self.update_cancel_event
+        if not self.update_downloading or event is None:
+            return
+        event.set()
+        self.update_cancel_button.configure(state="disabled", text="Cancelling…")
+        self.update_detail_label.configure(text="Cancelling update download…")
+        append_update_log("Update download cancellation requested.")
+
+    def _download_update_worker(
+        self,
+        release: ReleaseInfo,
+        manual: bool,
+        cancel_event: threading.Event,
+    ) -> None:
         def progress(downloaded: int, total: int) -> None:
+            if cancel_event.is_set():
+                raise RuntimeError("Update download cancelled by user.")
             self.events.put(("update_progress", {"downloaded": downloaded, "total": total}))
 
         try:
             version_dir = UPDATE_DIR / release.version
             path = download_release(release, version_dir, progress_callback=progress)
+            if cancel_event.is_set():
+                self.events.put(("update_cancelled", None))
+                return
             self.events.put(("update_ready", {"path": str(path), "release": release}))
         except Exception as exc:
-            self.events.put(("update_error", {"error": str(exc), "manual": manual}))
+            if cancel_event.is_set():
+                self.events.put(("update_cancelled", None))
+            else:
+                self.events.put(("update_error", {"error": str(exc), "manual": manual}))
+
+    def _handle_update_cancelled(self) -> None:
+        self.update_downloading = False
+        self.update_cancel_event = None
+        self.update_progress.set(0)
+        self.update_cancel_button.configure(state="disabled", text="Cancel download")
+        self.update_action_button.configure(text="Update Now", state="normal")
+        self.update_detail_label.configure(text="Update download cancelled. You can resume it later.")
+        append_update_log("Update download cancelled.")
 
     def _launch_updater(self) -> None:
         if not self.latest_release or not self.downloaded_update:
