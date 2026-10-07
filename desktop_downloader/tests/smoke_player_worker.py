@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -65,14 +67,25 @@ def main() -> int:
         ready = False
         frame_seen = False
         deadline = time.time() + 15
+        lines: "queue.Queue[str]" = queue.Queue()
+
+        def read_stdout() -> None:
+            if not process.stdout:
+                return
+            for line in process.stdout:
+                lines.put(line)
+
+        threading.Thread(target=read_stdout, daemon=True).start()
 
         try:
             while time.time() < deadline:
-                if process.poll() is not None:
+                if process.poll() is not None and lines.empty():
                     break
-                line = process.stdout.readline() if process.stdout else ""
-                if not line:
-                    time.sleep(0.05)
+                try:
+                    line = lines.get(timeout=0.25)
+                except queue.Empty:
+                    continue
+                if not line.strip():
                     continue
                 message = json.loads(line)
                 if message.get("type") == "ready":
