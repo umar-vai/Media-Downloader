@@ -244,6 +244,36 @@ class MediaEditorWindow(ctk.CTkToplevel):
         )
         self.loading_chip.grid(row=0, column=2, padx=(8, 8))
 
+        self.undo_button = ctk.CTkButton(
+            top,
+            text="Undo",
+            width=72,
+            height=34,
+            corner_radius=9,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            command=self.undo_edit,
+            state="disabled",
+        )
+        self.undo_button.grid(row=0, column=3, padx=(8, 0))
+
+        self.redo_button = ctk.CTkButton(
+            top,
+            text="Redo",
+            width=72,
+            height=34,
+            corner_radius=9,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            command=self.redo_edit,
+            state="disabled",
+        )
+        self.redo_button.grid(row=0, column=4, padx=(8, 0))
+
         ctk.CTkButton(
             top,
             text="Reset edits",
@@ -255,7 +285,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             border_width=1,
             border_color=BORDER,
             command=self.reset_edits,
-        ).grid(row=0, column=3, padx=(8, 0))
+        ).grid(row=0, column=5, padx=(8, 0))
 
         ctk.CTkButton(
             top,
@@ -268,7 +298,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             border_width=1,
             border_color=BORDER,
             command=self.open_source,
-        ).grid(row=0, column=4, padx=(8, 18))
+        ).grid(row=0, column=6, padx=(8, 18))
 
     def _build_preview(self, workspace: ctk.CTkFrame) -> None:
         card = self._card(workspace)
