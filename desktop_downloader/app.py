@@ -1040,6 +1040,7 @@ class DownloaderApp(ctk.CTk):
             "ready": ("#0D2A2A", SUCCESS, "READY"),
             "working": ("#162344", CYAN, "WORKING"),
             "success": ("#0E3025", SUCCESS, "COMPLETE"),
+            "cancelled": ("#2D2514", WARNING, "CANCELLED"),
             "error": ("#351722", DANGER, "FAILED"),
         }
         bg, fg, chip = palette.get(kind, palette["ready"])
@@ -1441,7 +1442,7 @@ class DownloaderApp(ctk.CTk):
                     self.task_state = TaskState.CANCELLED
                     self.edit_after_download = False
                     self.speed_label.configure(text="Cancelled")
-                    self._set_status(str(data or "Task cancelled"), "ready")
+                    self._set_status(str(data or "Task cancelled"), "cancelled")
                     self._finish_job(job_id)
 
                 elif kind in {"analysis_finished", "download_finished"}:
