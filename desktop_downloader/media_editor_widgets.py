@@ -44,6 +44,8 @@ class TimelineCanvas(tk.Canvas):
         self.drag_target: str | None = None
         self.thumbnail_pils: list[Image.Image] = []
         self.thumbnail_refs: list[ImageTk.PhotoImage] = []
+        self.waveform_pil: Image.Image | None = None
+        self.waveform_ref: ImageTk.PhotoImage | None = None
         self._last_scrub_notify = 0.0
 
         self.bind("<Configure>", lambda _event: self.redraw())
@@ -79,6 +81,12 @@ class TimelineCanvas(tk.Canvas):
 
     def set_thumbnails(self, images: list[Image.Image]) -> None:
         self.thumbnail_pils = [image.copy() for image in images]
+        self.waveform_pil = None
+        self.redraw()
+
+    def set_waveform(self, image: Image.Image) -> None:
+        self.waveform_pil = image.copy()
+        self.thumbnail_pils = []
         self.redraw()
 
     def _x_bounds(self) -> tuple[float, float]:
@@ -107,7 +115,14 @@ class TimelineCanvas(tk.Canvas):
         self.create_rectangle(left, strip_top, right, strip_bottom, fill=SURFACE_2, outline=BORDER)
 
         self.thumbnail_refs = []
-        if self.thumbnail_pils:
+        self.waveform_ref = None
+        if self.waveform_pil is not None:
+            available = max(1, int(right - left))
+            tile_h = strip_bottom - strip_top
+            waveform = self.waveform_pil.copy().resize((available, tile_h))
+            self.waveform_ref = ImageTk.PhotoImage(waveform)
+            self.create_image(left, strip_top, anchor="nw", image=self.waveform_ref)
+        elif self.thumbnail_pils:
             count = len(self.thumbnail_pils)
             available = max(1, right - left)
             tile_w = max(20, int(available / count))
