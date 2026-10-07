@@ -56,6 +56,7 @@ jobs:
           python -m py_compile desktop_downloader/update_manager.py
           python -m py_compile desktop_downloader/updater.py
           python -m py_compile desktop_downloader/version.py
+          python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from version import APP_VERSION; assert APP_VERSION == '3.0.0'; print('APP_VERSION=' + APP_VERSION)"
           python -m unittest discover -s desktop_downloader/tests -v
           python desktop_downloader/tests/smoke_editor_export.py
           python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from yt_dlp import YoutubeDL; from yt_dlp.networking.impersonate import ImpersonateTarget; y=YoutubeDL({'quiet': True}); assert y._impersonate_target_available(ImpersonateTarget('chrome')), 'Chrome impersonation target unavailable'"
