@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import ctypes
 import json
+import msvcrt
 import os
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import uuid
 from pathlib import Path
@@ -57,6 +58,22 @@ def connect_pipe(path: str, process: subprocess.Popen[bytes], timeout: float = 8
             last_error = exc
             time.sleep(0.05)
     raise RuntimeError(f"Could not connect to mpv IPC: {last_error}")
+
+
+def peek_bytes(stream) -> int:
+    available = ctypes.c_ulong(0)
+    handle = msvcrt.get_osfhandle(stream.fileno())
+    ok = ctypes.windll.kernel32.PeekNamedPipe(
+        ctypes.c_void_p(handle),
+        None,
+        0,
+        None,
+        ctypes.byref(available),
+        None,
+    )
+    if not ok:
+        raise OSError(ctypes.get_last_error(), "PeekNamedPipe failed")
+    return int(available.value)
 
 
 def main() -> int:
@@ -126,34 +143,8 @@ def main() -> int:
         )
 
         ipc = None
-        reader_done = threading.Event()
-        state = {"loaded": False, "position": 0.0}
-
-        def reader() -> None:
-            try:
-                while ipc is not None and not reader_done.is_set():
-                    raw = ipc.readline()
-                    if not raw:
-                        break
-                    if not raw.strip():
-                        continue
-                    try:
-                        message = json.loads(raw.decode("utf-8", errors="replace"))
-                    except json.JSONDecodeError:
-                        continue
-                    if message.get("event") == "file-loaded":
-                        state["loaded"] = True
-                    if message.get("event") == "property-change" and message.get("name") == "time-pos":
-                        try:
-                            state["position"] = float(message.get("data") or 0.0)
-                        except (TypeError, ValueError):
-                            pass
-            except Exception:
-                pass
-
         try:
             ipc = connect_pipe(pipe, process)
-            threading.Thread(target=reader, daemon=True).start()
 
             def send(command: list[object]) -> None:
                 payload = (json.dumps({"command": command}, separators=(",", ":")) + "\n").encode("utf-8")
@@ -162,22 +153,57 @@ def main() -> int:
             send(["observe_property", 1, "time-pos"])
             send(["loadfile", str(media), "replace"])
 
-            deadline = time.monotonic() + 8.0
-            while time.monotonic() < deadline and not state["loaded"]:
-                time.sleep(0.05)
-            if not state["loaded"]:
-                raise RuntimeError("mpv IPC did not report file-loaded.")
+            loaded = False
+            played = False
+            position = 0.0
+            buffer = b""
+            deadline = time.monotonic() + 10.0
 
-            send(["set_property", "pause", False])
-            deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline and state["position"] <= 0.05:
-                time.sleep(0.05)
-            if state["position"] <= 0.05:
-                raise RuntimeError("mpv IPC playback position did not advance.")
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise RuntimeError(f"mpv exited during IPC smoke test: {process.returncode}")
+
+                available = peek_bytes(ipc)
+                if available <= 0:
+                    time.sleep(0.01)
+                    continue
+
+                chunk = ipc.read(min(available, 65536))
+                if not chunk:
+                    break
+                buffer += chunk
+
+                while b"\n" in buffer:
+                    raw, buffer = buffer.split(b"\n", 1)
+                    if not raw.strip():
+                        continue
+                    try:
+                        message = json.loads(raw.decode("utf-8", errors="replace"))
+                    except json.JSONDecodeError:
+                        continue
+
+                    if message.get("event") == "file-loaded":
+                        loaded = True
+                        if not played:
+                            send(["set_property", "pause", False])
+                            played = True
+
+                    if message.get("event") == "property-change" and message.get("name") == "time-pos":
+                        try:
+                            position = float(message.get("data") or 0.0)
+                        except (TypeError, ValueError):
+                            position = 0.0
+
+                if loaded and played and position > 0.05:
+                    break
+
+            if not loaded:
+                raise RuntimeError("mpv IPC did not report file-loaded.")
+            if position <= 0.05:
+                raise RuntimeError(f"mpv IPC playback position did not advance: {position}")
 
             send(["quit"])
         finally:
-            reader_done.set()
             try:
                 if ipc is not None:
                     ipc.close()
