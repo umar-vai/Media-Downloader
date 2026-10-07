@@ -764,7 +764,46 @@ class MediaEditorWindow(ctk.CTkToplevel):
             text_color="#667996",
             font=("Segoe UI", 9),
         )
-        self.media_info_label.grid(row=0, column=3, sticky="e")
+        self.media_info_label.grid(row=0, column=3, sticky="e", padx=(8, 10))
+
+        ctk.CTkButton(
+            header,
+            text="Fit",
+            width=44,
+            height=26,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.timeline_fit,
+        ).grid(row=0, column=4, padx=(0, 4))
+
+        ctk.CTkButton(
+            header,
+            text="−",
+            width=32,
+            height=26,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            command=self.timeline_zoom_out,
+        ).grid(row=0, column=5, padx=2)
+
+        ctk.CTkButton(
+            header,
+            text="+",
+            width=32,
+            height=26,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            command=self.timeline_zoom_in,
+        ).grid(row=0, column=6, padx=(2, 0))
 
         self.timeline = TimelineCanvas(
             card,
@@ -802,6 +841,18 @@ class MediaEditorWindow(ctk.CTkToplevel):
             text_color=MUTED,
             command=self.reset_range,
         ).grid(row=0, column=4, padx=(16, 0))
+
+    def timeline_fit(self) -> None:
+        if not self.render_busy:
+            self.timeline.fit_view()
+
+    def timeline_zoom_in(self) -> None:
+        if not self.render_busy:
+            self.timeline.zoom_in()
+
+    def timeline_zoom_out(self) -> None:
+        if not self.render_busy:
+            self.timeline.zoom_out()
 
     def _build_bottom_bar(self) -> None:
         bar = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=0, height=62)
