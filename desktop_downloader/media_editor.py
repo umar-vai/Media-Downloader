@@ -943,6 +943,12 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.status_label.configure(text="Ready to edit", text_color=SUCCESS)
         self.export_button.configure(state="normal")
         self.preview_clip_button.configure(state="normal")
+        if not info.has_video:
+            self.quality_menu.configure(state="disabled")
+        self._update_export_summary()
+        self.history.clear()
+        self.history.push(self._capture_history_snapshot())
+        self._update_history_buttons()
 
     def _load_failed(self, error: str) -> None:
         LOGGER.error("Media load failed source=%s error=%s", self.source_path, error)
@@ -1169,6 +1175,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             if self.info is not None and not self.info.has_video:
                 self.crop_menu.configure(state="disabled")
                 self.rotate_menu.configure(state="disabled")
+                self.quality_menu.configure(state="disabled")
                 self.apply_crop_button.configure(state="disabled")
                 for entry in self.custom_entries:
                     entry.configure(state="disabled")
@@ -1501,6 +1508,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
     def _apply_waveform(self, image: Image.Image) -> None:
         self.preview_pil = image
         self._draw_preview_image(image)
+        self.timeline.set_waveform(image)
         self.preview_status_label.configure(text="Audio waveform", text_color=MUTED)
 
     def _on_timeline_seek(self, value: float) -> None:
@@ -1510,7 +1518,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.start_var.set(format_time(start))
         self.end_var.set(format_time(end))
         self._update_range_labels()
+        self._update_export_summary()
         self._seek_player(self.timeline.playhead)
+        self._record_history_snapshot()
 
     def _update_current_time_label(self) -> None:
         if not self.info:
@@ -1583,7 +1593,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
             self.playhead_var.set(self.timeline.playhead)
             self._update_range_labels()
             self._update_current_time_label()
+            self._update_export_summary()
             self.schedule_preview()
+            self._record_history_snapshot()
         except Exception as exc:
             if not silent:
                 messagebox.showerror(APP_TITLE, str(exc), parent=self)
@@ -1599,6 +1611,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.start_var.set(format_time(playhead))
         self.timeline.set_range(playhead, end)
         self._update_range_labels()
+        self._update_export_summary()
+        self._record_history_snapshot()
 
     def set_out_here(self) -> None:
         if not self.info:
@@ -1611,6 +1625,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.end_var.set(format_time(playhead))
         self.timeline.set_range(start, playhead)
         self._update_range_labels()
+        self._update_export_summary()
+        self._record_history_snapshot()
 
     def step_playhead(self, delta: float) -> None:
         if not self.info:
