@@ -1654,11 +1654,15 @@ class MediaEditorWindow(ctk.CTkToplevel):
             if not self.custom_h_var.get():
                 self.custom_h_var.set(str(self.info.height))
         self._apply_player_video_transform()
+        self._update_export_summary()
         self.schedule_preview(delay=40)
+        self._record_history_snapshot()
 
     def _rotation_changed(self, _value: str) -> None:
         self._apply_player_video_transform()
+        self._update_export_summary()
         self.schedule_preview(delay=20)
+        self._record_history_snapshot()
 
     def _apply_player_video_transform(self) -> None:
         if self.player is None or not self.player.ready or not self.info or not self.info.has_video:
@@ -1692,7 +1696,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
             crop = self._current_custom_crop()
             compute_crop(self.info, "Custom", crop)
             self._apply_player_video_transform()
+            self._update_export_summary()
             self.schedule_preview(delay=20)
+            self._record_history_snapshot()
             self.status_label.configure(text="Custom crop applied to preview", text_color=SUCCESS)
         except Exception as exc:
             messagebox.showerror(APP_TITLE, str(exc), parent=self)
@@ -1716,16 +1722,18 @@ class MediaEditorWindow(ctk.CTkToplevel):
         if self.player is not None:
             self.player.set_volume(self.volume_var.get() / 100.0)
             self.player.set_mute(self.mute_var.get())
+        self._record_history_snapshot()
 
     def _speed_changed(self, _value: str) -> None:
-        if self.player is None:
-            return
-        supported = self.player.set_rate(self._speed_value())
-        self.player_rate_supported = supported
-        if supported:
-            self.preview_status_label.configure(text=f"Playback speed: {self.speed_var.get()}", text_color=MUTED)
-        else:
-            self.preview_status_label.configure(text="Speed change will apply on export", text_color=WARNING)
+        if self.player is not None:
+            supported = self.player.set_rate(self._speed_value())
+            self.player_rate_supported = supported
+            if supported:
+                self.preview_status_label.configure(text=f"Playback speed: {self.speed_var.get()}", text_color=MUTED)
+            else:
+                self.preview_status_label.configure(text="Speed change will apply on export", text_color=WARNING)
+        self._update_export_summary()
+        self._record_history_snapshot()
 
     def reset_video_edits(self) -> None:
         if self.render_busy:
