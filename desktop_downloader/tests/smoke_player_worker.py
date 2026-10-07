@@ -87,7 +87,10 @@ def main() -> int:
                     continue
                 if not line.strip():
                     continue
-                message = json.loads(line)
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 if message.get("type") == "ready":
                     ready = True
                     if process.stdin:
