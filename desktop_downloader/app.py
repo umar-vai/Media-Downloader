@@ -25,6 +25,8 @@ from tkinter import filedialog, messagebox
 
 from app_logging import get_logger, log_path
 from diagnostics_window import DiagnosticsWindow
+from history_store import HistoryStore, make_history_entry
+from history_window import HistoryWindow
 from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
 from media_sources import browser_headers, detect_platform, extraction_attempts, is_supported_media_url, platform_name, request_options, video_format_selector
@@ -36,6 +38,7 @@ APP_NAME = "Media Downloader"
 DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "Media Downloader"
 CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / "MediaDownloader"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
+HISTORY_FILE = CONFIG_DIR / "history.json"
 LEGACY_CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / ("Team" + "Fahad" + "Downloader")
 LEGACY_CONFIG_FILE = LEGACY_CONFIG_DIR / "settings.json"
 UPDATE_DIR = Path(os.getenv("LOCALAPPDATA") or CONFIG_DIR) / "MediaDownloader" / "updates"
@@ -238,12 +241,14 @@ class DownloaderApp(ctk.CTk):
         self.editor_window: MediaEditorWindow | None = None
         self.diagnostics_window: DiagnosticsWindow | None = None
         self.settings_window: SettingsWindow | None = None
+        self.history_window: HistoryWindow | None = None
         self.task_state = TaskState.IDLE
         self._job_counter = 0
         self.active_job_id: int | None = None
         self.active_job_cancel: threading.Event | None = None
 
         self.settings = load_settings()
+        self.history_store = HistoryStore(HISTORY_FILE)
         self.download_dir = Path(str(self.settings.get("download_dir") or DEFAULT_DOWNLOAD_DIR)).expanduser()
         self.latest_release: ReleaseInfo | None = None
         self.downloaded_update: Path | None = None
@@ -267,6 +272,7 @@ class DownloaderApp(ctk.CTk):
 
         self._center_window()
         self._build_ui()
+        self._sync_recent_file()
         LOGGER.info("App started version=%s executable=%s", APP_VERSION, sys.executable)
         self.after(120, self._drain_events)
         self.after(700, lambda: self._show_update_result(attempt=0))
@@ -361,6 +367,21 @@ class DownloaderApp(ctk.CTk):
 
         ctk.CTkButton(
             top,
+            text="History",
+            width=82,
+            height=30,
+            corner_radius=9,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 9),
+            command=self.open_history,
+        ).grid(row=0, column=3, padx=(12, 0))
+
+        ctk.CTkButton(
+            top,
             text="Settings",
             width=88,
             height=30,
@@ -372,7 +393,7 @@ class DownloaderApp(ctk.CTk):
             text_color=TEXT,
             font=("Segoe UI Semibold", 9),
             command=self.open_settings,
-        ).grid(row=0, column=3, padx=(12, 0))
+        ).grid(row=0, column=4, padx=(8, 0))
 
         ctk.CTkLabel(
             top,
@@ -382,7 +403,7 @@ class DownloaderApp(ctk.CTk):
             fg_color=SURFACE_2,
             text_color=CYAN,
             font=("Segoe UI Semibold", 10),
-        ).grid(row=0, column=4, padx=(12, 24))
+        ).grid(row=0, column=5, padx=(12, 24))
 
     def _build_hero(self) -> None:
         hero = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -1344,12 +1365,31 @@ class DownloaderApp(ctk.CTk):
             return
 
         name = safe_filename(self.name_var.get(), "media_download")
+        info = self.current_info if isinstance(self.current_info, dict) else {}
+        try:
+            history_duration = max(0, int(float(info.get("duration") or 0)))
+        except (TypeError, ValueError):
+            history_duration = 0
+        mode = self.mode_var.get()
+        audio_format = self.audio_format_var.get()
+        audio_quality = self.audio_quality_var.get()
+        video_quality = self.video_quality_var.get()
         request_settings = {
-            "mode": self.mode_var.get(),
-            "video_quality": self.video_quality_var.get(),
-            "audio_format": self.audio_format_var.get().lower(),
-            "audio_quality": self.audio_quality_var.get(),
+            "mode": mode,
+            "video_quality": video_quality,
+            "audio_format": audio_format.lower(),
+            "audio_quality": audio_quality,
             "edit_after_download": bool(edit_after_download),
+            "history_title": str(info.get("title") or self.name_var.get() or name),
+            "history_creator": str(info.get("channel") or info.get("uploader") or info.get("creator") or ""),
+            "history_platform": platform,
+            "history_duration": history_duration,
+            "history_quality": (
+                str(video_quality)
+                if mode == "Video"
+                else f"{audio_format.upper()} {audio_quality} kbps"
+            ),
+            "source_url": url,
         }
         job_id, cancel_event = self._begin_job(TaskState.DOWNLOADING)
         self.edit_after_download = bool(edit_after_download)
@@ -1486,7 +1526,20 @@ class DownloaderApp(ctk.CTk):
                 raise RuntimeError("Download finished, but the final file could not be located.")
 
             final_path = max(candidates, key=lambda path: path.stat().st_mtime)
-            self._put_job_event("done", job_id, str(final_path))
+            self._put_job_event(
+                "done",
+                job_id,
+                {
+                    "path": str(final_path),
+                    "title": request_settings.get("history_title") or name,
+                    "source_url": request_settings.get("source_url") or url,
+                    "platform": request_settings.get("history_platform") or "",
+                    "creator": request_settings.get("history_creator") or "",
+                    "mode": request_settings.get("mode") or "Video",
+                    "quality": request_settings.get("history_quality") or "",
+                    "duration_seconds": request_settings.get("history_duration") or 0,
+                },
+            )
         except Exception as exc:
             if cancel_event.is_set():
                 self._put_job_event("cancelled", job_id, "Download cancelled.")
@@ -1580,16 +1633,41 @@ class DownloaderApp(ctk.CTk):
                     self._set_status(str(data or ""), "working")
 
                 elif kind == "done":
-                    self.last_file = Path(str(data))
+                    detail = dict(data) if isinstance(data, dict) else {"path": str(data)}
+                    completed_path = Path(str(detail.get("path") or ""))
+                    self.last_file = completed_path
                     self.progress.set(1)
                     self.progress_label.configure(text="100%")
-                    self.speed_label.configure(text=self.last_file.name)
+                    self.speed_label.configure(text=completed_path.name)
                     self.task_state = TaskState.DOWNLOADED
                     self._set_status("Download completed successfully", "success")
-                    self.open_file_button.configure(state="normal")
+
+                    try:
+                        entry = make_history_entry(
+                            completed_path,
+                            title=str(detail.get("title") or completed_path.stem),
+                            source_url=str(detail.get("source_url") or ""),
+                            platform=str(detail.get("platform") or ""),
+                            creator=str(detail.get("creator") or ""),
+                            mode=str(detail.get("mode") or "Video"),
+                            quality=str(detail.get("quality") or ""),
+                            duration_seconds=int(detail.get("duration_seconds") or 0),
+                        )
+                        self.history_store.add(entry)
+                        LOGGER.info("Download history recorded file=%s", completed_path)
+                    except Exception:
+                        LOGGER.exception("Could not save download history file=%s", completed_path)
+
+                    self._sync_recent_file()
+                    if self.history_window is not None:
+                        try:
+                            if self.history_window.winfo_exists():
+                                self.history_window.refresh()
+                        except Exception:
+                            self.history_window = None
+
                     should_edit = self.edit_after_download
                     self.edit_after_download = False
-                    completed_path = self.last_file
                     self._finish_job(job_id)
                     if should_edit:
                         self.after(200, lambda path=completed_path: self.open_editor(path))
@@ -1721,11 +1799,15 @@ class DownloaderApp(ctk.CTk):
             LOGGER.info("Editor window closed")
 
     def open_last_file(self) -> None:
+        if not self.last_file or not self.last_file.exists():
+            self._sync_recent_file()
         if self.last_file and self.last_file.exists():
             if os.name == "nt":
                 os.startfile(str(self.last_file))
             else:
                 subprocess.Popen(["xdg-open", str(self.last_file)])
+        else:
+            self.open_history()
 
     def clear_form(self) -> None:
         self._cancel_auto_analyze()
@@ -2036,6 +2118,50 @@ class DownloaderApp(ctk.CTk):
         save_settings(self.settings)
         self.top_update_button.grid_remove()
         self.update_detail_label.configure(text="Update reminder snoozed for 24 hours.")
+
+    def _sync_recent_file(self) -> None:
+        recent = self.history_store.most_recent_existing()
+        self.last_file = Path(str(recent["file_path"])) if recent else None
+        if hasattr(self, "open_file_button"):
+            self.open_file_button.configure(state="normal" if self.last_file else "disabled")
+
+    def open_history(self) -> None:
+        existing = self.history_window
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                self.history_window = None
+
+        try:
+            self.history_window = HistoryWindow(
+                self,
+                self.history_store,
+                on_edit=lambda path: self.open_editor(path),
+                on_change=self._sync_recent_file,
+            )
+            self.history_window.bind(
+                "<Destroy>",
+                lambda event: self._history_destroyed(event),
+                add="+",
+            )
+            self.history_window.focus()
+            LOGGER.info("Download history window opened")
+        except Exception as exc:
+            LOGGER.exception("Could not open download history")
+            self.history_window = None
+            messagebox.showerror(APP_NAME, f"Could not open Download History.\n\n{exc}")
+
+    def _history_destroyed(self, event: Any) -> None:
+        window = self.history_window
+        if window is not None and event.widget is window:
+            self.history_window = None
+            self._sync_recent_file()
+            LOGGER.info("Download history window closed")
 
     def open_settings(self) -> None:
         existing = self.settings_window
