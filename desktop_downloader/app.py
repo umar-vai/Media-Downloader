@@ -164,6 +164,7 @@ class DownloaderApp(ctk.CTk):
         self.geometry("1120x760")
         self.minsize(980, 700)
         self.configure(fg_color=BG)
+        self.protocol("WM_DELETE_WINDOW", self._close_app)
 
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.current_info: dict[str, Any] | None = None
@@ -202,6 +203,26 @@ class DownloaderApp(ctk.CTk):
         self.after(700, lambda: self._show_update_result(attempt=0))
         if self.auto_check_updates_var.get():
             self.after(1500, lambda: self.check_for_updates(manual=False))
+
+    def _close_app(self) -> None:
+        active = self.is_busy or self.update_downloading
+        if active:
+            if not messagebox.askyesno(
+                APP_NAME,
+                "A task is still running. Cancel it and close Media Downloader?",
+                parent=self,
+            ):
+                return
+            if self.active_job_cancel is not None:
+                self.active_job_cancel.set()
+            if self.update_cancel_event is not None:
+                self.update_cancel_event.set()
+        LOGGER.info(
+            "App closing task_state=%s update_downloading=%s",
+            self.task_state.value,
+            self.update_downloading,
+        )
+        self.destroy()
 
     def _center_window(self) -> None:
         self.update_idletasks()
