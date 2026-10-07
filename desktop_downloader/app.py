@@ -13,6 +13,7 @@ import time
 import urllib.request
 import webbrowser
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from PIL import Image
 from imageio_ffmpeg import get_ffmpeg_exe
 from tkinter import filedialog, messagebox
 
+from app_logging import get_logger, log_path
 from media_editor import MediaEditorWindow
 from media_sources import browser_headers, detect_platform, extraction_attempts, is_supported_media_url, platform_name, request_options, video_format_selector
 from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_release, fetch_latest_release, is_newer_version
@@ -54,6 +56,18 @@ DANGER = "#FF647C"
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+
+LOGGER = get_logger("main")
+
+
+class TaskState(str, Enum):
+    IDLE = "idle"
+    ANALYZING = "analyzing"
+    READY = "ready"
+    DOWNLOADING = "downloading"
+    DOWNLOADED = "downloaded"
+    CANCELLED = "cancelled"
+    ERROR = "error"
 
 
 def safe_filename(value: str, fallback: str = "media_download") -> str:
@@ -158,6 +172,10 @@ class DownloaderApp(ctk.CTk):
         self.is_busy = False
         self.edit_after_download = False
         self.editor_window: MediaEditorWindow | None = None
+        self.task_state = TaskState.IDLE
+        self._job_counter = 0
+        self.active_job_id: int | None = None
+        self.active_job_cancel: threading.Event | None = None
 
         self.settings = load_settings()
         self.download_dir = Path(str(self.settings.get("download_dir") or DEFAULT_DOWNLOAD_DIR)).expanduser()
@@ -178,8 +196,9 @@ class DownloaderApp(ctk.CTk):
 
         self._center_window()
         self._build_ui()
+        LOGGER.info("App started version=%s executable=%s", APP_VERSION, sys.executable)
         self.after(120, self._drain_events)
-        self.after(700, self._show_update_result)
+        self.after(700, lambda: self._show_update_result(attempt=0))
         if self.auto_check_updates_var.get():
             self.after(1500, lambda: self.check_for_updates(manual=False))
 
@@ -640,6 +659,21 @@ class DownloaderApp(ctk.CTk):
         self.speed_label = ctk.CTkLabel(progress_row, text="", text_color=MUTED, font=("Segoe UI", 10))
         self.speed_label.grid(row=0, column=1, sticky="e")
 
+        self.cancel_job_button = ctk.CTkButton(
+            progress_row,
+            text="Cancel task",
+            width=92,
+            height=30,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.cancel_current_job,
+            state="disabled",
+        )
+        self.cancel_job_button.grid(row=0, column=2, sticky="e", padx=(12, 0))
+
         actions = ctk.CTkFrame(card, fg_color="transparent")
         actions.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 18))
         for index in range(4):
@@ -893,16 +927,63 @@ class DownloaderApp(ctk.CTk):
             self.url_var.set(text)
             self.url_entry.focus_set()
 
+    def _begin_job(self, state: TaskState) -> tuple[int, threading.Event]:
+        self._job_counter += 1
+        job_id = self._job_counter
+        cancel_event = threading.Event()
+        self.active_job_id = job_id
+        self.active_job_cancel = cancel_event
+        self.task_state = state
+        LOGGER.info("Job %s started state=%s", job_id, state.value)
+        return job_id, cancel_event
+
+    def _is_current_job(self, job_id: int) -> bool:
+        return self.active_job_id == job_id
+
+    def _put_job_event(self, kind: str, job_id: int, data: Any = None) -> None:
+        self.events.put((kind, {"job_id": job_id, "data": data}))
+
+    def _finish_job(self, job_id: int) -> None:
+        if self.active_job_id != job_id:
+            return
+        LOGGER.info("Job %s finished state=%s", job_id, self.task_state.value)
+        self.active_job_id = None
+        self.active_job_cancel = None
+        self._set_busy(False)
+
+    def cancel_current_job(self) -> None:
+        event = self.active_job_cancel
+        if not self.is_busy or event is None:
+            return
+        event.set()
+        self.cancel_job_button.configure(state="disabled", text="Cancelling…")
+        self._set_status("Cancelling current task…", "working")
+        LOGGER.info("Cancellation requested for job %s", self.active_job_id)
+
     def _set_busy(self, busy: bool) -> None:
         self.is_busy = busy
         state = "disabled" if busy else "normal"
         self.read_button.configure(state=state)
         self.paste_button.configure(state=state)
+        self.url_entry.configure(state=state)
+        self.mode_control.configure(state=state)
+        self.name_entry.configure(state=state)
         self.download_button.configure(state=state)
         self.edit_download_button.configure(state=state)
         self.edit_local_button.configure(state=state)
         self.choose_folder_button.configure(state=state)
         self.reset_folder_button.configure(state=state)
+        if busy:
+            self.video_quality.configure(state="disabled")
+            self.audio_format.configure(state="disabled")
+            self.audio_quality.configure(state="disabled")
+        else:
+            self._sync_mode(self.mode_var.get())
+        if hasattr(self, "cancel_job_button"):
+            self.cancel_job_button.configure(
+                state="normal" if busy else "disabled",
+                text="Cancel task",
+            )
 
     def _set_status(self, text: str, kind: str = "ready") -> None:
         palette = {
