@@ -161,8 +161,8 @@ class DownloaderApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("1120x760")
-        self.minsize(980, 700)
+        self.geometry("1080x720")
+        self.minsize(860, 620)
         self.configure(fg_color=BG)
         self.protocol("WM_DELETE_WINDOW", self._close_app)
 
@@ -188,6 +188,10 @@ class DownloaderApp(ctk.CTk):
 
         self.url_var = ctk.StringVar()
         self.name_var = ctk.StringVar()
+        self.open_editor_after_var = ctk.BooleanVar(value=False)
+        self.url_auto_after_id: str | None = None
+        self.last_analyzed_url = ""
+        self.update_expanded = False
         self.mode_var = ctk.StringVar(value="Video")
         self.video_quality_var = ctk.StringVar(value="720p")
         self.audio_format_var = ctk.StringVar(value="MP3")
@@ -320,7 +324,22 @@ class DownloaderApp(ctk.CTk):
             fg_color="#0D2A2A",
             text_color=SUCCESS,
             font=("Segoe UI Semibold", 10),
-        ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(20, 0))
+        ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(20, 10))
+
+        self.edit_local_button = ctk.CTkButton(
+            hero,
+            text="Edit local media",
+            width=132,
+            height=34,
+            corner_radius=10,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            command=self.open_editor,
+        )
+        self.edit_local_button.grid(row=0, column=2, rowspan=2, sticky="e")
 
     def _card(self, master: Any, **kwargs: Any) -> ctk.CTkFrame:
         return ctk.CTkFrame(master, fg_color=SURFACE, corner_radius=18, border_width=1, border_color=BORDER, **kwargs)
@@ -363,6 +382,7 @@ class DownloaderApp(ctk.CTk):
         )
         self.url_entry.grid(row=0, column=0, sticky="ew")
         self.url_entry.bind("<Return>", lambda _event: self.analyze_media())
+        self.url_entry.bind("<KeyRelease>", self._on_url_changed)
 
         self.paste_button = ctk.CTkButton(
             row,
@@ -639,7 +659,6 @@ class DownloaderApp(ctk.CTk):
         primary_actions = ctk.CTkFrame(card, fg_color="transparent")
         primary_actions.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 14))
         primary_actions.grid_columnconfigure(0, weight=1)
-        primary_actions.grid_columnconfigure(1, weight=1)
 
         self.download_button = ctk.CTkButton(
             primary_actions,
@@ -652,20 +671,22 @@ class DownloaderApp(ctk.CTk):
             font=("Segoe UI Semibold", 13),
             command=self.download,
         )
-        self.download_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.download_button.grid(row=0, column=0, sticky="ew", padx=(0, 14))
 
-        self.edit_download_button = ctk.CTkButton(
+        self.open_editor_after_check = ctk.CTkCheckBox(
             primary_actions,
-            text="Edit & download",
-            height=54,
-            corner_radius=13,
+            text="Open in editor after download",
+            variable=self.open_editor_after_var,
+            width=210,
+            checkbox_width=22,
+            checkbox_height=22,
             fg_color=PURPLE,
             hover_color=PURPLE_HOVER,
-            text_color="#FFFFFF",
-            font=("Segoe UI Semibold", 13),
-            command=self.download_for_editing,
+            border_color=BORDER,
+            text_color=TEXT,
+            font=("Segoe UI", 11),
         )
-        self.edit_download_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        self.open_editor_after_check.grid(row=0, column=1, sticky="e")
 
         self.progress = ctk.CTkProgressBar(card, height=10, corner_radius=6, fg_color=SURFACE_3, progress_color=PURPLE)
         self.progress.grid(row=2, column=0, sticky="ew", padx=18)
@@ -698,7 +719,7 @@ class DownloaderApp(ctk.CTk):
 
         actions = ctk.CTkFrame(card, fg_color="transparent")
         actions.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 18))
-        for index in range(4):
+        for index in range(3):
             actions.grid_columnconfigure(index, weight=1)
 
         self.open_file_button = ctk.CTkButton(
@@ -727,19 +748,6 @@ class DownloaderApp(ctk.CTk):
             text_color=TEXT,
             command=self.open_download_folder,
         ).grid(row=0, column=1, sticky="ew", padx=6)
-        self.edit_local_button = ctk.CTkButton(
-            actions,
-            text="Edit local media",
-            height=40,
-            corner_radius=10,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
-            text_color=TEXT,
-            command=self.open_editor,
-        )
-        self.edit_local_button.grid(row=0, column=2, sticky="ew", padx=6)
         ctk.CTkButton(
             actions,
             text="Clear workspace",
@@ -751,15 +759,32 @@ class DownloaderApp(ctk.CTk):
             border_color=BORDER,
             text_color=MUTED,
             command=self.clear_form,
-        ).grid(row=0, column=3, sticky="ew", padx=(6, 0))
+        ).grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
     def _build_update_card(self) -> None:
-        card = self._card(self.content)
+        self.update_card = self._card(self.content)
+        card = self.update_card
         card.grid(row=5, column=0, sticky="ew", pady=(0, 14))
         card.grid_columnconfigure(0, weight=1)
-        self._section_title(card, "03 / Updates", "Keep the app up to date")
+        self._section_title(card, "03 / Updates", "Updates & preferences")
 
-        body = ctk.CTkFrame(card, fg_color="transparent")
+        self.update_toggle_button = ctk.CTkButton(
+            card,
+            text="Show settings",
+            width=108,
+            height=32,
+            corner_radius=9,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.toggle_update_panel,
+        )
+        self.update_toggle_button.grid(row=0, column=0, sticky="e", padx=18, pady=(4, 0))
+
+        self.update_body = ctk.CTkFrame(card, fg_color="transparent")
+        body = self.update_body
         body.grid(row=1, column=0, sticky="ew", padx=18, pady=(14, 18))
         body.grid_columnconfigure(0, weight=1)
 
@@ -912,6 +937,17 @@ class DownloaderApp(ctk.CTk):
         )
         self.release_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
 
+        self.update_body.grid_remove()
+
+    def toggle_update_panel(self) -> None:
+        self.update_expanded = not self.update_expanded
+        if self.update_expanded:
+            self.update_body.grid()
+            self.update_toggle_button.configure(text="Hide settings")
+        else:
+            self.update_body.grid_remove()
+            self.update_toggle_button.configure(text="Show settings")
+
     def _build_footer(self) -> None:
         footer = ctk.CTkFrame(self.content, fg_color="transparent")
         footer.grid(row=6, column=0, sticky="ew", pady=(2, 12))
@@ -963,7 +999,6 @@ class DownloaderApp(ctk.CTk):
         self.audio_format_label.configure(text_color="#50617C" if is_video else TEXT)
         self.audio_quality_label.configure(text_color="#50617C" if is_video else TEXT)
         self.download_button.configure(text="Download video" if is_video else "Download audio")
-        self.edit_download_button.configure(text="Edit & download video" if is_video else "Edit & download audio")
         self.output_hint.configure(
             text="MP4 video\nFFmpeg merge when needed" if is_video else "Audio-only export\nChoose format + bitrate"
         )
@@ -976,6 +1011,48 @@ class DownloaderApp(ctk.CTk):
         if text:
             self.url_var.set(text)
             self.url_entry.focus_set()
+            self._on_url_changed()
+
+    def _cancel_auto_analyze(self) -> None:
+        if self.url_auto_after_id is None:
+            return
+        try:
+            self.after_cancel(self.url_auto_after_id)
+        except Exception:
+            pass
+        self.url_auto_after_id = None
+
+    def _on_url_changed(self, _event: Any = None) -> None:
+        if self.is_busy:
+            return
+        self._cancel_auto_analyze()
+        url = self.url_var.get().strip()
+
+        if url != self.last_analyzed_url:
+            self.current_info = None
+            self.name_var.set("")
+            self.title_label.configure(text="Ready to analyze this link" if url else "Analyze media to see its details here")
+            self.meta_label.configure(
+                text="Media details will load automatically."
+                if url
+                else "Title, creator, platform and duration will appear after analysis."
+            )
+            self.media_badge.configure(
+                text="LINK READY" if detect_platform(url) else "WAITING FOR LINK",
+                fg_color=SURFACE_2,
+                text_color=CYAN if detect_platform(url) else MUTED,
+            )
+            self._apply_thumbnail(None)
+
+        if detect_platform(url) and url != self.last_analyzed_url:
+            self.url_auto_after_id = self.after(650, self._auto_analyze_now)
+
+    def _auto_analyze_now(self) -> None:
+        self.url_auto_after_id = None
+        url = self.url_var.get().strip()
+        if self.is_busy or not detect_platform(url) or url == self.last_analyzed_url:
+            return
+        self.analyze_media()
 
     def _begin_job(self, state: TaskState) -> tuple[int, threading.Event]:
         self._job_counter += 1
@@ -1019,7 +1096,7 @@ class DownloaderApp(ctk.CTk):
         self.mode_control.configure(state=state)
         self.name_entry.configure(state=state)
         self.download_button.configure(state=state)
-        self.edit_download_button.configure(state=state)
+        self.open_editor_after_check.configure(state=state)
         self.edit_local_button.configure(state=state)
         self.choose_folder_button.configure(state=state)
         self.reset_folder_button.configure(state=state)
@@ -1050,6 +1127,7 @@ class DownloaderApp(ctk.CTk):
     def analyze_media(self) -> None:
         if self.is_busy:
             return
+        self._cancel_auto_analyze()
         url = self.url_var.get().strip()
         platform = detect_platform(url)
         if not platform:
@@ -1155,7 +1233,7 @@ class DownloaderApp(ctk.CTk):
             self._put_job_event("analysis_finished", job_id)
 
     def download(self) -> None:
-        self._start_download(edit_after_download=False)
+        self._start_download(edit_after_download=bool(self.open_editor_after_var.get()))
 
     def download_for_editing(self) -> None:
         self._start_download(edit_after_download=True)
@@ -1387,6 +1465,7 @@ class DownloaderApp(ctk.CTk):
                 if kind == "info":
                     media = dict(data or {})
                     self.current_info = media.get("info")
+                    self.last_analyzed_url = self.url_var.get().strip()
                     self.name_var.set(safe_filename(str(media.get("title") or "Media")))
                     self.title_label.configure(text=str(media.get("title") or "Media"))
                     platform_label = platform_name(str(media.get("platform") or ""))
@@ -1563,6 +1642,9 @@ class DownloaderApp(ctk.CTk):
                 subprocess.Popen(["xdg-open", str(self.last_file)])
 
     def clear_form(self) -> None:
+        self._cancel_auto_analyze()
+        self.last_analyzed_url = ""
+        self.open_editor_after_var.set(False)
         self.task_state = TaskState.IDLE
         self.active_job_id = None
         self.active_job_cancel = None

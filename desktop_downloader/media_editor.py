@@ -129,13 +129,19 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.quality_var = ctk.StringVar(value="High")
 
         self.title(APP_TITLE)
-        self.geometry("1280x840")
-        self.minsize(1100, 740)
+        self.geometry("1240x800")
+        self.minsize(980, 650)
         self.configure(fg_color=BG)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
         self._build_ui()
         self.bind("<space>", self._on_space)
+        self.bind("<KeyPress-i>", lambda event: self._on_mark_shortcut(event, "in"))
+        self.bind("<KeyPress-o>", lambda event: self._on_mark_shortcut(event, "out"))
+        self.bind("<Left>", lambda event: self._on_arrow_shortcut(event, -1, False))
+        self.bind("<Right>", lambda event: self._on_arrow_shortcut(event, 1, False))
+        self.bind("<Shift-Left>", lambda event: self._on_arrow_shortcut(event, -1, True))
+        self.bind("<Shift-Right>", lambda event: self._on_arrow_shortcut(event, 1, True))
         self.after(40, self._drain_ui_queue)
         self.after(80, self._start_load)
 
@@ -346,7 +352,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
 
         self.preview_status_label = ctk.CTkLabel(
             transport,
-            text="Space = Play/Pause",
+            text="Space Play/Pause • I/O In/Out • ←/→ Frame",
             text_color=MUTED,
             font=("Segoe UI", 9),
             anchor="w",
@@ -383,9 +389,23 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.tabs.add("Audio")
         self.tabs.add("Export")
 
-        self._build_video_tab(self.tabs.tab("Video"))
-        self._build_audio_tab(self.tabs.tab("Audio"))
-        self._build_export_tab(self.tabs.tab("Export"))
+        tab_surfaces = {}
+        for name in ("Video", "Audio", "Export"):
+            tab = self.tabs.tab(name)
+            tab.grid_columnconfigure(0, weight=1)
+            tab.grid_rowconfigure(0, weight=1)
+            surface = ctk.CTkScrollableFrame(
+                tab,
+                fg_color="transparent",
+                scrollbar_button_color=SURFACE_3,
+                scrollbar_button_hover_color=PURPLE,
+            )
+            surface.grid(row=0, column=0, sticky="nsew")
+            tab_surfaces[name] = surface
+
+        self._build_video_tab(tab_surfaces["Video"])
+        self._build_audio_tab(tab_surfaces["Audio"])
+        self._build_export_tab(tab_surfaces["Export"])
 
     def _field_label(self, master: Any, text: str) -> ctk.CTkLabel:
         return ctk.CTkLabel(master, text=text, text_color=MUTED, font=("Segoe UI", 9), anchor="w")
@@ -1175,6 +1195,35 @@ class MediaEditorWindow(ctk.CTkToplevel):
             except Exception:
                 pass
         self.schedule_preview(delay=40)
+
+    def _shortcut_allowed(self) -> bool:
+        focus = self.focus_get()
+        try:
+            if focus is not None and focus.winfo_class() in {"Entry", "TEntry", "Text"}:
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _on_mark_shortcut(self, _event: Any, target: str) -> str | None:
+        if not self._shortcut_allowed() or self.render_busy:
+            return None
+        if target == "in":
+            self.set_in_here()
+        else:
+            self.set_out_here()
+        return "break"
+
+    def _on_arrow_shortcut(self, _event: Any, direction: int, coarse: bool) -> str | None:
+        if not self._shortcut_allowed() or self.render_busy:
+            return None
+        if coarse:
+            delta = 5.0 * direction
+        else:
+            fps = self.info.fps if self.info and self.info.fps > 0 else 25.0
+            delta = direction / max(1.0, fps)
+        self.step_playhead(delta)
+        return "break"
 
     def _on_space(self, _event: Any) -> str | None:
         focus = self.focus_get()

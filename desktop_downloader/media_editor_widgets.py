@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+import time
 from typing import Callable
 
 from PIL import Image, ImageTk
@@ -43,6 +44,7 @@ class TimelineCanvas(tk.Canvas):
         self.drag_target: str | None = None
         self.thumbnail_pils: list[Image.Image] = []
         self.thumbnail_refs: list[ImageTk.PhotoImage] = []
+        self._last_scrub_notify = 0.0
 
         self.bind("<Configure>", lambda _event: self.redraw())
         self.bind("<Button-1>", self._on_press)
@@ -200,7 +202,13 @@ class TimelineCanvas(tk.Canvas):
         self._apply_drag(event.x, notify=False)
 
     def _on_drag(self, event) -> None:
-        self._apply_drag(event.x, notify=False)
+        notify = False
+        if self.drag_target == "playhead":
+            now = time.monotonic()
+            if now - self._last_scrub_notify >= 0.04:
+                self._last_scrub_notify = now
+                notify = True
+        self._apply_drag(event.x, notify=notify)
 
     def _on_release(self, event) -> None:
         self._apply_drag(event.x, notify=True)
