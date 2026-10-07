@@ -108,7 +108,7 @@ class MediaEditorEngineTests(unittest.TestCase):
         self.assertIn("-nostdin", command)
 
     def test_safe_export_name(self) -> None:
-        self.assertEqual(safe_export_name('bad:/name*?.mp4'), "bad__name__.mp4")
+        self.assertEqual(safe_export_name('bad:/name*?.mp4'), "bad_name_.mp4")
 
 
 if __name__ == "__main__":
