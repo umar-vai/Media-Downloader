@@ -1029,6 +1029,10 @@ class DownloaderApp(ctk.CTk):
         url = self.url_var.get().strip()
 
         if url != self.last_analyzed_url:
+            # Once the user edits an analyzed URL, invalidate that snapshot.
+            # This also lets returning to the same URL trigger a fresh analysis.
+            if self.last_analyzed_url:
+                self.last_analyzed_url = ""
             self.current_info = None
             self.name_var.set("")
             self.title_label.configure(text="Ready to analyze this link" if url else "Analyze media to see its details here")
