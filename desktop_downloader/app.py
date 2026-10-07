@@ -274,7 +274,7 @@ class DownloaderApp(ctk.CTk):
         self._build_update_card()
         self._build_footer()
         self.url_entry.focus_set()
-        self._sync_mode("Video")
+        self._sync_mode(self.mode_var.get())
 
     def _build_topbar(self) -> None:
         top = ctk.CTkFrame(self, height=62, corner_radius=0, fg_color=SURFACE, border_width=0)
@@ -2036,7 +2036,7 @@ class DownloaderApp(ctk.CTk):
             mode = "Video"
 
         video_quality = str(payload.get("video_quality") or "720p")
-        if video_quality not in {"Best", "1080p", "720p", "480p", "360p"}:
+        if video_quality not in {"Best available", "1080p", "720p", "480p", "360p"}:
             video_quality = "720p"
 
         audio_format = str(payload.get("audio_format") or "MP3").upper()
