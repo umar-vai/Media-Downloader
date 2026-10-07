@@ -983,6 +983,48 @@ class DownloaderApp(ctk.CTk):
         if text:
             self.url_var.set(text)
             self.url_entry.focus_set()
+            self._on_url_changed()
+
+    def _cancel_auto_analyze(self) -> None:
+        if self.url_auto_after_id is None:
+            return
+        try:
+            self.after_cancel(self.url_auto_after_id)
+        except Exception:
+            pass
+        self.url_auto_after_id = None
+
+    def _on_url_changed(self, _event: Any = None) -> None:
+        if self.is_busy:
+            return
+        self._cancel_auto_analyze()
+        url = self.url_var.get().strip()
+
+        if url != self.last_analyzed_url:
+            self.current_info = None
+            self.name_var.set("")
+            self.title_label.configure(text="Ready to analyze this link" if url else "Analyze media to see its details here")
+            self.meta_label.configure(
+                text="Media details will load automatically."
+                if url
+                else "Title, creator, platform and duration will appear after analysis."
+            )
+            self.media_badge.configure(
+                text="LINK READY" if detect_platform(url) else "WAITING FOR LINK",
+                fg_color=SURFACE_2,
+                text_color=CYAN if detect_platform(url) else MUTED,
+            )
+            self._apply_thumbnail(None)
+
+        if detect_platform(url) and url != self.last_analyzed_url:
+            self.url_auto_after_id = self.after(650, self._auto_analyze_now)
+
+    def _auto_analyze_now(self) -> None:
+        self.url_auto_after_id = None
+        url = self.url_var.get().strip()
+        if self.is_busy or not detect_platform(url) or url == self.last_analyzed_url:
+            return
+        self.analyze_media()
 
     def _begin_job(self, state: TaskState) -> tuple[int, threading.Event]:
         self._job_counter += 1
@@ -1057,6 +1099,7 @@ class DownloaderApp(ctk.CTk):
     def analyze_media(self) -> None:
         if self.is_busy:
             return
+        self._cancel_auto_analyze()
         url = self.url_var.get().strip()
         platform = detect_platform(url)
         if not platform:
@@ -1394,6 +1437,7 @@ class DownloaderApp(ctk.CTk):
                 if kind == "info":
                     media = dict(data or {})
                     self.current_info = media.get("info")
+                    self.last_analyzed_url = self.url_var.get().strip()
                     self.name_var.set(safe_filename(str(media.get("title") or "Media")))
                     self.title_label.configure(text=str(media.get("title") or "Media"))
                     platform_label = platform_name(str(media.get("platform") or ""))
@@ -1570,6 +1614,9 @@ class DownloaderApp(ctk.CTk):
                 subprocess.Popen(["xdg-open", str(self.last_file)])
 
     def clear_form(self) -> None:
+        self._cancel_auto_analyze()
+        self.last_analyzed_url = ""
+        self.open_editor_after_var.set(False)
         self.task_state = TaskState.IDLE
         self.active_job_id = None
         self.active_job_cancel = None
