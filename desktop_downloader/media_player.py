@@ -89,6 +89,22 @@ class EmbeddedMediaPlayer:
             except Exception:
                 pass
 
+    def set_rate(self, value: float) -> bool:
+        """Apply playback rate when supported by the bundled backend."""
+        with self._lock:
+            if self._closed:
+                return False
+            rate = max(0.25, min(4.0, float(value)))
+            for method_name in ("set_playback_rate", "set_rate"):
+                method = getattr(self._player, method_name, None)
+                if callable(method):
+                    try:
+                        method(rate)
+                        return True
+                    except Exception:
+                        continue
+            return False
+
     def next_frame(self) -> tuple[bytes, tuple[int, int], float | None, Any] | None:
         """Return RGB bytes, size, PTS and ffpyplayer's scheduling value."""
         with self._lock:
