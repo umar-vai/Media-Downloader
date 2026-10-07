@@ -1534,6 +1534,39 @@ class MediaEditorWindow(ctk.CTkToplevel):
         except Exception:
             self.selection_label.configure(text="Selection: invalid range")
 
+    def _update_export_summary(self) -> None:
+        if not hasattr(self, "export_summary_label") or self.info is None:
+            return
+        try:
+            start = max(0.0, min(parse_time(self.start_var.get()), self.info.duration))
+            end = max(start, min(parse_time(self.end_var.get()), self.info.duration))
+            selected = max(0.0, end - start)
+            speed = max(0.01, self._speed_value())
+            output_duration = selected / speed
+            fmt = self.format_var.get()
+            if self.info.has_video:
+                crop = compute_crop(self.info, self.crop_var.get(), self._current_custom_crop())
+                if crop:
+                    _x, _y, width, height = crop
+                else:
+                    width, height = self.info.width, self.info.height
+                if self.rotate_var.get() in {"90°", "270°"}:
+                    width, height = height, width
+                dimensions = f"{width}×{height}" if width and height else "source resolution"
+                detail = (
+                    f"{fmt} • {self.quality_var.get()} • {dimensions}\n"
+                    f"Selection {format_time(selected)} → output ≈ {format_time(output_duration)} at {speed:g}×"
+                )
+            else:
+                codec_note = "PCM lossless" if fmt == "WAV" else "192 kbps audio"
+                detail = (
+                    f"{fmt} • {codec_note}\n"
+                    f"Selection {format_time(selected)} → output ≈ {format_time(output_duration)} at {speed:g}×"
+                )
+            self.export_summary_label.configure(text=detail)
+        except Exception:
+            self.export_summary_label.configure(text="Adjust the edit settings to calculate output details.")
+
     def apply_range_entries(self, silent: bool = False) -> None:
         if not self.info:
             return
