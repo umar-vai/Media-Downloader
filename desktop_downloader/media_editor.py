@@ -867,6 +867,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.preview_clip_button.configure(state="normal")
 
     def _load_failed(self, error: str) -> None:
+        LOGGER.error("Media load failed source=%s error=%s", self.source_path, error)
         self.loading_chip.configure(text="ERROR", fg_color="#31131B", text_color=DANGER)
         self.status_label.configure(text="Could not load media", text_color=DANGER)
         self.preview_canvas.delete("all")
@@ -1007,6 +1008,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             text_color=WARNING,
         )
         detail = (error or "Playback helper stopped unexpectedly.").strip()
+        LOGGER.warning("Playback fallback active source=%s error=%s", self.source_path, detail)
         self.status_label.configure(text=f"Playback fallback active: {detail[-240:]}", text_color=WARNING)
         if self.info and self.info.has_video:
             self.schedule_preview(delay=20)
@@ -1235,6 +1237,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.preview_status_label.configure(text="Preview ready", text_color=MUTED)
 
     def _preview_failed(self, error: str) -> None:
+        LOGGER.warning("Frame preview failed source=%s error=%s", self.source_path, error)
         self.preview_status_label.configure(text="Preview failed", text_color=DANGER)
         self.status_label.configure(text=f"Preview error: {error[-180:]}", text_color=DANGER)
 
@@ -1632,6 +1635,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
 
     def _preview_clip_done(self, output: Path) -> None:
         self.preview_clip_busy = False
+        self._set_render_busy(False)
+        LOGGER.info("Edited preview rendered source=%s output=%s", self.source_path, output)
         self.progress.stop()
         self.progress.configure(mode="determinate")
         self.progress.set(0)
@@ -1645,6 +1650,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
 
     def _preview_clip_failed(self, error: str) -> None:
         self.preview_clip_busy = False
+        self._set_render_busy(False)
+        LOGGER.error("Edited preview failed source=%s error=%s", self.source_path, error)
         self.progress.stop()
         self.progress.configure(mode="determinate")
         self.progress.set(0)
@@ -1768,6 +1775,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
             pass
 
     def _export_cancelled_ui(self) -> None:
+        self._set_render_busy(False)
+        LOGGER.info("Export cancelled source=%s", self.source_path)
         self.progress.set(0)
         self.export_button.configure(state="normal", text="Export edited media")
         self.preview_clip_button.configure(state="normal")
@@ -1775,7 +1784,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.status_label.configure(text="Export cancelled", text_color=MUTED)
 
     def _export_done(self, output: Path) -> None:
+        self._set_render_busy(False)
         self.last_export = output
+        LOGGER.info("Export completed source=%s output=%s", self.source_path, output)
         self.progress.set(1)
         self.export_button.configure(state="normal", text="Export edited media")
         self.preview_clip_button.configure(state="normal")
@@ -1796,6 +1807,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         )
 
     def _export_failed(self, error: str) -> None:
+        self._set_render_busy(False)
+        LOGGER.error("Export failed source=%s error=%s", self.source_path, error)
         self.progress.set(0)
         self.export_button.configure(state="normal", text="Export edited media")
         self.preview_clip_button.configure(state="normal")
