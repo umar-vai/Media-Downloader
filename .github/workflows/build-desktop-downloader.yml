@@ -175,18 +175,22 @@ jobs:
         shell: pwsh
         run: |
           choco install innosetup -y --no-progress
-          $iscc = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup*" -Recurse -File -Filter "ISCC.exe" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-          if (-not $iscc) {
-            $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          $isccPath = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup*" -Recurse -File -Filter "ISCC.exe" -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $isccPath) {
+            $isccCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($isccCommand) {
+              $isccPath = $isccCommand.Source
+            }
           }
-          if (-not $iscc) {
+          if (-not $isccPath) {
             throw "Inno Setup compiler was not found."
           }
+          Write-Host "Using Inno Setup compiler: $isccPath"
           $appVersion = python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from version import APP_VERSION; print(APP_VERSION)"
           $sourceDir = (Resolve-Path "dist\installed\MediaDownloader").Path
           $outputDir = (Resolve-Path "dist").Path
-          & $iscc.FullName "/DAppVersion=$appVersion" "/DSourceDir=$sourceDir" "/DOutputDir=$outputDir" "desktop_downloader\installer\MediaDownloader.iss"
+          & $isccPath "/DAppVersion=$appVersion" "/DSourceDir=$sourceDir" "/DOutputDir=$outputDir" "desktop_downloader\installer\MediaDownloader.iss"
           if ($LASTEXITCODE -ne 0) {
             throw "Inno Setup build failed."
           }
