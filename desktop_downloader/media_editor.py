@@ -420,7 +420,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             left,
             variable=self.rotate_var,
             values=["0°", "90°", "180°", "270°"],
-            command=lambda _value: self.schedule_preview(),
+            command=self._rotation_changed,
             fg_color=SURFACE_3,
             button_color=PURPLE,
         )
@@ -875,6 +875,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         messagebox.showerror(APP_TITLE, error, parent=self)
 
     def _on_preview_resize(self, _event=None) -> None:
+        if self.player is not None and self.player.ready:
+            return
         if self.preview_pil is not None:
             self._draw_preview_image(self.preview_pil)
 
@@ -898,9 +900,16 @@ class MediaEditorWindow(ctk.CTkToplevel):
             return image
         try:
             crop = compute_crop(self.info, self.crop_var.get(), self._current_custom_crop())
-            if crop:
+            if crop and self.info.width > 0 and self.info.height > 0:
                 x, y, width, height = crop
-                image = image.crop((x, y, x + width, y + height))
+                scale_x = image.width / self.info.width
+                scale_y = image.height / self.info.height
+                left = max(0, int(round(x * scale_x)))
+                top = max(0, int(round(y * scale_y)))
+                right = min(image.width, int(round((x + width) * scale_x)))
+                bottom = min(image.height, int(round((y + height) * scale_y)))
+                if right > left and bottom > top:
+                    image = image.crop((left, top, right, bottom))
         except Exception:
             pass
 
@@ -915,23 +924,87 @@ class MediaEditorWindow(ctk.CTkToplevel):
 
     def _init_embedded_player(self) -> None:
         try:
-            self.player = EmbeddedMediaPlayer(self.source_path)
-            self.player.set_volume(0.0 if self.mute_var.get() else min(1.0, self.volume_var.get() / 100.0))
-            self.player_rate_supported = self.player.set_rate(self._speed_value())
-            self.player.seek(float(self.playhead_var.get()))
-            self.play_button.configure(state="normal")
-            self.preview_status_label.configure(text="Embedded player ready • Space = Play/Pause", text_color=MUTED)
-            self._schedule_player_tick(20)
-        except PlayerUnavailableError as exc:
-            self.player = None
-            self.play_button.configure(state="disabled")
-            self.preview_status_label.configure(text="Embedded playback unavailable; using frame preview", text_color=WARNING)
-            self.status_label.configure(text=str(exc), text_color=WARNING)
+            self.update_idletasks()
+            window_id = self.preview_canvas.winfo_id() if self.info and self.info.has_video else None
+            player = EmbeddedMediaPlayer(
+                self.source_path,
+                window_id=window_id,
+                audio_only=bool(self.info and not self.info.has_video),
+            )
+            self.player = player
+            self.play_button.configure(text="Starting player…", state="disabled")
+            self.preview_status_label.configure(text="Starting crash-isolated playback engine…", text_color=WARNING)
+            threading.Thread(
+                target=self._wait_for_player_worker,
+                args=(player,),
+                daemon=True,
+            ).start()
         except Exception as exc:
-            self.player = None
-            self.play_button.configure(state="disabled")
-            self.preview_status_label.configure(text="Player failed; using frame preview", text_color=WARNING)
-            self.status_label.configure(text=f"Player error: {exc}", text_color=WARNING)
+            self._player_failed(None, str(exc))
+
+    def _wait_for_player_worker(self, player: EmbeddedMediaPlayer) -> None:
+        ready = False
+        try:
+            ready = player.wait_until_ready(timeout=6.0)
+            error = player.last_error
+        except Exception as exc:
+            error = str(exc)
+        self._post_ui(self._finish_player_startup, player, ready, error)
+
+    def _finish_player_startup(
+        self,
+        player: EmbeddedMediaPlayer,
+        ready: bool,
+        error: str,
+    ) -> None:
+        if self._closing or self.player is not player:
+            try:
+                player.close()
+            except Exception:
+                pass
+            return
+        if not ready:
+            self._player_failed(player, error or "Playback worker did not become ready.")
+            return
+        try:
+            player.set_volume(self.volume_var.get() / 100.0)
+            player.set_mute(self.mute_var.get())
+            self.player_rate_supported = player.set_rate(self._speed_value())
+            self._apply_player_video_transform()
+            player.seek(float(self.playhead_var.get()))
+            self.preview_generation += 1
+            if self.info and self.info.has_video:
+                self.preview_canvas.delete("all")
+            self.play_button.configure(text="▶ Play", state="normal")
+            self.preview_status_label.configure(text="Embedded mpv player ready • Space = Play/Pause", text_color=MUTED)
+            self._schedule_player_tick(20)
+        except Exception as exc:
+            self._player_failed(player, str(exc))
+
+    def _player_failed(
+        self,
+        player: EmbeddedMediaPlayer | None,
+        error: str,
+    ) -> None:
+        if player is not None and self.player is not player:
+            return
+        old_player = self.player
+        self.player = None
+        self.playing = False
+        if old_player is not None:
+            try:
+                old_player.close()
+            except Exception:
+                pass
+        self.play_button.configure(text="Playback unavailable", state="disabled")
+        self.preview_status_label.configure(
+            text="Native player stopped safely • using frame preview",
+            text_color=WARNING,
+        )
+        detail = (error or "Playback helper stopped unexpectedly.").strip()
+        self.status_label.configure(text=f"Playback fallback active: {detail[-240:]}", text_color=WARNING)
+        if self.info and self.info.has_video:
+            self.schedule_preview(delay=20)
 
     def _schedule_player_tick(self, delay: int = 18) -> None:
         if self._closing or self.player is None:
@@ -948,20 +1021,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
         if self._closing or self.player is None:
             return
         try:
-            frame = self.player.next_frame(force_refresh=not self.playing)
-            frame_pts: float | None = None
-            frame_schedule: Any = None
-            if frame is not None:
-                data, size, frame_pts, frame_schedule = frame
-                if self.info and self.info.has_video:
-                    image = Image.frombytes("RGB", size, data)
-                    self.preview_pil = self._transform_live_frame(image)
-                    self._draw_preview_image(self.preview_pil)
-
             position = self.player.position()
-            if position is None:
-                position = frame_pts
-
             if position is not None:
                 position = max(0.0, min(float(position), self.info.duration if self.info else float(position)))
                 if self.playing and self.info:
@@ -976,17 +1036,11 @@ class MediaEditorWindow(ctk.CTkToplevel):
                 self.timeline.set_playhead(position)
                 self._update_current_time_label()
 
-            if self.playing and isinstance(frame_schedule, (int, float)):
-                wait_ms = max(5, min(120, int(max(0.0, float(frame_schedule)) * 1000)))
-            else:
-                wait_ms = 12 if self.playing else 90
-            self._schedule_player_tick(wait_ms)
+            self._schedule_player_tick(24 if self.playing else 100)
         except Exception as exc:
             self.pause_playback()
-            self.preview_status_label.configure(text="Embedded playback error; frame preview still available", text_color=DANGER)
-            self.status_label.configure(text=f"Playback error: {exc}", text_color=DANGER)
-            if self.info and self.info.has_video:
-                self.schedule_preview(delay=30)
+            failed_player = self.player
+            self._player_failed(failed_player, str(exc))
 
     def toggle_playback(self) -> None:
         if self.player is None:
@@ -1004,6 +1058,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
     def start_playback(self) -> None:
         if self.player is None or not self.info:
             return
+        if not self.player.ready:
+            self.status_label.configure(text="Playback engine is still starting…", text_color=WARNING)
+            return
         try:
             start = parse_time(self.start_var.get())
             end = parse_time(self.end_var.get())
@@ -1013,7 +1070,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
                 self.player.seek(position)
                 self.playhead_var.set(position)
                 self.timeline.set_playhead(position)
-            self.player.set_volume(0.0 if self.mute_var.get() else min(1.0, self.volume_var.get() / 100.0))
+            self.player.set_volume(self.volume_var.get() / 100.0)
+            self.player.set_mute(self.mute_var.get())
             self.player_rate_supported = self.player.set_rate(self._speed_value())
             self.player.play()
             self.playing = True
@@ -1023,7 +1081,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
             self._schedule_player_tick(5)
         except Exception as exc:
             self.playing = False
-            self.status_label.configure(text=f"Could not start playback: {exc}", text_color=DANGER)
+            failed_player = self.player
+            self._player_failed(failed_player, str(exc))
 
     def pause_playback(self) -> None:
         if self.player is not None:
@@ -1064,7 +1123,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
         return "break"
 
     def schedule_preview(self, delay: int = 140) -> None:
-        if not self.info or not self.info.has_video or self.player is not None:
+        if not self.info or not self.info.has_video:
+            return
+        if self.player is not None and self.player.ready:
             return
         if self.preview_after_id is not None:
             try:
@@ -1117,6 +1178,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
 
     def _apply_preview_frame(self, generation: int, image: Image.Image) -> None:
         if generation != self.preview_generation:
+            return
+        if self.player is not None and self.player.ready:
             return
         self.preview_pil = image
         self._draw_preview_image(image)
@@ -1274,7 +1337,25 @@ class MediaEditorWindow(ctk.CTkToplevel):
                 self.custom_w_var.set(str(self.info.width))
             if not self.custom_h_var.get():
                 self.custom_h_var.set(str(self.info.height))
+        self._apply_player_video_transform()
         self.schedule_preview(delay=40)
+
+    def _rotation_changed(self, _value: str) -> None:
+        self._apply_player_video_transform()
+        self.schedule_preview(delay=20)
+
+    def _apply_player_video_transform(self) -> None:
+        if self.player is None or not self.player.ready or not self.info or not self.info.has_video:
+            return
+        try:
+            crop = compute_crop(self.info, self.crop_var.get(), self._current_custom_crop())
+            rotate_map = {"0°": 0, "90°": 90, "180°": 180, "270°": 270}
+            self.player.set_video_transform(
+                crop=crop,
+                rotate_degrees=rotate_map.get(self.rotate_var.get(), 0),
+            )
+        except Exception as exc:
+            self.status_label.configure(text=f"Preview transform error: {exc}", text_color=WARNING)
 
     def _current_custom_crop(self) -> tuple[int, int, int, int] | None:
         if self.crop_var.get() != "Custom":
@@ -1292,6 +1373,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
         try:
             crop = self._current_custom_crop()
             compute_crop(self.info, "Custom", crop)
+            self._apply_player_video_transform()
             self.schedule_preview(delay=20)
             self.status_label.configure(text="Custom crop applied to preview", text_color=SUCCESS)
         except Exception as exc:
@@ -1303,7 +1385,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
     def _volume_changed(self, value: float) -> None:
         self.volume_text.configure(text=f"Volume {int(float(value))}%")
         if self.player is not None:
-            self.player.set_volume(0.0 if self.mute_var.get() else min(1.0, float(value) / 100.0))
+            self.player.set_volume(float(value) / 100.0)
+            self.player.set_mute(self.mute_var.get())
 
     def _sync_audio_state(self) -> None:
         if not self.info or not self.info.has_audio:
@@ -1313,7 +1396,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.fade_in_entry.configure(state=state)
         self.fade_out_entry.configure(state=state)
         if self.player is not None:
-            self.player.set_volume(0.0 if self.mute_var.get() else min(1.0, self.volume_var.get() / 100.0))
+            self.player.set_volume(self.volume_var.get() / 100.0)
+            self.player.set_mute(self.mute_var.get())
 
     def _speed_changed(self, _value: str) -> None:
         if self.player is None:
@@ -1338,6 +1422,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             self.custom_y_var.set("0")
             self.custom_w_var.set(str(self.info.width))
             self.custom_h_var.set(str(self.info.height))
+        self._apply_player_video_transform()
         self.schedule_preview(delay=40)
 
     def reset_audio_edits(self) -> None:
