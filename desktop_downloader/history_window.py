@@ -307,26 +307,8 @@ class HistoryWindow(ctk.CTkToplevel):
             font=("Segoe UI Semibold", 12),
             anchor="w",
             justify="left",
-            wraplength=590,
+            wraplength=720,
         ).grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 2))
-
-        ctk.CTkLabel(
-            card,
-            text=" • ".join(detail_parts),
-            text_color=MUTED,
-            font=("Segoe UI", 9),
-            anchor="w",
-        ).grid(row=1, column=0, sticky="w", padx=12)
-
-        ctk.CTkLabel(
-            card,
-            text=str(path),
-            text_color="#647795" if exists else DANGER,
-            font=("Segoe UI", 8),
-            anchor="w",
-            justify="left",
-            wraplength=620,
-        ).grid(row=2, column=0, sticky="ew", padx=12, pady=(2, 10))
 
         badge = ctk.CTkLabel(
             card,
@@ -340,8 +322,26 @@ class HistoryWindow(ctk.CTkToplevel):
         )
         badge.grid(row=0, column=1, padx=(4, 12), pady=(10, 2))
 
+        ctk.CTkLabel(
+            card,
+            text=" • ".join(detail_parts),
+            text_color=MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=12)
+
+        ctk.CTkLabel(
+            card,
+            text=str(path),
+            text_color="#647795" if exists else DANGER,
+            font=("Segoe UI", 8),
+            anchor="w",
+            justify="left",
+            wraplength=820,
+        ).grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(2, 7))
+
         actions = ctk.CTkFrame(card, fg_color="transparent")
-        actions.grid(row=1, column=1, rowspan=2, sticky="e", padx=(4, 12), pady=(2, 9))
+        actions.grid(row=3, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
 
         for column, (label, command, enabled) in enumerate(
             [
@@ -355,7 +355,7 @@ class HistoryWindow(ctk.CTkToplevel):
             ctk.CTkButton(
                 actions,
                 text=label,
-                width=72,
+                width=76,
                 height=28,
                 corner_radius=8,
                 fg_color=SURFACE_3 if label != "Remove" else "transparent",
