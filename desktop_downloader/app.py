@@ -902,6 +902,17 @@ class DownloaderApp(ctk.CTk):
             font=("Segoe UI", 9),
         )
         self.save_location_label.grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            footer,
+            text="Open diagnostics log",
+            width=132,
+            height=26,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            text_color=MUTED,
+            font=("Segoe UI", 9),
+            command=self.open_app_log,
+        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
         ctk.CTkLabel(
             footer,
             text="Use only for content you own or have permission to download.",
@@ -1797,6 +1808,19 @@ class DownloaderApp(ctk.CTk):
         save_settings(self.settings)
         self.top_update_button.grid_remove()
         self.update_detail_label.configure(text="Update reminder snoozed for 24 hours.")
+
+    def open_app_log(self) -> None:
+        path = log_path()
+        try:
+            if os.name == "nt":
+                os.startfile(str(path))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as exc:
+            LOGGER.exception("Could not open diagnostics log")
+            messagebox.showerror(APP_NAME, f"Could not open diagnostics log.\n\n{exc}")
 
     def open_release_page(self) -> None:
         if self.latest_release and self.latest_release.html_url:
