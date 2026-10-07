@@ -437,19 +437,31 @@ class SettingsWindow(ctk.CTkToplevel):
         )
         return payload
 
-    def _save(self) -> None:
+    def _save(self) -> bool:
         payload = self._payload()
-        self._on_save(payload)
+        try:
+            self._on_save(payload)
+        except Exception as exc:
+            self.state_label.configure(text="ERROR", fg_color="#351722", text_color="#FF647C")
+            self.status_label.configure(text="Settings were not saved.")
+            messagebox.showerror(
+                "Media Downloader Settings",
+                str(exc) or "Could not save settings.",
+                parent=self,
+            )
+            return False
+
         self._original = copy.deepcopy(payload)
         self._dirty = False
         self.state_label.configure(text="SAVED", fg_color="#0E3025", text_color=SUCCESS)
         self.save_button.configure(state="disabled")
         self.status_label.configure(text="Settings saved and applied.")
         self.after(1800, lambda: self.status_label.configure(text="Changes are saved only when you press Save settings.") if self.winfo_exists() else None)
+        return True
 
     def _check_updates(self) -> None:
-        if self._dirty:
-            self._save()
+        if self._dirty and not self._save():
+            return
         self._on_check_updates()
 
     def _close(self) -> None:
