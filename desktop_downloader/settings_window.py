@@ -246,7 +246,7 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkOptionMenu(
             right,
             variable=self.video_quality_var,
-            values=["Best", "1080p", "720p", "480p", "360p"],
+            values=["Best available", "1080p", "720p", "480p", "360p"],
             fg_color=SURFACE_3,
             button_color=PURPLE,
         ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
@@ -258,7 +258,7 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkOptionMenu(
             audio_left,
             variable=self.audio_format_var,
-            values=["MP3", "M4A", "WAV"],
+            values=["MP3", "M4A"],
             fg_color=SURFACE_3,
             button_color=PURPLE,
         ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
