@@ -221,7 +221,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
 
         trim_card = self._card(body)
         trim_card.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(0, 12))
-        trim_card.grid_columnconfigure((0, 1), weight=1)
+        for column in range(2):
+            trim_card.grid_columnconfigure(column, weight=1)
         ctk.CTkLabel(trim_card, text="TRIM / CUT", text_color=CYAN, font=("Segoe UI Semibold", 10)).grid(
             row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 8)
         )
@@ -232,7 +233,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
 
         video_card = self._card(body)
         video_card.grid(row=2, column=0, sticky="ew", padx=(0, 8), pady=(0, 12))
-        video_card.grid_columnconfigure((0, 1, 2), weight=1)
+        for column in range(3):
+            video_card.grid_columnconfigure(column, weight=1)
         ctk.CTkLabel(video_card, text="VIDEO CONTROLS", text_color=CYAN, font=("Segoe UI Semibold", 10)).grid(
             row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(14, 8)
         )
@@ -284,7 +286,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
 
         fade_card = self._card(side)
         fade_card.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        fade_card.grid_columnconfigure((0, 1), weight=1)
+        for column in range(2):
+            fade_card.grid_columnconfigure(column, weight=1)
         ctk.CTkLabel(fade_card, text="AUDIO FADE", text_color=CYAN, font=("Segoe UI Semibold", 10)).grid(
             row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 8)
         )
@@ -307,7 +310,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         )
         row = ctk.CTkFrame(export_card, fg_color="transparent")
         row.grid(row=3, column=0, sticky="ew", padx=16)
-        row.grid_columnconfigure((0, 1), weight=1)
+        for column in range(2):
+            row.grid_columnconfigure(column, weight=1)
         format_wrap = ctk.CTkFrame(row, fg_color="transparent")
         format_wrap.grid(row=0, column=0, sticky="ew", padx=(0, 5))
         ctk.CTkLabel(format_wrap, text="Format", text_color=MUTED).pack(anchor="w")
@@ -543,7 +547,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             messagebox.showerror("Media Editor", str(exc), parent=self)
 
     def _build_output_path(self) -> Path:
-        name = re.sub(r'[<>:"/\\\\|?*\\x00-\\x1f]+', "_", self.output_name_var.get().strip()).strip(" .")
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", self.output_name_var.get().strip()).strip(" .")
         if not name:
             name = f"{self.source_path.stem}_edited"
         extension = "." + self.format_var.get().lower()
