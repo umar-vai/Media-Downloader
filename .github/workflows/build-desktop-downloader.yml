@@ -120,13 +120,16 @@ jobs:
       - name: Run packaged runtime self-test
         shell: pwsh
         run: |
-          & "dist\MediaDownloader.exe" --self-test --report "dist\packaged-self-test.json"
-          $exitCode = $LASTEXITCODE
-          if (Test-Path "dist\packaged-self-test.json") {
-            Get-Content "dist\packaged-self-test.json"
+          $report = (Join-Path $PWD "dist\packaged-self-test.json")
+          $process = Start-Process -FilePath (Resolve-Path "dist\MediaDownloader.exe").Path `
+            -ArgumentList @("--self-test", "--report", $report) `
+            -Wait -PassThru
+          if (-not (Test-Path $report)) {
+            throw "Packaged runtime self-test did not produce a report."
           }
-          if ($exitCode -ne 0) {
-            throw "Packaged runtime self-test failed with exit code $exitCode."
+          Get-Content $report
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged runtime self-test failed with exit code $($process.ExitCode)."
           }
 
       - name: Generate SHA-256 checksums and compatibility alias
