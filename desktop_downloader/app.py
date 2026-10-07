@@ -597,7 +597,8 @@ class DownloaderApp(ctk.CTk):
 
         primary_actions = ctk.CTkFrame(card, fg_color="transparent")
         primary_actions.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 14))
-        primary_actions.grid_columnconfigure((0, 1), weight=1)
+        primary_actions.grid_columnconfigure(0, weight=1)
+        primary_actions.grid_columnconfigure(1, weight=1)
 
         self.download_button = ctk.CTkButton(
             primary_actions,
