@@ -2096,13 +2096,14 @@ class DownloaderApp(ctk.CTk):
 
         raw_dir = str(payload.get("download_dir") or DEFAULT_DOWNLOAD_DIR).strip()
         download_dir = Path(raw_dir).expanduser() if raw_dir else DEFAULT_DOWNLOAD_DIR
-        try:
-            download_dir.mkdir(parents=True, exist_ok=True)
-            probe = download_dir / ".media_downloader_write_test"
-            probe.write_text("ok", encoding="utf-8")
-            probe.unlink(missing_ok=True)
-        except Exception as exc:
-            raise RuntimeError(f"The selected download folder is not writable: {download_dir}\n\n{exc}") from exc
+        if download_dir != self.download_dir:
+            try:
+                download_dir.mkdir(parents=True, exist_ok=True)
+                probe = download_dir / ".media_downloader_write_test"
+                probe.write_text("ok", encoding="utf-8")
+                probe.unlink(missing_ok=True)
+            except Exception as exc:
+                raise RuntimeError(f"The selected download folder is not writable: {download_dir}\n\n{exc}") from exc
 
         normalized = dict(self.settings)
         normalized.update(
