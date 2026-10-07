@@ -660,6 +660,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             left,
             variable=self.format_var,
             values=["MP4", "MKV", "MOV"],
+            command=lambda _value: self._update_export_summary(),
             fg_color=SURFACE_3,
             button_color=PURPLE,
         )
@@ -672,10 +673,31 @@ class MediaEditorWindow(ctk.CTkToplevel):
             right,
             variable=self.quality_var,
             values=["High", "Balanced", "Small"],
+            command=lambda _value: self._update_export_summary(),
             fg_color=SURFACE_3,
             button_color=PURPLE,
         )
         self.quality_menu.pack(fill="x", pady=(4, 0))
+
+        summary = ctk.CTkFrame(tab, fg_color=SURFACE_2, corner_radius=10)
+        summary.grid(row=4, column=0, sticky="ew", pady=(14, 4))
+        summary.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            summary,
+            text="OUTPUT SUMMARY",
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 9),
+        ).grid(row=0, column=0, sticky="w", padx=10, pady=(9, 2))
+        self.export_summary_label = ctk.CTkLabel(
+            summary,
+            text="Load media to calculate output details.",
+            text_color=MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+            wraplength=290,
+        )
+        self.export_summary_label.grid(row=1, column=0, sticky="ew", padx=10, pady=(2, 10))
 
         self.choose_output_button = ctk.CTkButton(
             tab,
@@ -685,7 +707,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             hover_color=SURFACE_3,
             command=self.choose_output_folder,
         )
-        self.choose_output_button.grid(row=4, column=0, sticky="ew", pady=(14, 6))
+        self.choose_output_button.grid(row=5, column=0, sticky="ew", pady=(10, 6))
 
         self.output_dir_label = ctk.CTkLabel(
             tab,
@@ -696,7 +718,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             justify="left",
             wraplength=310,
         )
-        self.output_dir_label.grid(row=5, column=0, sticky="ew")
+        self.output_dir_label.grid(row=6, column=0, sticky="ew")
 
         ctk.CTkLabel(
             tab,
@@ -705,7 +727,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             font=("Segoe UI", 9),
             justify="left",
             wraplength=310,
-        ).grid(row=6, column=0, sticky="ew", pady=(16, 0))
+        ).grid(row=7, column=0, sticky="ew", pady=(16, 0))
 
     def _build_timeline(self) -> None:
         card = self._card(self)
