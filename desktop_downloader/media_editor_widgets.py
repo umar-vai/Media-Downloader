@@ -39,10 +39,13 @@ class TimelineCanvas(tk.Canvas):
         self.start = 0.0
         self.end = 1.0
         self.playhead = 0.0
+        self.view_start = 0.0
+        self.view_end = 1.0
         self.on_seek = on_seek
         self.on_range_change = on_range_change
         self.drag_target: str | None = None
         self.thumbnail_pils: list[Image.Image] = []
+        self.thumbnail_times: list[float] = []
         self.thumbnail_refs: list[ImageTk.PhotoImage] = []
         self.waveform_pil: Image.Image | None = None
         self.waveform_ref: ImageTk.PhotoImage | None = None
@@ -58,6 +61,8 @@ class TimelineCanvas(tk.Canvas):
         self.start = max(0.0, min(float(start), self.duration))
         self.end = max(self.start + 0.001, min(float(end), self.duration))
         self.playhead = max(0.0, min(float(playhead), self.duration))
+        self.view_start = 0.0
+        self.view_end = self.duration
         self.redraw()
 
     def set_range(self, start: float, end: float, *, notify: bool = False) -> None:
@@ -75,12 +80,28 @@ class TimelineCanvas(tk.Canvas):
 
     def set_playhead(self, value: float, *, notify: bool = False) -> None:
         self.playhead = max(0.0, min(float(value), self.duration))
+        if self.view_end - self.view_start < self.duration - 0.001:
+            span = self.view_end - self.view_start
+            if self.playhead < self.view_start or self.playhead > self.view_end:
+                center = self.playhead
+                self.view_start = max(0.0, min(center - span / 2, self.duration - span))
+                self.view_end = self.view_start + span
         self.redraw()
         if notify and self.on_seek:
             self.on_seek(self.playhead)
 
-    def set_thumbnails(self, images: list[Image.Image]) -> None:
+    def set_thumbnails(self, images: list[Image.Image], times: list[float] | None = None) -> None:
         self.thumbnail_pils = [image.copy() for image in images]
+        if times and len(times) == len(images):
+            self.thumbnail_times = [max(0.0, min(float(value), self.duration)) for value in times]
+        elif images:
+            count = len(images)
+            self.thumbnail_times = [
+                0.0 if count == 1 else self.duration * index / (count - 1)
+                for index in range(count)
+            ]
+        else:
+            self.thumbnail_times = []
         self.waveform_pil = None
         self.redraw()
 
@@ -95,14 +116,39 @@ class TimelineCanvas(tk.Canvas):
 
     def _time_to_x(self, value: float) -> float:
         left, right = self._x_bounds()
-        return left + (max(0.0, min(value, self.duration)) / self.duration) * (right - left)
+        span = max(0.001, self.view_end - self.view_start)
+        clipped = max(self.view_start, min(float(value), self.view_end))
+        return left + ((clipped - self.view_start) / span) * (right - left)
 
     def _x_to_time(self, x: float) -> float:
         left, right = self._x_bounds()
         if right <= left:
-            return 0.0
+            return self.view_start
         fraction = (max(left, min(float(x), right)) - left) / (right - left)
-        return fraction * self.duration
+        return self.view_start + fraction * (self.view_end - self.view_start)
+
+    def fit_view(self) -> None:
+        self.view_start = 0.0
+        self.view_end = self.duration
+        self.redraw()
+
+    def zoom(self, factor: float) -> None:
+        factor = max(0.1, float(factor))
+        current = max(0.001, self.view_end - self.view_start)
+        min_span = min(self.duration, max(1.0, self.duration / 240.0))
+        target = max(min_span, min(self.duration, current / factor))
+        center = max(self.view_start, min(self.playhead, self.view_end))
+        start = center - target / 2
+        start = max(0.0, min(start, self.duration - target))
+        self.view_start = start
+        self.view_end = start + target
+        self.redraw()
+
+    def zoom_in(self) -> None:
+        self.zoom(1.6)
+
+    def zoom_out(self) -> None:
+        self.zoom(1 / 1.6)
 
     def redraw(self) -> None:
         self.delete("all")
