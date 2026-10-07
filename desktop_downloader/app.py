@@ -2078,24 +2078,11 @@ class DownloaderApp(ctk.CTk):
             LOGGER.info("Settings window closed")
 
     def _apply_settings(self, payload: dict[str, Any]) -> None:
-        mode = str(payload.get("default_mode") or "Video")
-        if mode not in {"Video", "Audio"}:
-            mode = "Video"
+        candidate = dict(self.settings)
+        candidate.update(payload)
+        normalized = normalize_settings(candidate)
 
-        video_quality = str(payload.get("video_quality") or "720p")
-        if video_quality not in {"Best available", "1080p", "720p", "480p", "360p"}:
-            video_quality = "720p"
-
-        audio_format = str(payload.get("audio_format") or "MP3").upper()
-        if audio_format not in {"MP3", "M4A", "WAV"}:
-            audio_format = "MP3"
-
-        audio_quality = str(payload.get("audio_quality") or "192")
-        if audio_quality not in {"320", "256", "192", "128"}:
-            audio_quality = "192"
-
-        raw_dir = str(payload.get("download_dir") or DEFAULT_DOWNLOAD_DIR).strip()
-        download_dir = Path(raw_dir).expanduser() if raw_dir else DEFAULT_DOWNLOAD_DIR
+        download_dir = Path(str(normalized["download_dir"])).expanduser()
         if download_dir != self.download_dir:
             try:
                 download_dir.mkdir(parents=True, exist_ok=True)
@@ -2105,38 +2092,23 @@ class DownloaderApp(ctk.CTk):
             except Exception as exc:
                 raise RuntimeError(f"The selected download folder is not writable: {download_dir}\n\n{exc}") from exc
 
-        normalized = dict(self.settings)
-        normalized.update(
-            {
-                "download_dir": str(download_dir),
-                "default_mode": mode,
-                "video_quality": video_quality,
-                "audio_format": audio_format,
-                "audio_quality": audio_quality,
-                "auto_analyze_links": bool(payload.get("auto_analyze_links", True)),
-                "open_editor_after_download": bool(payload.get("open_editor_after_download", False)),
-                "confirm_before_exit": bool(payload.get("confirm_before_exit", True)),
-                "auto_check_updates": bool(payload.get("auto_check_updates", True)),
-                "auto_download_updates": bool(payload.get("auto_download_updates", False)),
-            }
-        )
-
+        normalized["download_dir"] = str(download_dir)
         if not save_settings(normalized):
             raise RuntimeError(f"Could not save settings to {CONFIG_FILE}.")
         self.settings = normalized
 
         self.download_dir = download_dir
         self.download_dir_var.set(str(download_dir))
-        self.mode_var.set(mode)
-        self.video_quality_var.set(video_quality)
-        self.audio_format_var.set(audio_format)
-        self.audio_quality_var.set(audio_quality)
+        self.mode_var.set(str(normalized["default_mode"]))
+        self.video_quality_var.set(str(normalized["video_quality"]))
+        self.audio_format_var.set(str(normalized["audio_format"]))
+        self.audio_quality_var.set(str(normalized["audio_quality"]))
         self.open_editor_after_var.set(bool(normalized["open_editor_after_download"]))
         self.auto_check_updates_var.set(bool(normalized["auto_check_updates"]))
         self.auto_download_updates_var.set(bool(normalized["auto_download_updates"]))
 
         self.save_location_label.configure(text=f"SAVE LOCATION  •  {self.download_dir}")
-        self._sync_mode(mode)
+        self._sync_mode(str(normalized["default_mode"]))
 
         if not self.latest_release:
             self.update_detail_label.configure(
@@ -2149,9 +2121,9 @@ class DownloaderApp(ctk.CTk):
 
         LOGGER.info(
             "Settings applied mode=%s video_quality=%s audio_format=%s download_dir=%s auto_analyze=%s",
-            mode,
-            video_quality,
-            audio_format,
+            normalized["default_mode"],
+            normalized["video_quality"],
+            normalized["audio_format"],
             download_dir,
             normalized["auto_analyze_links"],
         )
@@ -2163,6 +2135,7 @@ class DownloaderApp(ctk.CTk):
             and not self.update_downloading
         ):
             self.after(150, lambda: self._start_update_download(manual=False))
+
 
     def open_diagnostics(self) -> None:
         existing = self.diagnostics_window
