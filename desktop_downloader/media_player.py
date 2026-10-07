@@ -84,7 +84,8 @@ class EmbeddedMediaPlayer:
         self._ready = threading.Event()
         self._latest_position: float | None = None
         self._paused = True
-        self._last_error = ""
+        self._fatal_error = ""
+        self._last_command_error = ""
         self._last_status = ""
         self._ipc = None
         self._commands: "queue.Queue[list[Any]]" = queue.Queue()
@@ -136,12 +137,17 @@ class EmbeddedMediaPlayer:
 
     @property
     def ready(self) -> bool:
-        return self._ready.is_set() and self.available and not self.last_error
+        return self._ready.is_set() and self.available and not self.fatal_error
+
+    @property
+    def fatal_error(self) -> str:
+        with self._lock:
+            return self._fatal_error
 
     @property
     def last_error(self) -> str:
         with self._lock:
-            return self._last_error
+            return self._fatal_error or self._last_command_error
 
     def wait_until_ready(self, timeout: float = 5.0) -> bool:
         self._ready.wait(max(0.0, timeout))
@@ -251,7 +257,7 @@ class EmbeddedMediaPlayer:
 
         if self._ipc is None:
             with self._lock:
-                self._last_error = last_error or "Could not connect to mpv IPC."
+                self._fatal_error = last_error or "Could not connect to mpv IPC."
             self._ready.set()
             return
 
@@ -289,8 +295,8 @@ class EmbeddedMediaPlayer:
                     time.sleep(0.008)
         except Exception as exc:
             with self._lock:
-                if not self._last_error:
-                    self._last_error = str(exc)
+                if not self._fatal_error:
+                    self._fatal_error = str(exc)
         finally:
             if not self._ready.is_set():
                 self._ready.set()
@@ -314,7 +320,7 @@ class EmbeddedMediaPlayer:
             reason = str(message.get("reason") or "")
             if reason == "error":
                 with self._lock:
-                    self._last_error = "mpv could not decode the selected media."
+                    self._fatal_error = "mpv could not decode the selected media."
             return
 
         if event == "property-change":
@@ -337,14 +343,14 @@ class EmbeddedMediaPlayer:
         error = message.get("error")
         if error not in (None, "success"):
             with self._lock:
-                self._last_error = str(error)
+                self._last_command_error = str(error)
 
     def _check_alive(self) -> None:
         if self._closed:
             raise PlayerUnavailableError("Embedded player is closed.")
         code = self._process.poll()
         if code is not None:
-            detail = self.last_error.strip()
+            detail = self.fatal_error.strip() or self.last_error.strip()
             suffix = f" {detail}" if detail else ""
             raise PlayerUnavailableError(f"mpv playback process stopped (exit {code}).{suffix}")
 
