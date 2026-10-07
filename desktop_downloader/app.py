@@ -28,6 +28,7 @@ from diagnostics_window import DiagnosticsWindow
 from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
 from media_sources import browser_headers, detect_platform, extraction_attempts, is_supported_media_url, platform_name, request_options, video_format_selector
+from settings_window import SettingsWindow
 from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_installer_release, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
 
@@ -95,6 +96,13 @@ def default_settings() -> dict[str, Any]:
         "download_dir": str(DEFAULT_DOWNLOAD_DIR),
         "auto_check_updates": True,
         "auto_download_updates": False,
+        "auto_analyze_links": True,
+        "open_editor_after_download": False,
+        "confirm_before_exit": True,
+        "default_mode": "Video",
+        "video_quality": "720p",
+        "audio_format": "MP3",
+        "audio_quality": "192",
         "snooze_version": "",
         "snooze_until": 0,
     }
@@ -176,6 +184,7 @@ class DownloaderApp(ctk.CTk):
         self.edit_after_download = False
         self.editor_window: MediaEditorWindow | None = None
         self.diagnostics_window: DiagnosticsWindow | None = None
+        self.settings_window: SettingsWindow | None = None
         self.task_state = TaskState.IDLE
         self._job_counter = 0
         self.active_job_id: int | None = None
@@ -191,14 +200,14 @@ class DownloaderApp(ctk.CTk):
 
         self.url_var = ctk.StringVar()
         self.name_var = ctk.StringVar()
-        self.open_editor_after_var = ctk.BooleanVar(value=False)
+        self.open_editor_after_var = ctk.BooleanVar(value=bool(self.settings.get("open_editor_after_download", False)))
         self.url_auto_after_id: str | None = None
         self.last_analyzed_url = ""
         self.update_expanded = False
-        self.mode_var = ctk.StringVar(value="Video")
-        self.video_quality_var = ctk.StringVar(value="720p")
-        self.audio_format_var = ctk.StringVar(value="MP3")
-        self.audio_quality_var = ctk.StringVar(value="192")
+        self.mode_var = ctk.StringVar(value=str(self.settings.get("default_mode") or "Video"))
+        self.video_quality_var = ctk.StringVar(value=str(self.settings.get("video_quality") or "720p"))
+        self.audio_format_var = ctk.StringVar(value=str(self.settings.get("audio_format") or "MP3"))
+        self.audio_quality_var = ctk.StringVar(value=str(self.settings.get("audio_quality") or "192"))
         self.download_dir_var = ctk.StringVar(value=str(self.download_dir))
         self.auto_check_updates_var = ctk.BooleanVar(value=bool(self.settings.get("auto_check_updates", True)))
         self.auto_download_updates_var = ctk.BooleanVar(value=bool(self.settings.get("auto_download_updates", False)))
