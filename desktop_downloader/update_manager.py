@@ -224,6 +224,62 @@ def _curl_download(url: str, destination: Path, timeout: int) -> None:
         raise UpdateError("Windows curl fallback downloaded an empty update file.")
 
 
+def _powershell_read(url: str, timeout: int) -> bytes:
+    executable = _powershell_executable()
+    script = (
+        "$ProgressPreference='SilentlyContinue'; "
+        "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; "
+        f"$r=Invoke-WebRequest -UseBasicParsing -Uri '{url}' -TimeoutSec {max(15, timeout)}; "
+        "[Console]::Out.Write($r.Content)"
+    )
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        result = subprocess.run(
+            [executable, "-NoProfile", "-NonInteractive", "-Command", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(45, timeout * 4),
+            check=False,
+            creationflags=creationflags,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise UpdateError(f"PowerShell fallback could not run: {_reason_text(exc)}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise UpdateError(f"PowerShell fallback failed: {detail[:240] or f'exit {result.returncode}'}")
+    return result.stdout
+
+
+def _powershell_download(url: str, destination: Path, timeout: int) -> None:
+    executable = _powershell_executable()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    escaped_url = url.replace("'", "''")
+    escaped_destination = str(destination).replace("'", "''")
+    script = (
+        "$ProgressPreference='SilentlyContinue'; "
+        "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; "
+        f"Invoke-WebRequest -UseBasicParsing -Uri '{escaped_url}' -OutFile '{escaped_destination}' "
+        f"-TimeoutSec {max(30, timeout)}"
+    )
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        result = subprocess.run(
+            [executable, "-NoProfile", "-NonInteractive", "-Command", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(90, timeout * 6),
+            check=False,
+            creationflags=creationflags,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise UpdateError(f"PowerShell download fallback could not run: {_reason_text(exc)}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise UpdateError(f"PowerShell download fallback failed: {detail[:240] or f'exit {result.returncode}'}")
+    if not destination.exists() or destination.stat().st_size <= 0:
+        raise UpdateError("PowerShell fallback downloaded an empty update file.")
+
+
 def _select_best_release(payloads: list[dict]) -> ReleaseInfo:
     candidates: list[ReleaseInfo] = []
     errors: list[str] = []
@@ -450,11 +506,21 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 def _fetch_checksum(url: str, timeout: int) -> str:
+    errors: list[str] = []
     try:
-        with _request(url, timeout=timeout, attempts=5, accept="application/octet-stream") as response:
+        with _request(url, timeout=timeout, attempts=3, accept="application/octet-stream") as response:
             return parse_checksum(response.read(16_384).decode("utf-8", errors="replace"))
-    except UpdateError:
+    except UpdateError as exc:
+        errors.append(f"urllib: {exc}")
+    try:
         return parse_checksum(_curl_read(url, timeout, "application/octet-stream").decode("utf-8", errors="replace"))
+    except UpdateError as exc:
+        errors.append(f"curl: {exc}")
+    try:
+        return parse_checksum(_powershell_read(url, timeout).decode("utf-8", errors="replace"))
+    except UpdateError as exc:
+        errors.append(f"PowerShell: {exc}")
+    raise UpdateError("Could not download the update checksum. " + " | ".join(errors))
 
 
 def download_release(
@@ -504,6 +570,7 @@ def download_release(
                 time.sleep(min(10.0, 1.5 * (2 ** (attempt - 1))))
 
         if last_error:
+            curl_error: UpdateError | None = None
             try:
                 partial_path.unlink(missing_ok=True)
                 _curl_download(release.asset_url, partial_path, timeout)
@@ -511,14 +578,28 @@ def download_release(
                     size = partial_path.stat().st_size
                     progress_callback(size, size)
                 last_error = None
-            except UpdateError as curl_error:
-                if isinstance(last_error, urllib.error.HTTPError):
-                    urllib_detail = f"HTTP {last_error.code}"
-                else:
-                    urllib_detail = _reason_text(last_error)
-                raise UpdateError(
-                    f"Both update download transports failed. urllib: {urllib_detail}. curl: {curl_error}"
-                ) from curl_error
+            except UpdateError as exc:
+                curl_error = exc
+
+            if last_error:
+                try:
+                    partial_path.unlink(missing_ok=True)
+                    _powershell_download(release.asset_url, partial_path, timeout)
+                    if progress_callback:
+                        size = partial_path.stat().st_size
+                        progress_callback(size, size)
+                    last_error = None
+                except UpdateError as powershell_error:
+                    if isinstance(last_error, urllib.error.HTTPError):
+                        urllib_detail = f"HTTP {last_error.code}"
+                    else:
+                        urllib_detail = _reason_text(last_error)
+                    raise UpdateError(
+                        "All update download transports failed. "
+                        f"urllib: {urllib_detail}. "
+                        f"curl: {curl_error or 'not available'}. "
+                        f"PowerShell: {powershell_error}"
+                    ) from powershell_error
 
         if not partial_path.exists() or partial_path.stat().st_size <= 0:
             raise UpdateError("The downloaded update file is empty.")
