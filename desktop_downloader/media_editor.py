@@ -16,6 +16,7 @@ from PIL import Image, ImageTk
 from tkinter import filedialog, messagebox
 
 from app_logging import get_logger
+from editor_history import EditorHistory, EditorSnapshot
 from media_editor_engine import (
     CROP_PRESETS,
     CREATE_NO_WINDOW,
@@ -103,6 +104,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.last_export: Path | None = None
         self.ui_queue: queue.Queue[tuple[Any, tuple[Any, ...]]] = queue.Queue()
         self._closing = False
+        self.history = EditorHistory(limit=60)
+        self._applying_history = False
 
         self.temp_dir = Path(tempfile.gettempdir()) / "MediaDownloaderEditor"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -142,6 +145,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.bind("<Right>", lambda event: self._on_arrow_shortcut(event, 1, False))
         self.bind("<Shift-Left>", lambda event: self._on_arrow_shortcut(event, -1, True))
         self.bind("<Shift-Right>", lambda event: self._on_arrow_shortcut(event, 1, True))
+        self.bind("<Control-z>", lambda event: self._on_history_shortcut(event, "undo"))
+        self.bind("<Control-y>", lambda event: self._on_history_shortcut(event, "redo"))
+        self.bind("<Control-Shift-Z>", lambda event: self._on_history_shortcut(event, "redo"))
         self.after(40, self._drain_ui_queue)
         self.after(80, self._start_load)
 
@@ -238,6 +244,36 @@ class MediaEditorWindow(ctk.CTkToplevel):
         )
         self.loading_chip.grid(row=0, column=2, padx=(8, 8))
 
+        self.undo_button = ctk.CTkButton(
+            top,
+            text="Undo",
+            width=72,
+            height=34,
+            corner_radius=9,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            command=self.undo_edit,
+            state="disabled",
+        )
+        self.undo_button.grid(row=0, column=3, padx=(8, 0))
+
+        self.redo_button = ctk.CTkButton(
+            top,
+            text="Redo",
+            width=72,
+            height=34,
+            corner_radius=9,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            command=self.redo_edit,
+            state="disabled",
+        )
+        self.redo_button.grid(row=0, column=4, padx=(8, 0))
+
         ctk.CTkButton(
             top,
             text="Reset edits",
@@ -249,7 +285,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             border_width=1,
             border_color=BORDER,
             command=self.reset_edits,
-        ).grid(row=0, column=3, padx=(8, 0))
+        ).grid(row=0, column=5, padx=(8, 0))
 
         ctk.CTkButton(
             top,
@@ -262,7 +298,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             border_width=1,
             border_color=BORDER,
             command=self.open_source,
-        ).grid(row=0, column=4, padx=(8, 18))
+        ).grid(row=0, column=6, padx=(8, 18))
 
     def _build_preview(self, workspace: ctk.CTkFrame) -> None:
         card = self._card(workspace)
@@ -568,6 +604,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             command=self._volume_changed,
         )
         self.volume_slider.grid(row=5, column=0, sticky="ew", pady=(5, 16))
+        self.volume_slider.bind("<ButtonRelease-1>", lambda _event: self._record_history_snapshot())
 
         fade = ctk.CTkFrame(tab, fg_color="transparent")
         fade.grid(row=6, column=0, sticky="ew")
@@ -579,12 +616,16 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self._field_label(left, "Fade in (sec)").pack(anchor="w")
         self.fade_in_entry = ctk.CTkEntry(left, textvariable=self.fade_in_var, height=34)
         self.fade_in_entry.pack(fill="x", pady=(4, 0))
+        self.fade_in_entry.bind("<Return>", lambda _event: self._record_history_snapshot())
+        self.fade_in_entry.bind("<FocusOut>", lambda _event: self._record_history_snapshot())
 
         right = ctk.CTkFrame(fade, fg_color="transparent")
         right.grid(row=0, column=1, sticky="ew", padx=(5, 0))
         self._field_label(right, "Fade out (sec)").pack(anchor="w")
         self.fade_out_entry = ctk.CTkEntry(right, textvariable=self.fade_out_var, height=34)
         self.fade_out_entry.pack(fill="x", pady=(4, 0))
+        self.fade_out_entry.bind("<Return>", lambda _event: self._record_history_snapshot())
+        self.fade_out_entry.bind("<FocusOut>", lambda _event: self._record_history_snapshot())
 
         ctk.CTkButton(
             tab,
@@ -624,6 +665,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             left,
             variable=self.format_var,
             values=["MP4", "MKV", "MOV"],
+            command=lambda _value: self._update_export_summary(),
             fg_color=SURFACE_3,
             button_color=PURPLE,
         )
@@ -636,10 +678,31 @@ class MediaEditorWindow(ctk.CTkToplevel):
             right,
             variable=self.quality_var,
             values=["High", "Balanced", "Small"],
+            command=lambda _value: self._update_export_summary(),
             fg_color=SURFACE_3,
             button_color=PURPLE,
         )
         self.quality_menu.pack(fill="x", pady=(4, 0))
+
+        summary = ctk.CTkFrame(tab, fg_color=SURFACE_2, corner_radius=10)
+        summary.grid(row=4, column=0, sticky="ew", pady=(14, 4))
+        summary.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            summary,
+            text="OUTPUT SUMMARY",
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 9),
+        ).grid(row=0, column=0, sticky="w", padx=10, pady=(9, 2))
+        self.export_summary_label = ctk.CTkLabel(
+            summary,
+            text="Load media to calculate output details.",
+            text_color=MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+            wraplength=290,
+        )
+        self.export_summary_label.grid(row=1, column=0, sticky="ew", padx=10, pady=(2, 10))
 
         self.choose_output_button = ctk.CTkButton(
             tab,
@@ -649,7 +712,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             hover_color=SURFACE_3,
             command=self.choose_output_folder,
         )
-        self.choose_output_button.grid(row=4, column=0, sticky="ew", pady=(14, 6))
+        self.choose_output_button.grid(row=5, column=0, sticky="ew", pady=(10, 6))
 
         self.output_dir_label = ctk.CTkLabel(
             tab,
@@ -660,7 +723,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             justify="left",
             wraplength=310,
         )
-        self.output_dir_label.grid(row=5, column=0, sticky="ew")
+        self.output_dir_label.grid(row=6, column=0, sticky="ew")
 
         ctk.CTkLabel(
             tab,
@@ -669,7 +732,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             font=("Segoe UI", 9),
             justify="left",
             wraplength=310,
-        ).grid(row=6, column=0, sticky="ew", pady=(16, 0))
+        ).grid(row=7, column=0, sticky="ew", pady=(16, 0))
 
     def _build_timeline(self) -> None:
         card = self._card(self)
@@ -701,7 +764,46 @@ class MediaEditorWindow(ctk.CTkToplevel):
             text_color="#667996",
             font=("Segoe UI", 9),
         )
-        self.media_info_label.grid(row=0, column=3, sticky="e")
+        self.media_info_label.grid(row=0, column=3, sticky="e", padx=(8, 10))
+
+        ctk.CTkButton(
+            header,
+            text="Fit",
+            width=44,
+            height=26,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.timeline_fit,
+        ).grid(row=0, column=4, padx=(0, 4))
+
+        ctk.CTkButton(
+            header,
+            text="−",
+            width=32,
+            height=26,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            command=self.timeline_zoom_out,
+        ).grid(row=0, column=5, padx=2)
+
+        ctk.CTkButton(
+            header,
+            text="+",
+            width=32,
+            height=26,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            command=self.timeline_zoom_in,
+        ).grid(row=0, column=6, padx=(2, 0))
 
         self.timeline = TimelineCanvas(
             card,
@@ -739,6 +841,18 @@ class MediaEditorWindow(ctk.CTkToplevel):
             text_color=MUTED,
             command=self.reset_range,
         ).grid(row=0, column=4, padx=(16, 0))
+
+    def timeline_fit(self) -> None:
+        if not self.render_busy:
+            self.timeline.fit_view()
+
+    def timeline_zoom_in(self) -> None:
+        if not self.render_busy:
+            self.timeline.zoom_in()
+
+    def timeline_zoom_out(self) -> None:
+        if not self.render_busy:
+            self.timeline.zoom_out()
 
     def _build_bottom_bar(self) -> None:
         bar = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=0, height=62)
@@ -885,6 +999,12 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.status_label.configure(text="Ready to edit", text_color=SUCCESS)
         self.export_button.configure(state="normal")
         self.preview_clip_button.configure(state="normal")
+        if not info.has_video:
+            self.quality_menu.configure(state="disabled")
+        self._update_export_summary()
+        self.history.clear()
+        self.history.push(self._capture_history_snapshot())
+        self._update_history_buttons()
 
     def _load_failed(self, error: str) -> None:
         LOGGER.error("Media load failed source=%s error=%s", self.source_path, error)
@@ -1111,6 +1231,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             if self.info is not None and not self.info.has_video:
                 self.crop_menu.configure(state="disabled")
                 self.rotate_menu.configure(state="disabled")
+                self.quality_menu.configure(state="disabled")
                 self.apply_crop_button.configure(state="disabled")
                 for entry in self.custom_entries:
                     entry.configure(state="disabled")
@@ -1204,6 +1325,101 @@ class MediaEditorWindow(ctk.CTkToplevel):
         except Exception:
             pass
         return True
+
+    def _capture_history_snapshot(self) -> EditorSnapshot:
+        return EditorSnapshot(
+            start=self.start_var.get(),
+            end=self.end_var.get(),
+            crop=self.crop_var.get(),
+            rotate=self.rotate_var.get(),
+            speed=self.speed_var.get(),
+            custom_x=self.custom_x_var.get(),
+            custom_y=self.custom_y_var.get(),
+            custom_w=self.custom_w_var.get(),
+            custom_h=self.custom_h_var.get(),
+            mute=bool(self.mute_var.get()),
+            volume=float(self.volume_var.get()),
+            fade_in=self.fade_in_var.get(),
+            fade_out=self.fade_out_var.get(),
+        )
+
+    def _record_history_snapshot(self) -> None:
+        if self._applying_history or self.info is None or self.render_busy:
+            return
+        if self.history.push(self._capture_history_snapshot()):
+            self._update_history_buttons()
+
+    def _update_history_buttons(self) -> None:
+        if not hasattr(self, "undo_button"):
+            return
+        self.undo_button.configure(state="normal" if self.history.can_undo else "disabled")
+        self.redo_button.configure(state="normal" if self.history.can_redo else "disabled")
+
+    def _apply_history_snapshot(self, snapshot: EditorSnapshot) -> None:
+        if self.info is None:
+            return
+        self._applying_history = True
+        try:
+            self.start_var.set(snapshot.start)
+            self.end_var.set(snapshot.end)
+            self.crop_var.set(snapshot.crop)
+            self.rotate_var.set(snapshot.rotate)
+            self.speed_var.set(snapshot.speed)
+            self.custom_x_var.set(snapshot.custom_x)
+            self.custom_y_var.set(snapshot.custom_y)
+            self.custom_w_var.set(snapshot.custom_w)
+            self.custom_h_var.set(snapshot.custom_h)
+            self.mute_var.set(snapshot.mute)
+            self.volume_var.set(snapshot.volume)
+            self.fade_in_var.set(snapshot.fade_in)
+            self.fade_out_var.set(snapshot.fade_out)
+
+            start = max(0.0, min(parse_time(snapshot.start), self.info.duration))
+            end = max(start + 0.001, min(parse_time(snapshot.end), self.info.duration))
+            self.timeline.set_range(start, end)
+            if self.playhead_var.get() < start or self.playhead_var.get() > end:
+                self._seek_player(start)
+
+            custom = snapshot.crop == "Custom"
+            for entry in self.custom_entries:
+                entry.configure(state="normal" if custom else "disabled")
+            self.apply_crop_button.configure(state="normal" if custom else "disabled")
+
+            self._speed_changed(snapshot.speed)
+            self._volume_changed(snapshot.volume)
+            self._sync_audio_state()
+            self._apply_player_video_transform()
+            self.schedule_preview(delay=20)
+            self._update_range_labels()
+            self._update_export_summary()
+        finally:
+            self._applying_history = False
+        self._update_history_buttons()
+
+    def undo_edit(self) -> None:
+        if self.render_busy:
+            return
+        snapshot = self.history.undo()
+        if snapshot is not None:
+            self._apply_history_snapshot(snapshot)
+            self.status_label.configure(text="Undo applied", text_color=MUTED)
+
+    def redo_edit(self) -> None:
+        if self.render_busy:
+            return
+        snapshot = self.history.redo()
+        if snapshot is not None:
+            self._apply_history_snapshot(snapshot)
+            self.status_label.configure(text="Redo applied", text_color=MUTED)
+
+    def _on_history_shortcut(self, _event: Any, action: str) -> str | None:
+        if not self._shortcut_allowed() or self.render_busy:
+            return None
+        if action == "undo":
+            self.undo_edit()
+        else:
+            self.redo_edit()
+        return "break"
 
     def _on_mark_shortcut(self, _event: Any, target: str) -> str | None:
         if not self._shortcut_allowed() or self.render_busy:
@@ -1317,7 +1533,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
 
     def _thumbnail_worker(self, generation: int, info: MediaInfo) -> None:
         images: list[Image.Image] = []
-        count = 9
+        times: list[float] = []
+        count = 12
         for index in range(count):
             if generation != self.thumbnail_generation:
                 return
@@ -1329,10 +1546,11 @@ class MediaEditorWindow(ctk.CTkToplevel):
                 ]
                 data = extract_preview_frame(self.source_path, position, filters, timeout=7)
                 images.append(Image.open(io.BytesIO(data)).convert("RGB"))
+                times.append(position)
             except Exception:
                 continue
         if generation == self.thumbnail_generation and images:
-            self._post_ui(self.timeline.set_thumbnails, images)
+            self._post_ui(self.timeline.set_thumbnails, images, times)
 
     def _start_waveform_generation(self) -> None:
         threading.Thread(target=self._waveform_worker, daemon=True).start()
@@ -1348,6 +1566,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
     def _apply_waveform(self, image: Image.Image) -> None:
         self.preview_pil = image
         self._draw_preview_image(image)
+        self.timeline.set_waveform(image)
         self.preview_status_label.configure(text="Audio waveform", text_color=MUTED)
 
     def _on_timeline_seek(self, value: float) -> None:
@@ -1357,7 +1576,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.start_var.set(format_time(start))
         self.end_var.set(format_time(end))
         self._update_range_labels()
+        self._update_export_summary()
         self._seek_player(self.timeline.playhead)
+        self._record_history_snapshot()
 
     def _update_current_time_label(self) -> None:
         if not self.info:
@@ -1381,6 +1602,39 @@ class MediaEditorWindow(ctk.CTkToplevel):
         except Exception:
             self.selection_label.configure(text="Selection: invalid range")
 
+    def _update_export_summary(self) -> None:
+        if not hasattr(self, "export_summary_label") or self.info is None:
+            return
+        try:
+            start = max(0.0, min(parse_time(self.start_var.get()), self.info.duration))
+            end = max(start, min(parse_time(self.end_var.get()), self.info.duration))
+            selected = max(0.0, end - start)
+            speed = max(0.01, self._speed_value())
+            output_duration = selected / speed
+            fmt = self.format_var.get()
+            if self.info.has_video:
+                crop = compute_crop(self.info, self.crop_var.get(), self._current_custom_crop())
+                if crop:
+                    _x, _y, width, height = crop
+                else:
+                    width, height = self.info.width, self.info.height
+                if self.rotate_var.get() in {"90°", "270°"}:
+                    width, height = height, width
+                dimensions = f"{width}×{height}" if width and height else "source resolution"
+                detail = (
+                    f"{fmt} • {self.quality_var.get()} • {dimensions}\n"
+                    f"Selection {format_time(selected)} → output ≈ {format_time(output_duration)} at {speed:g}×"
+                )
+            else:
+                codec_note = "PCM lossless" if fmt == "WAV" else "192 kbps audio"
+                detail = (
+                    f"{fmt} • {codec_note}\n"
+                    f"Selection {format_time(selected)} → output ≈ {format_time(output_duration)} at {speed:g}×"
+                )
+            self.export_summary_label.configure(text=detail)
+        except Exception:
+            self.export_summary_label.configure(text="Adjust the edit settings to calculate output details.")
+
     def apply_range_entries(self, silent: bool = False) -> None:
         if not self.info:
             return
@@ -1397,7 +1651,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
             self.playhead_var.set(self.timeline.playhead)
             self._update_range_labels()
             self._update_current_time_label()
+            self._update_export_summary()
             self.schedule_preview()
+            self._record_history_snapshot()
         except Exception as exc:
             if not silent:
                 messagebox.showerror(APP_TITLE, str(exc), parent=self)
@@ -1413,6 +1669,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.start_var.set(format_time(playhead))
         self.timeline.set_range(playhead, end)
         self._update_range_labels()
+        self._update_export_summary()
+        self._record_history_snapshot()
 
     def set_out_here(self) -> None:
         if not self.info:
@@ -1425,6 +1683,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.end_var.set(format_time(playhead))
         self.timeline.set_range(start, playhead)
         self._update_range_labels()
+        self._update_export_summary()
+        self._record_history_snapshot()
 
     def step_playhead(self, delta: float) -> None:
         if not self.info:
@@ -1434,12 +1694,20 @@ class MediaEditorWindow(ctk.CTkToplevel):
     def reset_range(self) -> None:
         if not self.info:
             return
-        self.pause_playback()
-        self.start_var.set("00:00.000")
-        self.end_var.set(format_time(self.info.duration))
-        self.timeline.set_media(self.info.duration, 0.0, self.info.duration, 0.0)
-        self._update_range_labels()
-        self._seek_player(0.0)
+        previous = self._applying_history
+        self._applying_history = True
+        try:
+            self.pause_playback()
+            self.start_var.set("00:00.000")
+            self.end_var.set(format_time(self.info.duration))
+            self.timeline.set_media(self.info.duration, 0.0, self.info.duration, 0.0)
+            self._update_range_labels()
+            self._update_export_summary()
+            self._seek_player(0.0)
+        finally:
+            self._applying_history = previous
+        if not previous:
+            self._record_history_snapshot()
 
     def _crop_changed(self, value: str) -> None:
         custom = value == "Custom"
@@ -1452,11 +1720,15 @@ class MediaEditorWindow(ctk.CTkToplevel):
             if not self.custom_h_var.get():
                 self.custom_h_var.set(str(self.info.height))
         self._apply_player_video_transform()
+        self._update_export_summary()
         self.schedule_preview(delay=40)
+        self._record_history_snapshot()
 
     def _rotation_changed(self, _value: str) -> None:
         self._apply_player_video_transform()
+        self._update_export_summary()
         self.schedule_preview(delay=20)
+        self._record_history_snapshot()
 
     def _apply_player_video_transform(self) -> None:
         if self.player is None or not self.player.ready or not self.info or not self.info.has_video:
@@ -1490,7 +1762,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
             crop = self._current_custom_crop()
             compute_crop(self.info, "Custom", crop)
             self._apply_player_video_transform()
+            self._update_export_summary()
             self.schedule_preview(delay=20)
+            self._record_history_snapshot()
             self.status_label.configure(text="Custom crop applied to preview", text_color=SUCCESS)
         except Exception as exc:
             messagebox.showerror(APP_TITLE, str(exc), parent=self)
@@ -1514,53 +1788,78 @@ class MediaEditorWindow(ctk.CTkToplevel):
         if self.player is not None:
             self.player.set_volume(self.volume_var.get() / 100.0)
             self.player.set_mute(self.mute_var.get())
+        self._record_history_snapshot()
 
     def _speed_changed(self, _value: str) -> None:
-        if self.player is None:
-            return
-        supported = self.player.set_rate(self._speed_value())
-        self.player_rate_supported = supported
-        if supported:
-            self.preview_status_label.configure(text=f"Playback speed: {self.speed_var.get()}", text_color=MUTED)
-        else:
-            self.preview_status_label.configure(text="Speed change will apply on export", text_color=WARNING)
+        if self.player is not None:
+            supported = self.player.set_rate(self._speed_value())
+            self.player_rate_supported = supported
+            if supported:
+                self.preview_status_label.configure(text=f"Playback speed: {self.speed_var.get()}", text_color=MUTED)
+            else:
+                self.preview_status_label.configure(text="Speed change will apply on export", text_color=WARNING)
+        self._update_export_summary()
+        self._record_history_snapshot()
 
     def reset_video_edits(self) -> None:
         if self.render_busy:
             return
-        self.crop_var.set("Original")
-        self.rotate_var.set("0°")
-        self.speed_var.set("1.0x")
-        self._speed_changed("1.0x")
-        for entry in self.custom_entries:
-            entry.configure(state="disabled")
-        self.apply_crop_button.configure(state="disabled")
-        if self.info:
-            self.custom_x_var.set("0")
-            self.custom_y_var.set("0")
-            self.custom_w_var.set(str(self.info.width))
-            self.custom_h_var.set(str(self.info.height))
-        self._apply_player_video_transform()
-        self.schedule_preview(delay=40)
+        previous = self._applying_history
+        self._applying_history = True
+        try:
+            self.crop_var.set("Original")
+            self.rotate_var.set("0°")
+            self.speed_var.set("1.0x")
+            self._speed_changed("1.0x")
+            for entry in self.custom_entries:
+                entry.configure(state="disabled")
+            self.apply_crop_button.configure(state="disabled")
+            if self.info:
+                self.custom_x_var.set("0")
+                self.custom_y_var.set("0")
+                self.custom_w_var.set(str(self.info.width))
+                self.custom_h_var.set(str(self.info.height))
+            self._apply_player_video_transform()
+            self._update_export_summary()
+            self.schedule_preview(delay=40)
+        finally:
+            self._applying_history = previous
+        if not previous:
+            self._record_history_snapshot()
 
     def reset_audio_edits(self) -> None:
         if self.render_busy:
             return
-        self.mute_var.set(False)
-        self.volume_var.set(100)
-        self.speed_var.set("1.0x")
-        self._speed_changed("1.0x")
-        self.fade_in_var.set("0")
-        self.fade_out_var.set("0")
-        self._volume_changed(100)
-        self._sync_audio_state()
+        previous = self._applying_history
+        self._applying_history = True
+        try:
+            self.mute_var.set(False)
+            self.volume_var.set(100)
+            self.speed_var.set("1.0x")
+            self._speed_changed("1.0x")
+            self.fade_in_var.set("0")
+            self.fade_out_var.set("0")
+            self._volume_changed(100)
+            self._sync_audio_state()
+            self._update_export_summary()
+        finally:
+            self._applying_history = previous
+        if not previous:
+            self._record_history_snapshot()
 
     def reset_edits(self) -> None:
         if self.render_busy:
             return
-        self.reset_video_edits()
-        self.reset_audio_edits()
-        self.reset_range()
+        previous = self._applying_history
+        self._applying_history = True
+        try:
+            self.reset_video_edits()
+            self.reset_audio_edits()
+            self.reset_range()
+        finally:
+            self._applying_history = previous
+        if not previous:
+            self._record_history_snapshot()
         self.status_label.configure(text="All edits reset", text_color=MUTED)
         self.progress.stop()
         self.progress.configure(mode="determinate")
