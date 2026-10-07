@@ -130,28 +130,24 @@ def main() -> int:
         state = {"loaded": False, "position": 0.0}
 
         def reader() -> None:
-            buffer = b""
             try:
                 while ipc is not None and not reader_done.is_set():
-                    chunk = ipc.read(4096)
-                    if not chunk:
+                    raw = ipc.readline()
+                    if not raw:
                         break
-                    buffer += chunk
-                    while b"\n" in buffer:
-                        raw, buffer = buffer.split(b"\n", 1)
-                        if not raw.strip():
-                            continue
+                    if not raw.strip():
+                        continue
+                    try:
+                        message = json.loads(raw.decode("utf-8", errors="replace"))
+                    except json.JSONDecodeError:
+                        continue
+                    if message.get("event") == "file-loaded":
+                        state["loaded"] = True
+                    if message.get("event") == "property-change" and message.get("name") == "time-pos":
                         try:
-                            message = json.loads(raw.decode("utf-8", errors="replace"))
-                        except json.JSONDecodeError:
-                            continue
-                        if message.get("event") == "file-loaded":
-                            state["loaded"] = True
-                        if message.get("event") == "property-change" and message.get("name") == "time-pos":
-                            try:
-                                state["position"] = float(message.get("data") or 0.0)
-                            except (TypeError, ValueError):
-                                pass
+                            state["position"] = float(message.get("data") or 0.0)
+                        except (TypeError, ValueError):
+                            pass
             except Exception:
                 pass
 
