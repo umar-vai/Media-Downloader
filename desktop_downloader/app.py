@@ -1720,6 +1720,10 @@ class DownloaderApp(ctk.CTk):
             version_dir = UPDATE_DIR / release.version
             path = download_release(release, version_dir, progress_callback=progress)
             if cancel_event.is_set():
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError:
+                    pass
                 self.events.put(("update_cancelled", None))
                 return
             self.events.put(("update_ready", {"path": str(path), "release": release}))
