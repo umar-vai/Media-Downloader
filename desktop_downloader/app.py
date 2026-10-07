@@ -1004,23 +1004,40 @@ class DownloaderApp(ctk.CTk):
         if not platform:
             messagebox.showerror(APP_NAME, "Please paste a valid YouTube, Facebook or Instagram URL.")
             return
+
+        job_id, cancel_event = self._begin_job(TaskState.ANALYZING)
         self._set_busy(True)
         self.current_info = None
         self.title_label.configure(text=f"Analyzing {platform_name(platform)} media…")
         self.meta_label.configure(text="Trying compatible connection paths…")
         self._apply_thumbnail(None)
         self._set_status(f"Reading {platform_name(platform)} media information…", "working")
-        self.media_badge.configure(text=f"{platform_name(platform).upper()} • ANALYZING", fg_color="#162344", text_color=CYAN)
-        threading.Thread(target=self._analyze_media_worker, args=(url,), daemon=True).start()
+        self.media_badge.configure(
+            text=f"{platform_name(platform).upper()} • ANALYZING",
+            fg_color="#162344",
+            text_color=CYAN,
+        )
+        threading.Thread(
+            target=self._analyze_media_worker,
+            args=(job_id, cancel_event, url),
+            daemon=True,
+        ).start()
 
-    def _analyze_media_worker(self, url: str) -> None:
+    def _analyze_media_worker(self, job_id: int, cancel_event: threading.Event, url: str) -> None:
         try:
             attempts = extraction_attempts(url)
             info: dict[str, Any] = {}
             last_error: Exception | None = None
             for index, (attempt_url, network_options) in enumerate(attempts, start=1):
+                if cancel_event.is_set():
+                    self._put_job_event("cancelled", job_id, "Analysis cancelled.")
+                    return
                 if len(attempts) > 1:
-                    self.events.put(("status", f"Facebook connection attempt {index}/{len(attempts)}…"))
+                    self._put_job_event(
+                        "status",
+                        job_id,
+                        f"Facebook connection attempt {index}/{len(attempts)}…",
+                    )
                 try:
                     with yt_dlp.YoutubeDL(
                         {
@@ -1029,9 +1046,9 @@ class DownloaderApp(ctk.CTk):
                             "skip_download": True,
                             "noplaylist": True,
                             "cachedir": False,
-                            "socket_timeout": 30,
-                            "retries": 2,
-                            "fragment_retries": 2,
+                            "socket_timeout": 20,
+                            "retries": 1,
+                            "fragment_retries": 1,
                             **network_options,
                         }
                     ) as ydl:
@@ -1040,39 +1057,51 @@ class DownloaderApp(ctk.CTk):
                         break
                 except Exception as exc:
                     last_error = exc
+
+            if cancel_event.is_set():
+                self._put_job_event("cancelled", job_id, "Analysis cancelled.")
+                return
             if not info:
-                raise last_error or RuntimeError("No compatible Facebook connection path succeeded.")
+                raise last_error or RuntimeError("No compatible connection path succeeded.")
 
             thumb_bytes = None
             thumbnail_url = str(info.get("thumbnail") or "")
-            if thumbnail_url:
+            if thumbnail_url and not cancel_event.is_set():
                 try:
                     request = urllib.request.Request(thumbnail_url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(request, timeout=12) as response:
+                    with urllib.request.urlopen(request, timeout=8) as response:
                         thumb_bytes = response.read(2_500_000)
                 except Exception:
                     thumb_bytes = None
 
-            self.events.put(
-                (
-                    "info",
-                    {
-                        "title": str(info.get("title") or info.get("description") or "Media"),
-                        "channel": str(info.get("channel") or info.get("uploader") or info.get("uploader_id") or "Creator"),
-                        "duration": format_duration(info.get("duration")),
-                        "views": info.get("view_count"),
-                        "platform": detect_platform(url) or str(info.get("extractor_key") or "media").lower(),
-                        "info": info,
-                        "thumbnail": thumb_bytes,
-                    },
-                )
+            if cancel_event.is_set():
+                self._put_job_event("cancelled", job_id, "Analysis cancelled.")
+                return
+
+            self._put_job_event(
+                "info",
+                job_id,
+                {
+                    "title": str(info.get("title") or info.get("description") or "Media"),
+                    "channel": str(info.get("channel") or info.get("uploader") or info.get("uploader_id") or "Creator"),
+                    "duration": format_duration(info.get("duration")),
+                    "views": info.get("view_count"),
+                    "platform": detect_platform(url) or str(info.get("extractor_key") or "media").lower(),
+                    "info": info,
+                    "thumbnail": thumb_bytes,
+                },
             )
         except Exception as exc:
-            self.events.put(("error", f"Could not read this media link after trying the available connection paths. Public links work best; private or login-required content is not supported.\n\n{exc}"))
+            LOGGER.exception("Analysis job %s failed", job_id)
+            self._put_job_event(
+                "error",
+                job_id,
+                "Could not read this media link after trying the available connection paths. "
+                "Public links work best; private or login-required content is not supported.\n\n"
+                + str(exc),
+            )
         finally:
-            # Always release the UI even if a platform extractor exits through an
-            # unusual path after media metadata has already been queued.
-            self.events.put(("analysis_finished", None))
+            self._put_job_event("analysis_finished", job_id)
 
     def download(self) -> None:
         self._start_download(edit_after_download=False)
@@ -1089,10 +1118,26 @@ class DownloaderApp(ctk.CTk):
             messagebox.showerror(APP_NAME, "Please paste a valid YouTube, Facebook or Instagram URL.")
             return
 
-        self.edit_after_download = edit_after_download
-        self.download_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.download_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            LOGGER.exception("Could not create download directory")
+            messagebox.showerror(
+                APP_NAME,
+                f"Could not use the selected download folder.\n\n{exc}",
+            )
+            return
+
         name = safe_filename(self.name_var.get(), "media_download")
-        mode = self.mode_var.get()
+        request_settings = {
+            "mode": self.mode_var.get(),
+            "video_quality": self.video_quality_var.get(),
+            "audio_format": self.audio_format_var.get().lower(),
+            "audio_quality": self.audio_quality_var.get(),
+            "edit_after_download": bool(edit_after_download),
+        }
+        job_id, cancel_event = self._begin_job(TaskState.DOWNLOADING)
+        self.edit_after_download = bool(edit_after_download)
         self.progress.set(0)
         self.progress_label.configure(text="0%")
         self.speed_label.configure(text="Preparing editor…" if edit_after_download else "Starting…")
@@ -1104,12 +1149,24 @@ class DownloaderApp(ctk.CTk):
         self._set_busy(True)
         threading.Thread(
             target=self._download_worker,
-            args=(url, mode, name, self.download_dir),
+            args=(job_id, cancel_event, url, name, self.download_dir, request_settings),
             daemon=True,
         ).start()
 
-    def _download_worker(self, url: str, mode: str, name: str, download_dir: Path) -> None:
+    def _download_worker(
+        self,
+        job_id: int,
+        cancel_event: threading.Event,
+        url: str,
+        name: str,
+        download_dir: Path,
+        request_settings: dict[str, Any],
+    ) -> None:
+        started_at = time.time()
+
         def hook(data: dict[str, Any]) -> None:
+            if cancel_event.is_set():
+                raise RuntimeError("Download cancelled by user.")
             status = data.get("status")
             if status == "downloading":
                 downloaded = int(data.get("downloaded_bytes") or 0)
@@ -1125,9 +1182,13 @@ class DownloaderApp(ctk.CTk):
                         extras.append(f"ETA {int(eta)}s")
                     except Exception:
                         pass
-                self.events.put(("progress", {"percent": percent, "detail": "  •  ".join(extras)}))
+                self._put_job_event(
+                    "progress",
+                    job_id,
+                    {"percent": percent, "detail": "  •  ".join(extras)},
+                )
             elif status == "finished":
-                self.events.put(("status", "Download finished. Finalizing file…"))
+                self._put_job_event("status", job_id, "Download finished. Finalizing file…")
 
         opts: dict[str, Any] = {
             "outtmpl": str(download_dir / f"{name}.%(ext)s"),
@@ -1144,22 +1205,21 @@ class DownloaderApp(ctk.CTk):
             "ffmpeg_location": get_ffmpeg_exe(),
         }
 
-        if mode == "Audio":
+        if request_settings["mode"] == "Audio":
             opts.update(
                 {
                     "format": "bestaudio/best",
                     "postprocessors": [
                         {
                             "key": "FFmpegExtractAudio",
-                            "preferredcodec": self.audio_format_var.get().lower(),
-                            "preferredquality": self.audio_quality_var.get(),
+                            "preferredcodec": request_settings["audio_format"],
+                            "preferredquality": request_settings["audio_quality"],
                         }
                     ],
                 }
             )
         else:
-            quality = self.video_quality_var.get()
-            opts["format"] = video_format_selector(url, quality)
+            opts["format"] = video_format_selector(url, str(request_settings["video_quality"]))
             opts["merge_output_format"] = "mp4"
 
         try:
@@ -1167,8 +1227,15 @@ class DownloaderApp(ctk.CTk):
             last_error: Exception | None = None
             downloaded = False
             for index, (attempt_url, network_options) in enumerate(attempts, start=1):
+                if cancel_event.is_set():
+                    self._put_job_event("cancelled", job_id, "Download cancelled.")
+                    return
                 if len(attempts) > 1:
-                    self.events.put(("status", f"Facebook download connection {index}/{len(attempts)}…"))
+                    self._put_job_event(
+                        "status",
+                        job_id,
+                        f"Facebook download connection {index}/{len(attempts)}…",
+                    )
                 attempt_opts = {**opts, **network_options}
                 try:
                     with yt_dlp.YoutubeDL(attempt_opts) as ydl:
@@ -1183,22 +1250,36 @@ class DownloaderApp(ctk.CTk):
                                 partial.unlink()
                             except OSError:
                                 pass
+                    if cancel_event.is_set():
+                        self._put_job_event("cancelled", job_id, "Download cancelled.")
+                        return
+
             if not downloaded:
-                raise last_error or RuntimeError("No compatible Facebook connection path succeeded.")
-            candidates = [
-                path
-                for path in download_dir.glob(f"{name}.*")
-                if path.is_file() and path.suffix.lower() not in {".part", ".ytdl", ".temp", ".tmp"}
-            ]
+                raise last_error or RuntimeError("No compatible connection path succeeded.")
+
+            candidates = []
+            for path in download_dir.glob(f"{name}.*"):
+                if not path.is_file() or path.suffix.lower() in {".part", ".ytdl", ".temp", ".tmp"}:
+                    continue
+                try:
+                    if path.stat().st_mtime >= started_at - 2.0:
+                        candidates.append(path)
+                except OSError:
+                    continue
+
             if not candidates:
                 raise RuntimeError("Download finished, but the final file could not be located.")
-            self.events.put(("done", str(max(candidates, key=lambda path: path.stat().st_mtime))))
+
+            final_path = max(candidates, key=lambda path: path.stat().st_mtime)
+            self._put_job_event("done", job_id, str(final_path))
         except Exception as exc:
-            self.events.put(("error", str(exc)))
+            if cancel_event.is_set():
+                self._put_job_event("cancelled", job_id, "Download cancelled.")
+            else:
+                LOGGER.exception("Download job %s failed", job_id)
+                self._put_job_event("error", job_id, str(exc))
         finally:
-            # A final state event prevents a completed/failed worker from leaving
-            # the Download button disabled if another UI event raises unexpectedly.
-            self.events.put(("download_finished", None))
+            self._put_job_event("download_finished", job_id)
 
     def _apply_thumbnail(self, raw: bytes | None) -> None:
         if not raw:
