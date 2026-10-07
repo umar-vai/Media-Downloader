@@ -141,6 +141,8 @@ jobs:
       - name: Build installed onedir package
         shell: pwsh
         run: |
+          $updater = (Resolve-Path "dist\MediaDownloaderUpdater.exe").Path
+          $mpv = (Resolve-Path "dist\mpv.exe").Path
           pyinstaller --noconfirm --clean --onedir --windowed `
             --name MediaDownloader `
             --distpath "dist/installed" `
@@ -151,8 +153,8 @@ jobs:
             --collect-all imageio_ffmpeg `
             --collect-all customtkinter `
             --collect-all PIL `
-            --add-binary "dist/MediaDownloaderUpdater.exe;." `
-            --add-binary "dist/mpv.exe;." `
+            --add-binary "$updater;." `
+            --add-binary "$mpv;." `
             desktop_downloader/launcher.py
 
       - name: Run onedir packaged self-test
