@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ctypes
 import json
+import msvcrt
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -41,6 +44,27 @@ def _mpv_executable() -> Path:
     raise PlayerUnavailableError("Bundled mpv playback engine is missing.")
 
 
+def _peek_pipe_bytes(stream: Any) -> int:
+    if os.name != "nt":
+        return 0
+    available = ctypes.c_ulong(0)
+    handle = msvcrt.get_osfhandle(stream.fileno())
+    ok = ctypes.windll.kernel32.PeekNamedPipe(
+        ctypes.c_void_p(handle),
+        None,
+        0,
+        None,
+        ctypes.byref(available),
+        None,
+    )
+    if not ok:
+        error = ctypes.get_last_error()
+        if error:
+            raise OSError(error, "PeekNamedPipe failed")
+        return 0
+    return int(available.value)
+
+
 class EmbeddedMediaPlayer:
     """Crash-isolated mpv player embedded into a Windows HWND."""
 
@@ -56,7 +80,6 @@ class EmbeddedMediaPlayer:
         self.audio_only = bool(audio_only)
 
         self._lock = threading.RLock()
-        self._write_lock = threading.Lock()
         self._closed = False
         self._ready = threading.Event()
         self._latest_position: float | None = None
@@ -64,6 +87,7 @@ class EmbeddedMediaPlayer:
         self._last_error = ""
         self._last_status = ""
         self._ipc = None
+        self._commands: "queue.Queue[list[Any]]" = queue.Queue()
 
         pipe_name = f"media_downloader_mpv_{os.getpid()}_{uuid.uuid4().hex}"
         self._ipc_path = rf"\\.\pipe\{pipe_name}"
@@ -103,8 +127,8 @@ class EmbeddedMediaPlayer:
             creationflags=CREATE_NO_WINDOW,
         )
 
-        self._connect_thread = threading.Thread(target=self._connect_worker, daemon=True)
-        self._connect_thread.start()
+        self._ipc_thread = threading.Thread(target=self._ipc_worker, daemon=True)
+        self._ipc_thread.start()
 
     @property
     def available(self) -> bool:
@@ -112,7 +136,7 @@ class EmbeddedMediaPlayer:
 
     @property
     def ready(self) -> bool:
-        return self._ready.is_set() and self.available
+        return self._ready.is_set() and self.available and not self.last_error
 
     @property
     def last_error(self) -> str:
@@ -127,8 +151,7 @@ class EmbeddedMediaPlayer:
         self._command(["set_property", "pause", False])
 
     def pause(self) -> None:
-        if self.available:
-            self._command(["set_property", "pause", True], tolerate_dead=True)
+        self._command(["set_property", "pause", True], tolerate_dead=True)
 
     def is_paused(self) -> bool:
         with self._lock:
@@ -190,12 +213,18 @@ class EmbeddedMediaPlayer:
         with self._lock:
             if self._closed:
                 return
-            self._closed = True
 
         try:
             self._command(["quit"], tolerate_dead=True)
+            self._process.wait(timeout=1.2)
         except Exception:
-            pass
+            try:
+                self._process.terminate()
+            except Exception:
+                pass
+
+        with self._lock:
+            self._closed = True
 
         try:
             if self._ipc is not None:
@@ -204,23 +233,15 @@ class EmbeddedMediaPlayer:
             pass
 
         try:
-            self._process.wait(timeout=1.5)
-        except Exception:
-            try:
-                self._process.terminate()
-            except Exception:
-                pass
-
-        try:
             if self._process.poll() is None:
                 self._process.kill()
         except Exception:
             pass
 
-    def _connect_worker(self) -> None:
+    def _ipc_worker(self) -> None:
         deadline = time.monotonic() + 6.0
         last_error = ""
-        while time.monotonic() < deadline and self.available and not self._closed:
+        while time.monotonic() < deadline and self.available:
             try:
                 self._ipc = open(self._ipc_path, "r+b", buffering=0)
                 break
@@ -234,32 +255,38 @@ class EmbeddedMediaPlayer:
             self._ready.set()
             return
 
-        reader = threading.Thread(target=self._reader_loop, daemon=True)
-        reader.start()
+        self._commands.put(["observe_property", 1, "time-pos"])
+        self._commands.put(["observe_property", 2, "pause"])
+        self._commands.put(["observe_property", 3, "eof-reached"])
+        self._commands.put(["loadfile", str(self.path), "replace"])
 
+        buffer = b""
         try:
-            self._command(["observe_property", 1, "time-pos"])
-            self._command(["observe_property", 2, "pause"])
-            self._command(["observe_property", 3, "eof-reached"])
-            self._command(["loadfile", str(self.path), "replace"])
-        except Exception as exc:
-            with self._lock:
-                self._last_error = str(exc)
-            self._ready.set()
+            while not self._closed and self._process.poll() is None:
+                while True:
+                    try:
+                        command = self._commands.get_nowait()
+                    except queue.Empty:
+                        break
+                    self._write_command(command)
 
-    def _reader_loop(self) -> None:
-        try:
-            while not self._closed and self.available and self._ipc is not None:
-                raw = self._ipc.readline()
-                if not raw:
-                    break
-                if not raw.strip():
-                    continue
-                try:
-                    message = json.loads(raw.decode("utf-8", errors="replace"))
-                except json.JSONDecodeError:
-                    continue
-                self._handle_message(message)
+                available = _peek_pipe_bytes(self._ipc)
+                if available > 0:
+                    chunk = self._ipc.read(min(available, 65536))
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    while b"\n" in buffer:
+                        raw, buffer = buffer.split(b"\n", 1)
+                        if not raw.strip():
+                            continue
+                        try:
+                            message = json.loads(raw.decode("utf-8", errors="replace"))
+                        except json.JSONDecodeError:
+                            continue
+                        self._handle_message(message)
+                else:
+                    time.sleep(0.008)
         except Exception as exc:
             with self._lock:
                 if not self._last_error:
@@ -267,6 +294,12 @@ class EmbeddedMediaPlayer:
         finally:
             if not self._ready.is_set():
                 self._ready.set()
+
+    def _write_command(self, command: list[Any]) -> None:
+        if self._ipc is None:
+            raise PlayerUnavailableError("mpv IPC is not connected yet.")
+        payload = (json.dumps({"command": command}, separators=(",", ":")) + "\n").encode("utf-8")
+        self._ipc.write(payload)
 
     def _handle_message(self, message: dict[str, Any]) -> None:
         event = str(message.get("event") or "")
@@ -318,20 +351,6 @@ class EmbeddedMediaPlayer:
     def _command(self, command: list[Any], tolerate_dead: bool = False) -> None:
         if not tolerate_dead:
             self._check_alive()
-        elif self._process.poll() is not None:
+        elif self._process.poll() is not None or self._closed:
             return
-
-        stream = self._ipc
-        if stream is None:
-            if tolerate_dead:
-                return
-            raise PlayerUnavailableError("mpv IPC is not connected yet.")
-
-        payload = (json.dumps({"command": command}, separators=(",", ":")) + "\n").encode("utf-8")
-        try:
-            with self._write_lock:
-                stream.write(payload)
-        except (BrokenPipeError, OSError, ValueError) as exc:
-            if tolerate_dead:
-                return
-            raise PlayerUnavailableError(f"mpv IPC command failed: {exc}") from exc
+        self._commands.put(command)
