@@ -19,6 +19,11 @@ Location: `desktop_downloader/`
 - Custom download folder
 - Progress, speed and status display
 - Portable Windows EXE build through GitHub Actions
+- Built-in local video/audio editor
+- Edit & Download flow after online media download
+- Local file editing for existing media
+- Trim/cut range, crop presets and custom crop, rotate, speed, mute/volume and audio fades
+- Frame preview plus MP4/MKV/MOV and MP3/M4A/WAV export
 
 Run locally:
 
