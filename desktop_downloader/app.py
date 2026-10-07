@@ -22,6 +22,7 @@ from PIL import Image
 from imageio_ffmpeg import get_ffmpeg_exe
 from tkinter import filedialog, messagebox
 
+from media_editor import MediaEditorWindow
 from media_sources import browser_headers, detect_platform, extraction_attempts, is_supported_media_url, platform_name, request_options, video_format_selector
 from update_manager import ReleaseInfo, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
@@ -155,6 +156,8 @@ class DownloaderApp(ctk.CTk):
         self.thumbnail_image: ctk.CTkImage | None = None
         self.last_file: Path | None = None
         self.is_busy = False
+        self.edit_after_download = False
+        self.editor_window: MediaEditorWindow | None = None
 
         self.settings = load_settings()
         self.download_dir = Path(str(self.settings.get("download_dir") or DEFAULT_DOWNLOAD_DIR)).expanduser()
@@ -592,8 +595,12 @@ class DownloaderApp(ctk.CTk):
         )
         self.status_label.grid(row=0, column=1, sticky="e")
 
+        primary_actions = ctk.CTkFrame(card, fg_color="transparent")
+        primary_actions.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 14))
+        primary_actions.grid_columnconfigure((0, 1), weight=1)
+
         self.download_button = ctk.CTkButton(
-            card,
+            primary_actions,
             text="Download video",
             height=54,
             corner_radius=13,
@@ -603,7 +610,20 @@ class DownloaderApp(ctk.CTk):
             font=("Segoe UI Semibold", 13),
             command=self.download,
         )
-        self.download_button.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 14))
+        self.download_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        self.edit_download_button = ctk.CTkButton(
+            primary_actions,
+            text="Edit & download",
+            height=54,
+            corner_radius=13,
+            fg_color=PURPLE,
+            hover_color=PURPLE_HOVER,
+            text_color="#FFFFFF",
+            font=("Segoe UI Semibold", 13),
+            command=self.download_for_editing,
+        )
+        self.edit_download_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
         self.progress = ctk.CTkProgressBar(card, height=10, corner_radius=6, fg_color=SURFACE_3, progress_color=PURPLE)
         self.progress.grid(row=2, column=0, sticky="ew", padx=18)
@@ -621,7 +641,7 @@ class DownloaderApp(ctk.CTk):
 
         actions = ctk.CTkFrame(card, fg_color="transparent")
         actions.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 18))
-        for index in range(3):
+        for index in range(4):
             actions.grid_columnconfigure(index, weight=1)
 
         self.open_file_button = ctk.CTkButton(
@@ -650,6 +670,19 @@ class DownloaderApp(ctk.CTk):
             text_color=TEXT,
             command=self.open_download_folder,
         ).grid(row=0, column=1, sticky="ew", padx=6)
+        self.edit_local_button = ctk.CTkButton(
+            actions,
+            text="Edit local media",
+            height=40,
+            corner_radius=10,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            command=self.open_editor,
+        )
+        self.edit_local_button.grid(row=0, column=2, sticky="ew", padx=6)
         ctk.CTkButton(
             actions,
             text="Clear workspace",
@@ -661,7 +694,7 @@ class DownloaderApp(ctk.CTk):
             border_color=BORDER,
             text_color=MUTED,
             command=self.clear_form,
-        ).grid(row=0, column=2, sticky="ew", padx=(6, 0))
+        ).grid(row=0, column=3, sticky="ew", padx=(6, 0))
 
     def _build_update_card(self) -> None:
         card = self._card(self.content)
@@ -845,6 +878,7 @@ class DownloaderApp(ctk.CTk):
         self.audio_format_label.configure(text_color="#50617C" if is_video else TEXT)
         self.audio_quality_label.configure(text_color="#50617C" if is_video else TEXT)
         self.download_button.configure(text="Download video" if is_video else "Download audio")
+        self.edit_download_button.configure(text="Edit & download video" if is_video else "Edit & download audio")
         self.output_hint.configure(
             text="MP4 video\nFFmpeg merge when needed" if is_video else "Audio-only export\nChoose format + bitrate"
         )
@@ -864,6 +898,8 @@ class DownloaderApp(ctk.CTk):
         self.read_button.configure(state=state)
         self.paste_button.configure(state=state)
         self.download_button.configure(state=state)
+        self.edit_download_button.configure(state=state)
+        self.edit_local_button.configure(state=state)
         self.choose_folder_button.configure(state=state)
         self.reset_folder_button.configure(state=state)
 
@@ -957,6 +993,12 @@ class DownloaderApp(ctk.CTk):
             self.events.put(("analysis_finished", None))
 
     def download(self) -> None:
+        self._start_download(edit_after_download=False)
+
+    def download_for_editing(self) -> None:
+        self._start_download(edit_after_download=True)
+
+    def _start_download(self, edit_after_download: bool) -> None:
         if self.is_busy:
             return
         url = self.url_var.get().strip()
@@ -965,13 +1007,18 @@ class DownloaderApp(ctk.CTk):
             messagebox.showerror(APP_NAME, "Please paste a valid YouTube, Facebook or Instagram URL.")
             return
 
+        self.edit_after_download = edit_after_download
         self.download_dir.mkdir(parents=True, exist_ok=True)
         name = safe_filename(self.name_var.get(), "media_download")
         mode = self.mode_var.get()
         self.progress.set(0)
         self.progress_label.configure(text="0%")
-        self.speed_label.configure(text="Starting…")
-        self._set_status(f"Connecting to {platform_name(platform)}…", "working")
+        self.speed_label.configure(text="Preparing editor…" if edit_after_download else "Starting…")
+        self._set_status(
+            f"Downloading from {platform_name(platform)} for editing…" if edit_after_download
+            else f"Connecting to {platform_name(platform)}…",
+            "working",
+        )
         self._set_busy(True)
         threading.Thread(
             target=self._download_worker,
@@ -1121,10 +1168,15 @@ class DownloaderApp(ctk.CTk):
                     self.speed_label.configure(text=self.last_file.name)
                     self._set_status("Download completed successfully", "success")
                     self.open_file_button.configure(state="normal")
+                    should_edit = self.edit_after_download
+                    self.edit_after_download = False
                     self._set_busy(False)
+                    if should_edit:
+                        self.after(200, lambda path=self.last_file: self.open_editor(path))
                 elif kind == "error":
                     self._set_status("Download failed", "error")
                     self.speed_label.configure(text="")
+                    self.edit_after_download = False
                     self._set_busy(False)
                     messagebox.showerror(APP_NAME, str(payload))
                 elif kind == "analysis_finished":
@@ -1185,6 +1237,33 @@ class DownloaderApp(ctk.CTk):
             os.startfile(str(self.download_dir))
         else:
             subprocess.Popen(["xdg-open", str(self.download_dir)])
+
+    def open_editor(self, source_path: Path | None = None) -> None:
+        if self.is_busy:
+            return
+        path = Path(source_path) if source_path else None
+        if path is None:
+            selected = filedialog.askopenfilename(
+                title="Choose video or audio to edit",
+                initialdir=str(self.download_dir if self.download_dir.exists() else Path.home()),
+                filetypes=[
+                    ("Media files", "*.mp4 *.mkv *.mov *.webm *.avi *.m4v *.mp3 *.m4a *.wav *.aac *.flac *.ogg *.opus"),
+                    ("Video files", "*.mp4 *.mkv *.mov *.webm *.avi *.m4v"),
+                    ("Audio files", "*.mp3 *.m4a *.wav *.aac *.flac *.ogg *.opus"),
+                    ("All files", "*.*"),
+                ],
+            )
+            if not selected:
+                return
+            path = Path(selected)
+        if not path.exists():
+            messagebox.showerror(APP_NAME, "The selected media file could not be found.")
+            return
+        try:
+            self.editor_window = MediaEditorWindow(self, path, output_dir=self.download_dir)
+            self.editor_window.focus()
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Could not open Media Editor.\n\n{exc}")
 
     def open_last_file(self) -> None:
         if self.last_file and self.last_file.exists():
