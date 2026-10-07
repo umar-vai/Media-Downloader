@@ -43,6 +43,7 @@ jobs:
         shell: pwsh
         run: |
           python -m py_compile desktop_downloader/app.py
+          python -m py_compile desktop_downloader/app_logging.py
           python -m py_compile desktop_downloader/media_editor.py
           python -m py_compile desktop_downloader/media_player.py
           python -m py_compile desktop_downloader/media_editor_engine.py
@@ -53,6 +54,7 @@ jobs:
           python -m py_compile desktop_downloader/updater.py
           python -m py_compile desktop_downloader/version.py
           python -m unittest discover -s desktop_downloader/tests -v
+          python desktop_downloader/tests/smoke_editor_export.py
           python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from yt_dlp import YoutubeDL; from yt_dlp.networking.impersonate import ImpersonateTarget; y=YoutubeDL({'quiet': True}); assert y._impersonate_target_available(ImpersonateTarget('chrome')), 'Chrome impersonation target unavailable'"
 
       - name: Verify release tag matches APP_VERSION
@@ -68,7 +70,7 @@ jobs:
       - name: Install bundled mpv playback engine
         shell: pwsh
         run: |
-          choco install mpv -y --no-progress
+          choco install mpvio.install --version 0.41.0 -y --no-progress
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $candidates = Get-ChildItem "$env:ChocolateyInstall\lib" -Recurse -File -Filter "mpv.exe" -ErrorAction SilentlyContinue |
             Where-Object { $_.Length -gt 1000000 } |
