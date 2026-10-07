@@ -13,6 +13,7 @@ import time
 import urllib.request
 import webbrowser
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from PIL import Image
 from imageio_ffmpeg import get_ffmpeg_exe
 from tkinter import filedialog, messagebox
 
+from app_logging import get_logger, log_path
 from media_editor import MediaEditorWindow
 from media_sources import browser_headers, detect_platform, extraction_attempts, is_supported_media_url, platform_name, request_options, video_format_selector
 from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_release, fetch_latest_release, is_newer_version
@@ -54,6 +56,18 @@ DANGER = "#FF647C"
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+
+LOGGER = get_logger("main")
+
+
+class TaskState(str, Enum):
+    IDLE = "idle"
+    ANALYZING = "analyzing"
+    READY = "ready"
+    DOWNLOADING = "downloading"
+    DOWNLOADED = "downloaded"
+    CANCELLED = "cancelled"
+    ERROR = "error"
 
 
 def safe_filename(value: str, fallback: str = "media_download") -> str:
@@ -150,6 +164,7 @@ class DownloaderApp(ctk.CTk):
         self.geometry("1120x760")
         self.minsize(980, 700)
         self.configure(fg_color=BG)
+        self.protocol("WM_DELETE_WINDOW", self._close_app)
 
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.current_info: dict[str, Any] | None = None
@@ -158,6 +173,10 @@ class DownloaderApp(ctk.CTk):
         self.is_busy = False
         self.edit_after_download = False
         self.editor_window: MediaEditorWindow | None = None
+        self.task_state = TaskState.IDLE
+        self._job_counter = 0
+        self.active_job_id: int | None = None
+        self.active_job_cancel: threading.Event | None = None
 
         self.settings = load_settings()
         self.download_dir = Path(str(self.settings.get("download_dir") or DEFAULT_DOWNLOAD_DIR)).expanduser()
@@ -165,6 +184,7 @@ class DownloaderApp(ctk.CTk):
         self.downloaded_update: Path | None = None
         self.update_checking = False
         self.update_downloading = False
+        self.update_cancel_event: threading.Event | None = None
 
         self.url_var = ctk.StringVar()
         self.name_var = ctk.StringVar()
@@ -178,10 +198,31 @@ class DownloaderApp(ctk.CTk):
 
         self._center_window()
         self._build_ui()
+        LOGGER.info("App started version=%s executable=%s", APP_VERSION, sys.executable)
         self.after(120, self._drain_events)
-        self.after(700, self._show_update_result)
+        self.after(700, lambda: self._show_update_result(attempt=0))
         if self.auto_check_updates_var.get():
             self.after(1500, lambda: self.check_for_updates(manual=False))
+
+    def _close_app(self) -> None:
+        active = self.is_busy or self.update_downloading
+        if active:
+            if not messagebox.askyesno(
+                APP_NAME,
+                "A task is still running. Cancel it and close Media Downloader?",
+                parent=self,
+            ):
+                return
+            if self.active_job_cancel is not None:
+                self.active_job_cancel.set()
+            if self.update_cancel_event is not None:
+                self.update_cancel_event.set()
+        LOGGER.info(
+            "App closing task_state=%s update_downloading=%s",
+            self.task_state.value,
+            self.update_downloading,
+        )
+        self.destroy()
 
     def _center_window(self) -> None:
         self.update_idletasks()
@@ -640,6 +681,21 @@ class DownloaderApp(ctk.CTk):
         self.speed_label = ctk.CTkLabel(progress_row, text="", text_color=MUTED, font=("Segoe UI", 10))
         self.speed_label.grid(row=0, column=1, sticky="e")
 
+        self.cancel_job_button = ctk.CTkButton(
+            progress_row,
+            text="Cancel task",
+            width=92,
+            height=30,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.cancel_current_job,
+            state="disabled",
+        )
+        self.cancel_job_button.grid(row=0, column=2, sticky="e", padx=(12, 0))
+
         actions = ctk.CTkFrame(card, fg_color="transparent")
         actions.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 18))
         for index in range(4):
@@ -823,6 +879,23 @@ class DownloaderApp(ctk.CTk):
             state="disabled",
         )
         self.update_later_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+        self.update_cancel_button = ctk.CTkButton(
+            buttons,
+            text="Cancel download",
+            width=112,
+            height=40,
+            corner_radius=10,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.cancel_update_download,
+            state="disabled",
+        )
+        self.update_cancel_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+
         self.release_button = ctk.CTkButton(
             buttons,
             text="Open latest release",
@@ -837,7 +910,7 @@ class DownloaderApp(ctk.CTk):
             command=self.open_release_page,
             state="normal",
         )
-        self.release_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        self.release_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
 
     def _build_footer(self) -> None:
         footer = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -850,6 +923,17 @@ class DownloaderApp(ctk.CTk):
             font=("Segoe UI", 9),
         )
         self.save_location_label.grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            footer,
+            text="Open diagnostics log",
+            width=132,
+            height=26,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            text_color=MUTED,
+            font=("Segoe UI", 9),
+            command=self.open_app_log,
+        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
         ctk.CTkLabel(
             footer,
             text="Use only for content you own or have permission to download.",
@@ -893,22 +977,70 @@ class DownloaderApp(ctk.CTk):
             self.url_var.set(text)
             self.url_entry.focus_set()
 
+    def _begin_job(self, state: TaskState) -> tuple[int, threading.Event]:
+        self._job_counter += 1
+        job_id = self._job_counter
+        cancel_event = threading.Event()
+        self.active_job_id = job_id
+        self.active_job_cancel = cancel_event
+        self.task_state = state
+        LOGGER.info("Job %s started state=%s", job_id, state.value)
+        return job_id, cancel_event
+
+    def _is_current_job(self, job_id: int) -> bool:
+        return self.active_job_id == job_id
+
+    def _put_job_event(self, kind: str, job_id: int, data: Any = None) -> None:
+        self.events.put((kind, {"job_id": job_id, "data": data}))
+
+    def _finish_job(self, job_id: int) -> None:
+        if self.active_job_id != job_id:
+            return
+        LOGGER.info("Job %s finished state=%s", job_id, self.task_state.value)
+        self.active_job_id = None
+        self.active_job_cancel = None
+        self._set_busy(False)
+
+    def cancel_current_job(self) -> None:
+        event = self.active_job_cancel
+        if not self.is_busy or event is None:
+            return
+        event.set()
+        self.cancel_job_button.configure(state="disabled", text="Cancelling…")
+        self._set_status("Cancelling current task…", "working")
+        LOGGER.info("Cancellation requested for job %s", self.active_job_id)
+
     def _set_busy(self, busy: bool) -> None:
         self.is_busy = busy
         state = "disabled" if busy else "normal"
         self.read_button.configure(state=state)
         self.paste_button.configure(state=state)
+        self.url_entry.configure(state=state)
+        self.mode_control.configure(state=state)
+        self.name_entry.configure(state=state)
         self.download_button.configure(state=state)
         self.edit_download_button.configure(state=state)
         self.edit_local_button.configure(state=state)
         self.choose_folder_button.configure(state=state)
         self.reset_folder_button.configure(state=state)
+        if busy:
+            self.video_quality.configure(state="disabled")
+            self.audio_format.configure(state="disabled")
+            self.audio_quality.configure(state="disabled")
+        else:
+            self._sync_mode(self.mode_var.get())
+        if hasattr(self, "cancel_job_button"):
+            self.cancel_job_button.configure(
+                state="normal" if busy else "disabled",
+                text="Cancel task",
+            )
 
     def _set_status(self, text: str, kind: str = "ready") -> None:
         palette = {
             "ready": ("#0D2A2A", SUCCESS, "READY"),
             "working": ("#162344", CYAN, "WORKING"),
             "success": ("#0E3025", SUCCESS, "COMPLETE"),
+            "cancelled": ("#2D2514", WARNING, "CANCELLED"),
             "error": ("#351722", DANGER, "FAILED"),
         }
         bg, fg, chip = palette.get(kind, palette["ready"])
@@ -923,23 +1055,40 @@ class DownloaderApp(ctk.CTk):
         if not platform:
             messagebox.showerror(APP_NAME, "Please paste a valid YouTube, Facebook or Instagram URL.")
             return
+
+        job_id, cancel_event = self._begin_job(TaskState.ANALYZING)
         self._set_busy(True)
         self.current_info = None
         self.title_label.configure(text=f"Analyzing {platform_name(platform)} media…")
         self.meta_label.configure(text="Trying compatible connection paths…")
         self._apply_thumbnail(None)
         self._set_status(f"Reading {platform_name(platform)} media information…", "working")
-        self.media_badge.configure(text=f"{platform_name(platform).upper()} • ANALYZING", fg_color="#162344", text_color=CYAN)
-        threading.Thread(target=self._analyze_media_worker, args=(url,), daemon=True).start()
+        self.media_badge.configure(
+            text=f"{platform_name(platform).upper()} • ANALYZING",
+            fg_color="#162344",
+            text_color=CYAN,
+        )
+        threading.Thread(
+            target=self._analyze_media_worker,
+            args=(job_id, cancel_event, url),
+            daemon=True,
+        ).start()
 
-    def _analyze_media_worker(self, url: str) -> None:
+    def _analyze_media_worker(self, job_id: int, cancel_event: threading.Event, url: str) -> None:
         try:
             attempts = extraction_attempts(url)
             info: dict[str, Any] = {}
             last_error: Exception | None = None
             for index, (attempt_url, network_options) in enumerate(attempts, start=1):
+                if cancel_event.is_set():
+                    self._put_job_event("cancelled", job_id, "Analysis cancelled.")
+                    return
                 if len(attempts) > 1:
-                    self.events.put(("status", f"Facebook connection attempt {index}/{len(attempts)}…"))
+                    self._put_job_event(
+                        "status",
+                        job_id,
+                        f"Facebook connection attempt {index}/{len(attempts)}…",
+                    )
                 try:
                     with yt_dlp.YoutubeDL(
                         {
@@ -948,9 +1097,9 @@ class DownloaderApp(ctk.CTk):
                             "skip_download": True,
                             "noplaylist": True,
                             "cachedir": False,
-                            "socket_timeout": 30,
-                            "retries": 2,
-                            "fragment_retries": 2,
+                            "socket_timeout": 20,
+                            "retries": 1,
+                            "fragment_retries": 1,
                             **network_options,
                         }
                     ) as ydl:
@@ -959,39 +1108,51 @@ class DownloaderApp(ctk.CTk):
                         break
                 except Exception as exc:
                     last_error = exc
+
+            if cancel_event.is_set():
+                self._put_job_event("cancelled", job_id, "Analysis cancelled.")
+                return
             if not info:
-                raise last_error or RuntimeError("No compatible Facebook connection path succeeded.")
+                raise last_error or RuntimeError("No compatible connection path succeeded.")
 
             thumb_bytes = None
             thumbnail_url = str(info.get("thumbnail") or "")
-            if thumbnail_url:
+            if thumbnail_url and not cancel_event.is_set():
                 try:
                     request = urllib.request.Request(thumbnail_url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(request, timeout=12) as response:
+                    with urllib.request.urlopen(request, timeout=8) as response:
                         thumb_bytes = response.read(2_500_000)
                 except Exception:
                     thumb_bytes = None
 
-            self.events.put(
-                (
-                    "info",
-                    {
-                        "title": str(info.get("title") or info.get("description") or "Media"),
-                        "channel": str(info.get("channel") or info.get("uploader") or info.get("uploader_id") or "Creator"),
-                        "duration": format_duration(info.get("duration")),
-                        "views": info.get("view_count"),
-                        "platform": detect_platform(url) or str(info.get("extractor_key") or "media").lower(),
-                        "info": info,
-                        "thumbnail": thumb_bytes,
-                    },
-                )
+            if cancel_event.is_set():
+                self._put_job_event("cancelled", job_id, "Analysis cancelled.")
+                return
+
+            self._put_job_event(
+                "info",
+                job_id,
+                {
+                    "title": str(info.get("title") or info.get("description") or "Media"),
+                    "channel": str(info.get("channel") or info.get("uploader") or info.get("uploader_id") or "Creator"),
+                    "duration": format_duration(info.get("duration")),
+                    "views": info.get("view_count"),
+                    "platform": detect_platform(url) or str(info.get("extractor_key") or "media").lower(),
+                    "info": info,
+                    "thumbnail": thumb_bytes,
+                },
             )
         except Exception as exc:
-            self.events.put(("error", f"Could not read this media link after trying the available connection paths. Public links work best; private or login-required content is not supported.\n\n{exc}"))
+            LOGGER.exception("Analysis job %s failed", job_id)
+            self._put_job_event(
+                "error",
+                job_id,
+                "Could not read this media link after trying the available connection paths. "
+                "Public links work best; private or login-required content is not supported.\n\n"
+                + str(exc),
+            )
         finally:
-            # Always release the UI even if a platform extractor exits through an
-            # unusual path after media metadata has already been queued.
-            self.events.put(("analysis_finished", None))
+            self._put_job_event("analysis_finished", job_id)
 
     def download(self) -> None:
         self._start_download(edit_after_download=False)
@@ -1008,10 +1169,26 @@ class DownloaderApp(ctk.CTk):
             messagebox.showerror(APP_NAME, "Please paste a valid YouTube, Facebook or Instagram URL.")
             return
 
-        self.edit_after_download = edit_after_download
-        self.download_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.download_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            LOGGER.exception("Could not create download directory")
+            messagebox.showerror(
+                APP_NAME,
+                f"Could not use the selected download folder.\n\n{exc}",
+            )
+            return
+
         name = safe_filename(self.name_var.get(), "media_download")
-        mode = self.mode_var.get()
+        request_settings = {
+            "mode": self.mode_var.get(),
+            "video_quality": self.video_quality_var.get(),
+            "audio_format": self.audio_format_var.get().lower(),
+            "audio_quality": self.audio_quality_var.get(),
+            "edit_after_download": bool(edit_after_download),
+        }
+        job_id, cancel_event = self._begin_job(TaskState.DOWNLOADING)
+        self.edit_after_download = bool(edit_after_download)
         self.progress.set(0)
         self.progress_label.configure(text="0%")
         self.speed_label.configure(text="Preparing editor…" if edit_after_download else "Starting…")
@@ -1023,12 +1200,24 @@ class DownloaderApp(ctk.CTk):
         self._set_busy(True)
         threading.Thread(
             target=self._download_worker,
-            args=(url, mode, name, self.download_dir),
+            args=(job_id, cancel_event, url, name, self.download_dir, request_settings),
             daemon=True,
         ).start()
 
-    def _download_worker(self, url: str, mode: str, name: str, download_dir: Path) -> None:
+    def _download_worker(
+        self,
+        job_id: int,
+        cancel_event: threading.Event,
+        url: str,
+        name: str,
+        download_dir: Path,
+        request_settings: dict[str, Any],
+    ) -> None:
+        started_at = time.time()
+
         def hook(data: dict[str, Any]) -> None:
+            if cancel_event.is_set():
+                raise RuntimeError("Download cancelled by user.")
             status = data.get("status")
             if status == "downloading":
                 downloaded = int(data.get("downloaded_bytes") or 0)
@@ -1044,9 +1233,13 @@ class DownloaderApp(ctk.CTk):
                         extras.append(f"ETA {int(eta)}s")
                     except Exception:
                         pass
-                self.events.put(("progress", {"percent": percent, "detail": "  •  ".join(extras)}))
+                self._put_job_event(
+                    "progress",
+                    job_id,
+                    {"percent": percent, "detail": "  •  ".join(extras)},
+                )
             elif status == "finished":
-                self.events.put(("status", "Download finished. Finalizing file…"))
+                self._put_job_event("status", job_id, "Download finished. Finalizing file…")
 
         opts: dict[str, Any] = {
             "outtmpl": str(download_dir / f"{name}.%(ext)s"),
@@ -1063,22 +1256,21 @@ class DownloaderApp(ctk.CTk):
             "ffmpeg_location": get_ffmpeg_exe(),
         }
 
-        if mode == "Audio":
+        if request_settings["mode"] == "Audio":
             opts.update(
                 {
                     "format": "bestaudio/best",
                     "postprocessors": [
                         {
                             "key": "FFmpegExtractAudio",
-                            "preferredcodec": self.audio_format_var.get().lower(),
-                            "preferredquality": self.audio_quality_var.get(),
+                            "preferredcodec": request_settings["audio_format"],
+                            "preferredquality": request_settings["audio_quality"],
                         }
                     ],
                 }
             )
         else:
-            quality = self.video_quality_var.get()
-            opts["format"] = video_format_selector(url, quality)
+            opts["format"] = video_format_selector(url, str(request_settings["video_quality"]))
             opts["merge_output_format"] = "mp4"
 
         try:
@@ -1086,8 +1278,15 @@ class DownloaderApp(ctk.CTk):
             last_error: Exception | None = None
             downloaded = False
             for index, (attempt_url, network_options) in enumerate(attempts, start=1):
+                if cancel_event.is_set():
+                    self._put_job_event("cancelled", job_id, "Download cancelled.")
+                    return
                 if len(attempts) > 1:
-                    self.events.put(("status", f"Facebook download connection {index}/{len(attempts)}…"))
+                    self._put_job_event(
+                        "status",
+                        job_id,
+                        f"Facebook download connection {index}/{len(attempts)}…",
+                    )
                 attempt_opts = {**opts, **network_options}
                 try:
                     with yt_dlp.YoutubeDL(attempt_opts) as ydl:
@@ -1102,22 +1301,36 @@ class DownloaderApp(ctk.CTk):
                                 partial.unlink()
                             except OSError:
                                 pass
+                    if cancel_event.is_set():
+                        self._put_job_event("cancelled", job_id, "Download cancelled.")
+                        return
+
             if not downloaded:
-                raise last_error or RuntimeError("No compatible Facebook connection path succeeded.")
-            candidates = [
-                path
-                for path in download_dir.glob(f"{name}.*")
-                if path.is_file() and path.suffix.lower() not in {".part", ".ytdl", ".temp", ".tmp"}
-            ]
+                raise last_error or RuntimeError("No compatible connection path succeeded.")
+
+            candidates = []
+            for path in download_dir.glob(f"{name}.*"):
+                if not path.is_file() or path.suffix.lower() in {".part", ".ytdl", ".temp", ".tmp"}:
+                    continue
+                try:
+                    if path.stat().st_mtime >= started_at - 2.0:
+                        candidates.append(path)
+                except OSError:
+                    continue
+
             if not candidates:
                 raise RuntimeError("Download finished, but the final file could not be located.")
-            self.events.put(("done", str(max(candidates, key=lambda path: path.stat().st_mtime))))
+
+            final_path = max(candidates, key=lambda path: path.stat().st_mtime)
+            self._put_job_event("done", job_id, str(final_path))
         except Exception as exc:
-            self.events.put(("error", str(exc)))
+            if cancel_event.is_set():
+                self._put_job_event("cancelled", job_id, "Download cancelled.")
+            else:
+                LOGGER.exception("Download job %s failed", job_id)
+                self._put_job_event("error", job_id, str(exc))
         finally:
-            # A final state event prevents a completed/failed worker from leaving
-            # the Download button disabled if another UI event raises unexpectedly.
-            self.events.put(("download_finished", None))
+            self._put_job_event("download_finished", job_id)
 
     def _apply_thumbnail(self, raw: bytes | None) -> None:
         if not raw:
@@ -1141,57 +1354,102 @@ class DownloaderApp(ctk.CTk):
             self.thumbnail_label.configure(image=None, text="VIDEO\nPREVIEW")
 
     def _drain_events(self) -> None:
+        job_kinds = {
+            "info",
+            "progress",
+            "status",
+            "done",
+            "error",
+            "cancelled",
+            "analysis_finished",
+            "download_finished",
+        }
         try:
             while True:
                 kind, payload = self.events.get_nowait()
+                data = payload
+
+                if kind in job_kinds:
+                    if not isinstance(payload, dict):
+                        LOGGER.warning("Ignoring malformed job event kind=%s payload=%r", kind, payload)
+                        continue
+                    job_id = int(payload.get("job_id") or -1)
+                    if not self._is_current_job(job_id):
+                        LOGGER.info(
+                            "Ignoring stale job event kind=%s job=%s active=%s",
+                            kind,
+                            job_id,
+                            self.active_job_id,
+                        )
+                        continue
+                    data = payload.get("data")
+
                 if kind == "info":
-                    self.current_info = payload["info"]
-                    self.name_var.set(safe_filename(payload["title"]))
-                    self.title_label.configure(text=payload["title"])
-                    platform_label = platform_name(str(payload.get("platform") or ""))
-                    self.meta_label.configure(text=f"{payload['channel']}  •  {platform_label}  •  {payload['duration']}")
-                    self.media_badge.configure(text=f"{platform_label.upper()} • READY", fg_color="#0E3025", text_color=SUCCESS)
-                    self._apply_thumbnail(payload.get("thumbnail"))
+                    media = dict(data or {})
+                    self.current_info = media.get("info")
+                    self.name_var.set(safe_filename(str(media.get("title") or "Media")))
+                    self.title_label.configure(text=str(media.get("title") or "Media"))
+                    platform_label = platform_name(str(media.get("platform") or ""))
+                    self.meta_label.configure(
+                        text=f"{media.get('channel') or 'Creator'}  •  {platform_label}  •  {media.get('duration') or '--:--'}"
+                    )
+                    self.media_badge.configure(
+                        text=f"{platform_label.upper()} • READY",
+                        fg_color="#0E3025",
+                        text_color=SUCCESS,
+                    )
+                    self._apply_thumbnail(media.get("thumbnail"))
+                    self.task_state = TaskState.READY
                     self._set_status(f"{platform_label} media information loaded", "ready")
-                    self._set_busy(False)
+                    self._finish_job(job_id)
+
                 elif kind == "progress":
-                    percent = max(0.0, min(100.0, float(payload.get("percent") or 0)))
+                    detail = dict(data or {})
+                    percent = max(0.0, min(100.0, float(detail.get("percent") or 0)))
                     self.progress.set(percent / 100.0)
                     self.progress_label.configure(text=f"{percent:.0f}%")
-                    self.speed_label.configure(text=str(payload.get("detail") or "Downloading…"))
+                    self.speed_label.configure(text=str(detail.get("detail") or "Downloading…"))
                     self._set_status(f"Downloading… {percent:.1f}%", "working")
+
                 elif kind == "status":
-                    self._set_status(str(payload), "working")
+                    self._set_status(str(data or ""), "working")
+
                 elif kind == "done":
-                    self.last_file = Path(str(payload))
+                    self.last_file = Path(str(data))
                     self.progress.set(1)
                     self.progress_label.configure(text="100%")
                     self.speed_label.configure(text=self.last_file.name)
+                    self.task_state = TaskState.DOWNLOADED
                     self._set_status("Download completed successfully", "success")
                     self.open_file_button.configure(state="normal")
                     should_edit = self.edit_after_download
                     self.edit_after_download = False
-                    self._set_busy(False)
+                    completed_path = self.last_file
+                    self._finish_job(job_id)
                     if should_edit:
-                        self.after(200, lambda path=self.last_file: self.open_editor(path))
+                        self.after(200, lambda path=completed_path: self.open_editor(path))
+
                 elif kind == "error":
-                    self._set_status("Download failed", "error")
+                    self.task_state = TaskState.ERROR
+                    self._set_status("Task failed", "error")
                     self.speed_label.configure(text="")
                     self.edit_after_download = False
-                    self._set_busy(False)
-                    messagebox.showerror(APP_NAME, str(payload))
-                elif kind == "analysis_finished":
-                    # Metadata may have been rendered before the worker fully exits.
-                    # Always release the busy lock after the analysis thread ends.
-                    self._set_busy(False)
-                    if self.current_info is not None:
-                        platform = detect_platform(self.url_var.get().strip())
-                        label = platform_name(platform or "media")
-                        self._set_status(f"{label} media information loaded", "ready")
-                elif kind == "download_finished":
-                    # done/error normally releases the lock first; this is an
-                    # idempotent safety net for repeated back-to-back downloads.
-                    self._set_busy(False)
+                    LOGGER.error("Job %s failed: %s", job_id, data)
+                    self._finish_job(job_id)
+                    messagebox.showerror(APP_NAME, str(data))
+
+                elif kind == "cancelled":
+                    self.task_state = TaskState.CANCELLED
+                    self.edit_after_download = False
+                    self.speed_label.configure(text="Cancelled")
+                    self._set_status(str(data or "Task cancelled"), "cancelled")
+                    self._finish_job(job_id)
+
+                elif kind in {"analysis_finished", "download_finished"}:
+                    # Safety net only. Success/error/cancel normally finish the
+                    # job first; stale final events are ignored by job_id.
+                    self._finish_job(job_id)
+
                 elif kind == "update_available":
                     self._handle_update_available(payload)
                 elif kind == "update_current":
@@ -1202,13 +1460,13 @@ class DownloaderApp(ctk.CTk):
                     self._handle_update_progress(payload)
                 elif kind == "update_ready":
                     self._handle_update_ready(payload)
+                elif kind == "update_cancelled":
+                    self._handle_update_cancelled()
+
         except queue.Empty:
             pass
-        except Exception as exc:
-            # Never let one malformed/stale UI event permanently stop the event
-            # pump or leave controls disabled.
-            append_update_log(f"UI event error: {exc}")
-            self._set_busy(False)
+        except Exception:
+            LOGGER.exception("UI event pump error")
         finally:
             self.after(120, self._drain_events)
 
@@ -1242,6 +1500,23 @@ class DownloaderApp(ctk.CTk):
     def open_editor(self, source_path: Path | None = None) -> None:
         if self.is_busy:
             return
+
+        existing = self.editor_window
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    messagebox.showinfo(
+                        APP_NAME,
+                        "An editor window is already open. Close it before opening another file.",
+                        parent=self,
+                    )
+                    return
+            except Exception:
+                self.editor_window = None
+
         path = Path(source_path) if source_path else None
         if path is None:
             selected = filedialog.askopenfilename(
@@ -1262,9 +1537,23 @@ class DownloaderApp(ctk.CTk):
             return
         try:
             self.editor_window = MediaEditorWindow(self, path, output_dir=self.download_dir)
+            self.editor_window.bind(
+                "<Destroy>",
+                lambda event: self._editor_destroyed(event),
+                add="+",
+            )
             self.editor_window.focus()
+            LOGGER.info("Editor opened source=%s", path)
         except Exception as exc:
+            LOGGER.exception("Could not open Media Editor source=%s", path)
+            self.editor_window = None
             messagebox.showerror(APP_NAME, f"Could not open Media Editor.\n\n{exc}")
+
+    def _editor_destroyed(self, event: Any) -> None:
+        window = self.editor_window
+        if window is not None and event.widget is window:
+            self.editor_window = None
+            LOGGER.info("Editor window closed")
 
     def open_last_file(self) -> None:
         if self.last_file and self.last_file.exists():
@@ -1274,6 +1563,9 @@ class DownloaderApp(ctk.CTk):
                 subprocess.Popen(["xdg-open", str(self.last_file)])
 
     def clear_form(self) -> None:
+        self.task_state = TaskState.IDLE
+        self.active_job_id = None
+        self.active_job_cancel = None
         self.url_var.set("")
         self.name_var.set("")
         self.current_info = None
@@ -1367,6 +1659,8 @@ class DownloaderApp(ctk.CTk):
         self.update_downloading = False
         self.update_check_button.configure(text="Check for updates", state="normal")
         self.update_action_button.configure(state="normal" if self.latest_release else "disabled")
+        self.update_cancel_button.configure(state="disabled")
+        self.update_cancel_event = None
         self.release_button.configure(text="Open latest release", state="normal")
         error = str(payload.get("error") or "Unknown update error").strip()
         display_error = error if len(error) <= 360 else error[:357].rstrip() + "…"
@@ -1398,6 +1692,8 @@ class DownloaderApp(ctk.CTk):
 
     def _handle_update_ready(self, payload: dict[str, Any]) -> None:
         self.update_downloading = False
+        self.update_cancel_event = None
+        self.update_cancel_button.configure(state="disabled")
         self.downloaded_update = Path(str(payload["path"]))
         release = payload["release"]
         self.latest_release = release
@@ -1421,21 +1717,63 @@ class DownloaderApp(ctk.CTk):
         if self.update_downloading or not self.latest_release:
             return
         self.update_downloading = True
+        self.update_cancel_event = threading.Event()
         self.update_action_button.configure(text="Downloading…", state="disabled")
+        self.update_cancel_button.configure(state="normal")
         self.update_progress.set(0)
         release = self.latest_release
-        threading.Thread(target=self._download_update_worker, args=(release, manual), daemon=True).start()
+        cancel_event = self.update_cancel_event
+        threading.Thread(
+            target=self._download_update_worker,
+            args=(release, manual, cancel_event),
+            daemon=True,
+        ).start()
 
-    def _download_update_worker(self, release: ReleaseInfo, manual: bool) -> None:
+    def cancel_update_download(self) -> None:
+        event = self.update_cancel_event
+        if not self.update_downloading or event is None:
+            return
+        event.set()
+        self.update_cancel_button.configure(state="disabled", text="Cancelling…")
+        self.update_detail_label.configure(text="Cancelling update download…")
+        append_update_log("Update download cancellation requested.")
+
+    def _download_update_worker(
+        self,
+        release: ReleaseInfo,
+        manual: bool,
+        cancel_event: threading.Event,
+    ) -> None:
         def progress(downloaded: int, total: int) -> None:
+            if cancel_event.is_set():
+                raise RuntimeError("Update download cancelled by user.")
             self.events.put(("update_progress", {"downloaded": downloaded, "total": total}))
 
         try:
             version_dir = UPDATE_DIR / release.version
             path = download_release(release, version_dir, progress_callback=progress)
+            if cancel_event.is_set():
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.events.put(("update_cancelled", None))
+                return
             self.events.put(("update_ready", {"path": str(path), "release": release}))
         except Exception as exc:
-            self.events.put(("update_error", {"error": str(exc), "manual": manual}))
+            if cancel_event.is_set():
+                self.events.put(("update_cancelled", None))
+            else:
+                self.events.put(("update_error", {"error": str(exc), "manual": manual}))
+
+    def _handle_update_cancelled(self) -> None:
+        self.update_downloading = False
+        self.update_cancel_event = None
+        self.update_progress.set(0)
+        self.update_cancel_button.configure(state="disabled", text="Cancel download")
+        self.update_action_button.configure(text="Update Now", state="normal")
+        self.update_detail_label.configure(text="Update download cancelled. You can resume it later.")
+        append_update_log("Update download cancelled.")
 
     def _launch_updater(self) -> None:
         if not self.latest_release or not self.downloaded_update:
@@ -1493,27 +1831,47 @@ class DownloaderApp(ctk.CTk):
         self.top_update_button.grid_remove()
         self.update_detail_label.configure(text="Update reminder snoozed for 24 hours.")
 
+    def open_app_log(self) -> None:
+        path = log_path()
+        try:
+            if os.name == "nt":
+                os.startfile(str(path))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as exc:
+            LOGGER.exception("Could not open diagnostics log")
+            messagebox.showerror(APP_NAME, f"Could not open diagnostics log.\n\n{exc}")
+
     def open_release_page(self) -> None:
         if self.latest_release and self.latest_release.html_url:
             webbrowser.open(self.latest_release.html_url)
         else:
             webbrowser.open(LATEST_RELEASE_WEB)
 
-    def _show_update_result(self) -> None:
+    def _show_update_result(self, attempt: int = 0) -> None:
         if not UPDATE_RESULT_FILE.exists():
+            if attempt < 14:
+                self.after(750, lambda: self._show_update_result(attempt + 1))
             return
         try:
             payload = json.loads(UPDATE_RESULT_FILE.read_text(encoding="utf-8"))
         except Exception:
-            payload = {}
+            LOGGER.exception("Could not read updater result")
+            if attempt < 14:
+                self.after(750, lambda: self._show_update_result(attempt + 1))
+            return
         try:
             UPDATE_RESULT_FILE.unlink(missing_ok=True)
         except Exception:
-            pass
+            LOGGER.exception("Could not remove updater result file")
 
         status = str(payload.get("status") or "")
         version = str(payload.get("version") or APP_VERSION)
         message = str(payload.get("message") or "")
+        LOGGER.info("Updater result status=%s version=%s message=%s", status, version, message)
+
         if status == "success":
             self.update_status_label.configure(text=f"Updated successfully to v{version}")
             self.update_detail_label.configure(text="The latest update is installed and ready.")
@@ -1521,7 +1879,9 @@ class DownloaderApp(ctk.CTk):
             self.top_update_button.grid_remove()
             messagebox.showinfo(APP_NAME, f"Updated successfully to v{version}.")
         elif status == "failed":
-            self.update_detail_label.configure(text="The update could not be installed. The previous version was restored.")
+            self.update_detail_label.configure(
+                text="The update could not be installed. The previous version was restored."
+            )
             messagebox.showwarning(
                 APP_NAME,
                 "The update could not be installed. Your previous working version was restored."

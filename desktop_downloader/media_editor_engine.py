@@ -99,7 +99,14 @@ def probe_media(path: Path) -> MediaInfo:
             + float(duration_match.group(3))
         )
 
-    video_line = next((line for line in text.splitlines() if " Video: " in line), "")
+    video_line = next(
+        (
+            line
+            for line in text.splitlines()
+            if " Video: " in line and "attached pic" not in line.lower()
+        ),
+        "",
+    )
     audio_line = next((line for line in text.splitlines() if " Audio: " in line), "")
     size_match = re.search(r"(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)", video_line)
     fps_match = re.search(r"(\d+(?:\.\d+)?)\s*fps", video_line)
@@ -338,10 +345,10 @@ def build_export_command(
         "error",
         "-ss",
         f"{start:.3f}",
-        "-i",
-        str(path),
         "-t",
         f"{clip_duration:.3f}",
+        "-i",
+        str(path),
     ]
 
     if info.has_video:
@@ -382,7 +389,7 @@ def build_export_command(
     else:
         audio_filters = build_audio_filters(
             speed,
-            volume_percent,
+            0.0 if mute else volume_percent,
             fade_in,
             fade_out,
             output_duration,

@@ -61,7 +61,7 @@ class MediaDownloaderApp(DownloaderApp):
                 hover_color=PURPLE_HOVER,
                 text_color="#FFFFFF",
             )
-        elif kind in {"ready", "error"}:
+        elif kind in {"ready", "error", "cancelled"}:
             button.configure(
                 text="Reset for next download",
                 fg_color="transparent",

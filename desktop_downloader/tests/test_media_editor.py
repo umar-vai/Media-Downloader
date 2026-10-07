@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 DESKTOP_DIR = Path(__file__).resolve().parents[1]
@@ -17,6 +18,7 @@ from media_editor_engine import (
     even_size,
     format_time,
     parse_time,
+    probe_media,
     safe_export_name,
 )
 
@@ -106,6 +108,69 @@ class MediaEditorEngineTests(unittest.TestCase):
         self.assertIn("-progress", command)
         self.assertEqual(command[-1], str(output))
         self.assertIn("-nostdin", command)
+
+    def test_slow_motion_limits_input_before_decode(self) -> None:
+        command, duration = build_export_command(
+            Path("input.mp4"),
+            Path("slow.mp4"),
+            self.video,
+            start=10.0,
+            end=20.0,
+            crop_preset="Original",
+            custom_crop=None,
+            rotate="0°",
+            speed=0.5,
+            mute=False,
+            volume_percent=100,
+            fade_in=0,
+            fade_out=0,
+            quality="High",
+        )
+        self.assertAlmostEqual(duration, 20.0)
+        self.assertLess(command.index("-t"), command.index("-i"))
+        self.assertIn("setpts=PTS/0.5", ",".join(command))
+
+    def test_audio_only_mute_exports_silence(self) -> None:
+        audio = MediaInfo(
+            duration=30.0,
+            has_video=False,
+            has_audio=True,
+            width=0,
+            height=0,
+            fps=0.0,
+        )
+        command, _ = build_export_command(
+            Path("input.mp3"),
+            Path("muted.mp3"),
+            audio,
+            start=0.0,
+            end=10.0,
+            crop_preset="Original",
+            custom_crop=None,
+            rotate="0°",
+            speed=1.0,
+            mute=True,
+            volume_percent=100,
+            fade_in=0,
+            fade_out=0,
+            quality="High",
+        )
+        self.assertIn("-af", command)
+        self.assertIn("volume=0.000", command[command.index("-af") + 1])
+
+    @patch("media_editor_engine.subprocess.run")
+    def test_probe_ignores_attached_cover_art(self, run_mock) -> None:
+        run_mock.return_value.returncode = 1
+        run_mock.return_value.stderr = """
+Duration: 00:01:00.00, start: 0.000000, bitrate: 192 kb/s
+Stream #0:0: Audio: mp3, 44100 Hz, stereo, fltp, 192 kb/s
+Stream #0:1: Video: mjpeg, yuvj420p(pc), 600x600, 90k tbr, 90k tbn (attached pic)
+"""
+        info = probe_media(Path("song.mp3"))
+        self.assertTrue(info.has_audio)
+        self.assertFalse(info.has_video)
+        self.assertEqual(info.width, 0)
+        self.assertEqual(info.height, 0)
 
     def test_safe_export_name(self) -> None:
         self.assertEqual(safe_export_name('bad:/name*?.mp4'), "bad_name_.mp4")

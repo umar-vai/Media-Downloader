@@ -13,7 +13,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from app_logging import get_logger
 
+
+LOGGER = get_logger("player")
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -120,6 +123,7 @@ class EmbeddedMediaPlayer:
         else:
             command += ["--vo=null"]
 
+        LOGGER.info("Starting mpv source=%s audio_only=%s window_id=%s", self.path, self.audio_only, self.window_id)
         self._process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -258,6 +262,7 @@ class EmbeddedMediaPlayer:
         if self._ipc is None:
             with self._lock:
                 self._fatal_error = last_error or "Could not connect to mpv IPC."
+            LOGGER.error("mpv IPC connection failed source=%s error=%s", self.path, self._fatal_error)
             self._ready.set()
             return
 
@@ -297,6 +302,7 @@ class EmbeddedMediaPlayer:
             with self._lock:
                 if not self._fatal_error:
                     self._fatal_error = str(exc)
+            LOGGER.exception("mpv IPC worker failed source=%s", self.path)
         finally:
             if not self._ready.is_set():
                 self._ready.set()
@@ -321,6 +327,7 @@ class EmbeddedMediaPlayer:
             if reason == "error":
                 with self._lock:
                     self._fatal_error = "mpv could not decode the selected media."
+                LOGGER.error("mpv decode failed source=%s", self.path)
             return
 
         if event == "property-change":
@@ -344,6 +351,7 @@ class EmbeddedMediaPlayer:
         if error not in (None, "success"):
             with self._lock:
                 self._last_command_error = str(error)
+            LOGGER.warning("mpv command warning source=%s error=%s", self.path, error)
 
     def _check_alive(self) -> None:
         if self._closed:
