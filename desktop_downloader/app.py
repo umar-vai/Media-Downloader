@@ -123,11 +123,17 @@ def load_settings() -> dict[str, Any]:
 
 
 def save_settings(settings: dict[str, Any]) -> None:
+    temp_file = CONFIG_FILE.with_suffix(".json.tmp")
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp_file.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp_file.replace(CONFIG_FILE)
     except Exception:
-        pass
+        LOGGER.exception("Could not save settings")
+        try:
+            temp_file.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def human_bytes(value: Any) -> str:
@@ -798,7 +804,7 @@ class DownloaderApp(ctk.CTk):
 
         self.update_toggle_button = ctk.CTkButton(
             card,
-            text="Show settings",
+            text="Show details",
             width=108,
             height=32,
             corner_radius=9,
@@ -874,31 +880,28 @@ class DownloaderApp(ctk.CTk):
         self.update_progress.grid(row=3, column=0, sticky="ew", pady=(10, 6))
         self.update_progress.set(0)
 
-        preferences = ctk.CTkFrame(body, fg_color="transparent")
-        preferences.grid(row=4, column=0, sticky="ew", pady=(7, 0))
-        preferences.grid_columnconfigure(2, weight=1)
-        self.auto_check_switch = ctk.CTkSwitch(
-            preferences,
-            text="Automatically check for updates",
-            variable=self.auto_check_updates_var,
-            command=self._save_update_preferences,
+        preferences_hint = ctk.CTkFrame(body, fg_color="transparent")
+        preferences_hint.grid(row=4, column=0, sticky="ew", pady=(7, 0))
+        preferences_hint.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            preferences_hint,
+            text="Automatic update preferences are managed in Settings.",
             text_color=MUTED,
-            progress_color=PURPLE,
-            button_color=TEXT,
-            button_hover_color=CYAN,
-        )
-        self.auto_check_switch.grid(row=0, column=0, sticky="w")
-        self.auto_download_switch = ctk.CTkSwitch(
-            preferences,
-            text="Automatically download updates",
-            variable=self.auto_download_updates_var,
-            command=self._save_update_preferences,
-            text_color=MUTED,
-            progress_color=PURPLE,
-            button_color=TEXT,
-            button_hover_color=CYAN,
-        )
-        self.auto_download_switch.grid(row=0, column=1, sticky="w", padx=(22, 0))
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            preferences_hint,
+            text="Open Settings",
+            width=100,
+            height=30,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            command=self.open_settings,
+        ).grid(row=0, column=1, sticky="e")
 
         buttons = ctk.CTkFrame(body, fg_color="transparent")
         buttons.grid(row=5, column=0, sticky="ew", pady=(12, 0))
@@ -971,10 +974,10 @@ class DownloaderApp(ctk.CTk):
         self.update_expanded = not self.update_expanded
         if self.update_expanded:
             self.update_body.grid()
-            self.update_toggle_button.configure(text="Hide settings")
+            self.update_toggle_button.configure(text="Hide details")
         else:
             self.update_body.grid_remove()
-            self.update_toggle_button.configure(text="Show settings")
+            self.update_toggle_button.configure(text="Show details")
 
     def _build_footer(self) -> None:
         footer = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -1680,7 +1683,7 @@ class DownloaderApp(ctk.CTk):
     def clear_form(self) -> None:
         self._cancel_auto_analyze()
         self.last_analyzed_url = ""
-        self.open_editor_after_var.set(False)
+        self.open_editor_after_var.set(bool(self.settings.get("open_editor_after_download", False)))
         self.task_state = TaskState.IDLE
         self.active_job_id = None
         self.active_job_cancel = None
