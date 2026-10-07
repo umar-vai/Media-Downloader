@@ -1241,6 +1241,101 @@ class MediaEditorWindow(ctk.CTkToplevel):
             pass
         return True
 
+    def _capture_history_snapshot(self) -> EditorSnapshot:
+        return EditorSnapshot(
+            start=self.start_var.get(),
+            end=self.end_var.get(),
+            crop=self.crop_var.get(),
+            rotate=self.rotate_var.get(),
+            speed=self.speed_var.get(),
+            custom_x=self.custom_x_var.get(),
+            custom_y=self.custom_y_var.get(),
+            custom_w=self.custom_w_var.get(),
+            custom_h=self.custom_h_var.get(),
+            mute=bool(self.mute_var.get()),
+            volume=float(self.volume_var.get()),
+            fade_in=self.fade_in_var.get(),
+            fade_out=self.fade_out_var.get(),
+        )
+
+    def _record_history_snapshot(self) -> None:
+        if self._applying_history or self.info is None or self.render_busy:
+            return
+        if self.history.push(self._capture_history_snapshot()):
+            self._update_history_buttons()
+
+    def _update_history_buttons(self) -> None:
+        if not hasattr(self, "undo_button"):
+            return
+        self.undo_button.configure(state="normal" if self.history.can_undo else "disabled")
+        self.redo_button.configure(state="normal" if self.history.can_redo else "disabled")
+
+    def _apply_history_snapshot(self, snapshot: EditorSnapshot) -> None:
+        if self.info is None:
+            return
+        self._applying_history = True
+        try:
+            self.start_var.set(snapshot.start)
+            self.end_var.set(snapshot.end)
+            self.crop_var.set(snapshot.crop)
+            self.rotate_var.set(snapshot.rotate)
+            self.speed_var.set(snapshot.speed)
+            self.custom_x_var.set(snapshot.custom_x)
+            self.custom_y_var.set(snapshot.custom_y)
+            self.custom_w_var.set(snapshot.custom_w)
+            self.custom_h_var.set(snapshot.custom_h)
+            self.mute_var.set(snapshot.mute)
+            self.volume_var.set(snapshot.volume)
+            self.fade_in_var.set(snapshot.fade_in)
+            self.fade_out_var.set(snapshot.fade_out)
+
+            start = max(0.0, min(parse_time(snapshot.start), self.info.duration))
+            end = max(start + 0.001, min(parse_time(snapshot.end), self.info.duration))
+            self.timeline.set_range(start, end)
+            if self.playhead_var.get() < start or self.playhead_var.get() > end:
+                self._seek_player(start)
+
+            custom = snapshot.crop == "Custom"
+            for entry in self.custom_entries:
+                entry.configure(state="normal" if custom else "disabled")
+            self.apply_crop_button.configure(state="normal" if custom else "disabled")
+
+            self._speed_changed(snapshot.speed)
+            self._volume_changed(snapshot.volume)
+            self._sync_audio_state()
+            self._apply_player_video_transform()
+            self.schedule_preview(delay=20)
+            self._update_range_labels()
+            self._update_export_summary()
+        finally:
+            self._applying_history = False
+        self._update_history_buttons()
+
+    def undo_edit(self) -> None:
+        if self.render_busy:
+            return
+        snapshot = self.history.undo()
+        if snapshot is not None:
+            self._apply_history_snapshot(snapshot)
+            self.status_label.configure(text="Undo applied", text_color=MUTED)
+
+    def redo_edit(self) -> None:
+        if self.render_busy:
+            return
+        snapshot = self.history.redo()
+        if snapshot is not None:
+            self._apply_history_snapshot(snapshot)
+            self.status_label.configure(text="Redo applied", text_color=MUTED)
+
+    def _on_history_shortcut(self, _event: Any, action: str) -> str | None:
+        if not self._shortcut_allowed() or self.render_busy:
+            return None
+        if action == "undo":
+            self.undo_edit()
+        else:
+            self.redo_edit()
+        return "break"
+
     def _on_mark_shortcut(self, _event: Any, target: str) -> str | None:
         if not self._shortcut_allowed() or self.render_busy:
             return None
