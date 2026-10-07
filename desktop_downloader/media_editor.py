@@ -604,6 +604,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             command=self._volume_changed,
         )
         self.volume_slider.grid(row=5, column=0, sticky="ew", pady=(5, 16))
+        self.volume_slider.bind("<ButtonRelease-1>", lambda _event: self._record_history_snapshot())
 
         fade = ctk.CTkFrame(tab, fg_color="transparent")
         fade.grid(row=6, column=0, sticky="ew")
@@ -615,12 +616,16 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self._field_label(left, "Fade in (sec)").pack(anchor="w")
         self.fade_in_entry = ctk.CTkEntry(left, textvariable=self.fade_in_var, height=34)
         self.fade_in_entry.pack(fill="x", pady=(4, 0))
+        self.fade_in_entry.bind("<Return>", lambda _event: self._record_history_snapshot())
+        self.fade_in_entry.bind("<FocusOut>", lambda _event: self._record_history_snapshot())
 
         right = ctk.CTkFrame(fade, fg_color="transparent")
         right.grid(row=0, column=1, sticky="ew", padx=(5, 0))
         self._field_label(right, "Fade out (sec)").pack(anchor="w")
         self.fade_out_entry = ctk.CTkEntry(right, textvariable=self.fade_out_var, height=34)
         self.fade_out_entry.pack(fill="x", pady=(4, 0))
+        self.fade_out_entry.bind("<Return>", lambda _event: self._record_history_snapshot())
+        self.fade_out_entry.bind("<FocusOut>", lambda _event: self._record_history_snapshot())
 
         ctk.CTkButton(
             tab,
