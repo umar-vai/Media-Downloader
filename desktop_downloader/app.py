@@ -800,7 +800,7 @@ class DownloaderApp(ctk.CTk):
         card = self.update_card
         card.grid(row=5, column=0, sticky="ew", pady=(0, 14))
         card.grid_columnconfigure(0, weight=1)
-        self._section_title(card, "03 / Updates", "Updates & preferences")
+        self._section_title(card, "03 / Updates", "Update status")
 
         self.update_toggle_button = ctk.CTkButton(
             card,
@@ -1989,6 +1989,116 @@ class DownloaderApp(ctk.CTk):
         save_settings(self.settings)
         self.top_update_button.grid_remove()
         self.update_detail_label.configure(text="Update reminder snoozed for 24 hours.")
+
+    def open_settings(self) -> None:
+        existing = self.settings_window
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                self.settings_window = None
+
+        try:
+            self.settings_window = SettingsWindow(
+                self,
+                self.settings,
+                on_save=self._apply_settings,
+                on_check_updates=lambda: self.check_for_updates(manual=True),
+                on_open_diagnostics=self.open_diagnostics,
+                on_open_log=self.open_app_log,
+                on_open_release=self.open_release_page,
+            )
+            self.settings_window.bind(
+                "<Destroy>",
+                lambda event: self._settings_destroyed(event),
+                add="+",
+            )
+            self.settings_window.focus()
+            LOGGER.info("Settings window opened")
+        except Exception as exc:
+            LOGGER.exception("Could not open settings window")
+            self.settings_window = None
+            messagebox.showerror(APP_NAME, f"Could not open Settings.\n\n{exc}")
+
+    def _settings_destroyed(self, event: Any) -> None:
+        window = self.settings_window
+        if window is not None and event.widget is window:
+            self.settings_window = None
+            LOGGER.info("Settings window closed")
+
+    def _apply_settings(self, payload: dict[str, Any]) -> None:
+        mode = str(payload.get("default_mode") or "Video")
+        if mode not in {"Video", "Audio"}:
+            mode = "Video"
+
+        video_quality = str(payload.get("video_quality") or "720p")
+        if video_quality not in {"Best", "1080p", "720p", "480p", "360p"}:
+            video_quality = "720p"
+
+        audio_format = str(payload.get("audio_format") or "MP3").upper()
+        if audio_format not in {"MP3", "M4A", "WAV"}:
+            audio_format = "MP3"
+
+        audio_quality = str(payload.get("audio_quality") or "192")
+        if audio_quality not in {"320", "256", "192", "128"}:
+            audio_quality = "192"
+
+        raw_dir = str(payload.get("download_dir") or DEFAULT_DOWNLOAD_DIR).strip()
+        download_dir = Path(raw_dir).expanduser() if raw_dir else DEFAULT_DOWNLOAD_DIR
+
+        normalized = dict(self.settings)
+        normalized.update(
+            {
+                "download_dir": str(download_dir),
+                "default_mode": mode,
+                "video_quality": video_quality,
+                "audio_format": audio_format,
+                "audio_quality": audio_quality,
+                "auto_analyze_links": bool(payload.get("auto_analyze_links", True)),
+                "open_editor_after_download": bool(payload.get("open_editor_after_download", False)),
+                "confirm_before_exit": bool(payload.get("confirm_before_exit", True)),
+                "auto_check_updates": bool(payload.get("auto_check_updates", True)),
+                "auto_download_updates": bool(payload.get("auto_download_updates", False)),
+            }
+        )
+
+        self.settings = normalized
+        save_settings(self.settings)
+
+        self.download_dir = download_dir
+        self.download_dir_var.set(str(download_dir))
+        self.mode_var.set(mode)
+        self.video_quality_var.set(video_quality)
+        self.audio_format_var.set(audio_format)
+        self.audio_quality_var.set(audio_quality)
+        self.open_editor_after_var.set(bool(normalized["open_editor_after_download"]))
+        self.auto_check_updates_var.set(bool(normalized["auto_check_updates"]))
+        self.auto_download_updates_var.set(bool(normalized["auto_download_updates"]))
+
+        self.save_location_label.configure(text=f"SAVE LOCATION  •  {self.download_dir}")
+        self._sync_mode(mode)
+
+        if not self.latest_release:
+            self.update_detail_label.configure(
+                text=(
+                    "Automatic update checks are enabled."
+                    if self.auto_check_updates_var.get()
+                    else "Automatic update checks are disabled."
+                )
+            )
+
+        LOGGER.info(
+            "Settings applied mode=%s video_quality=%s audio_format=%s download_dir=%s auto_analyze=%s",
+            mode,
+            video_quality,
+            audio_format,
+            download_dir,
+            normalized["auto_analyze_links"],
+        )
 
     def open_diagnostics(self) -> None:
         existing = self.diagnostics_window
