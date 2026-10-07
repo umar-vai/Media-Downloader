@@ -108,17 +108,62 @@ def default_settings() -> dict[str, Any]:
     }
 
 
-def load_settings() -> dict[str, Any]:
+def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
     settings = default_settings()
-    source = CONFIG_FILE if CONFIG_FILE.exists() else LEGACY_CONFIG_FILE
+    if isinstance(payload, dict):
+        settings.update(payload)
+
+    mode = str(settings.get("default_mode") or "Video")
+    settings["default_mode"] = mode if mode in {"Video", "Audio"} else "Video"
+
+    video_quality = str(settings.get("video_quality") or "720p")
+    settings["video_quality"] = (
+        video_quality
+        if video_quality in {"Best available", "1080p", "720p", "480p", "360p"}
+        else "720p"
+    )
+
+    audio_format = str(settings.get("audio_format") or "MP3").upper()
+    settings["audio_format"] = audio_format if audio_format in {"MP3", "M4A"} else "MP3"
+
+    audio_quality = str(settings.get("audio_quality") or "192")
+    settings["audio_quality"] = audio_quality if audio_quality in {"320", "256", "192", "128"} else "192"
+
+    download_dir = str(settings.get("download_dir") or DEFAULT_DOWNLOAD_DIR).strip()
+    settings["download_dir"] = download_dir or str(DEFAULT_DOWNLOAD_DIR)
+
+    for key, fallback in (
+        ("auto_check_updates", True),
+        ("auto_download_updates", False),
+        ("auto_analyze_links", True),
+        ("open_editor_after_download", False),
+        ("confirm_before_exit", True),
+    ):
+        value = settings.get(key, fallback)
+        settings[key] = value if isinstance(value, bool) else fallback
+
+    settings["snooze_version"] = str(settings.get("snooze_version") or "")
     try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
-        if isinstance(payload, dict):
-            settings.update(payload)
-            if source == LEGACY_CONFIG_FILE and not CONFIG_FILE.exists():
-                save_settings(settings)
+        settings["snooze_until"] = float(settings.get("snooze_until") or 0)
+    except (TypeError, ValueError):
+        settings["snooze_until"] = 0
+
+    return settings
+
+
+def load_settings() -> dict[str, Any]:
+    source = CONFIG_FILE if CONFIG_FILE.exists() else LEGACY_CONFIG_FILE
+    payload: dict[str, Any] | None = None
+    try:
+        raw = json.loads(source.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            payload = raw
     except Exception:
-        pass
+        payload = None
+
+    settings = normalize_settings(payload)
+    if source == LEGACY_CONFIG_FILE and source.exists() and not CONFIG_FILE.exists():
+        save_settings(settings)
     return settings
 
 
