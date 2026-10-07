@@ -1303,57 +1303,102 @@ class DownloaderApp(ctk.CTk):
             self.thumbnail_label.configure(image=None, text="VIDEO\nPREVIEW")
 
     def _drain_events(self) -> None:
+        job_kinds = {
+            "info",
+            "progress",
+            "status",
+            "done",
+            "error",
+            "cancelled",
+            "analysis_finished",
+            "download_finished",
+        }
         try:
             while True:
                 kind, payload = self.events.get_nowait()
+                data = payload
+
+                if kind in job_kinds:
+                    if not isinstance(payload, dict):
+                        LOGGER.warning("Ignoring malformed job event kind=%s payload=%r", kind, payload)
+                        continue
+                    job_id = int(payload.get("job_id") or -1)
+                    if not self._is_current_job(job_id):
+                        LOGGER.info(
+                            "Ignoring stale job event kind=%s job=%s active=%s",
+                            kind,
+                            job_id,
+                            self.active_job_id,
+                        )
+                        continue
+                    data = payload.get("data")
+
                 if kind == "info":
-                    self.current_info = payload["info"]
-                    self.name_var.set(safe_filename(payload["title"]))
-                    self.title_label.configure(text=payload["title"])
-                    platform_label = platform_name(str(payload.get("platform") or ""))
-                    self.meta_label.configure(text=f"{payload['channel']}  •  {platform_label}  •  {payload['duration']}")
-                    self.media_badge.configure(text=f"{platform_label.upper()} • READY", fg_color="#0E3025", text_color=SUCCESS)
-                    self._apply_thumbnail(payload.get("thumbnail"))
+                    media = dict(data or {})
+                    self.current_info = media.get("info")
+                    self.name_var.set(safe_filename(str(media.get("title") or "Media")))
+                    self.title_label.configure(text=str(media.get("title") or "Media"))
+                    platform_label = platform_name(str(media.get("platform") or ""))
+                    self.meta_label.configure(
+                        text=f"{media.get('channel') or 'Creator'}  •  {platform_label}  •  {media.get('duration') or '--:--'}"
+                    )
+                    self.media_badge.configure(
+                        text=f"{platform_label.upper()} • READY",
+                        fg_color="#0E3025",
+                        text_color=SUCCESS,
+                    )
+                    self._apply_thumbnail(media.get("thumbnail"))
+                    self.task_state = TaskState.READY
                     self._set_status(f"{platform_label} media information loaded", "ready")
-                    self._set_busy(False)
+                    self._finish_job(job_id)
+
                 elif kind == "progress":
-                    percent = max(0.0, min(100.0, float(payload.get("percent") or 0)))
+                    detail = dict(data or {})
+                    percent = max(0.0, min(100.0, float(detail.get("percent") or 0)))
                     self.progress.set(percent / 100.0)
                     self.progress_label.configure(text=f"{percent:.0f}%")
-                    self.speed_label.configure(text=str(payload.get("detail") or "Downloading…"))
+                    self.speed_label.configure(text=str(detail.get("detail") or "Downloading…"))
                     self._set_status(f"Downloading… {percent:.1f}%", "working")
+
                 elif kind == "status":
-                    self._set_status(str(payload), "working")
+                    self._set_status(str(data or ""), "working")
+
                 elif kind == "done":
-                    self.last_file = Path(str(payload))
+                    self.last_file = Path(str(data))
                     self.progress.set(1)
                     self.progress_label.configure(text="100%")
                     self.speed_label.configure(text=self.last_file.name)
+                    self.task_state = TaskState.DOWNLOADED
                     self._set_status("Download completed successfully", "success")
                     self.open_file_button.configure(state="normal")
                     should_edit = self.edit_after_download
                     self.edit_after_download = False
-                    self._set_busy(False)
+                    completed_path = self.last_file
+                    self._finish_job(job_id)
                     if should_edit:
-                        self.after(200, lambda path=self.last_file: self.open_editor(path))
+                        self.after(200, lambda path=completed_path: self.open_editor(path))
+
                 elif kind == "error":
-                    self._set_status("Download failed", "error")
+                    self.task_state = TaskState.ERROR
+                    self._set_status("Task failed", "error")
                     self.speed_label.configure(text="")
                     self.edit_after_download = False
-                    self._set_busy(False)
-                    messagebox.showerror(APP_NAME, str(payload))
-                elif kind == "analysis_finished":
-                    # Metadata may have been rendered before the worker fully exits.
-                    # Always release the busy lock after the analysis thread ends.
-                    self._set_busy(False)
-                    if self.current_info is not None:
-                        platform = detect_platform(self.url_var.get().strip())
-                        label = platform_name(platform or "media")
-                        self._set_status(f"{label} media information loaded", "ready")
-                elif kind == "download_finished":
-                    # done/error normally releases the lock first; this is an
-                    # idempotent safety net for repeated back-to-back downloads.
-                    self._set_busy(False)
+                    LOGGER.error("Job %s failed: %s", job_id, data)
+                    self._finish_job(job_id)
+                    messagebox.showerror(APP_NAME, str(data))
+
+                elif kind == "cancelled":
+                    self.task_state = TaskState.CANCELLED
+                    self.edit_after_download = False
+                    self.speed_label.configure(text="Cancelled")
+                    self._set_status(str(data or "Task cancelled"), "ready")
+                    self._finish_job(job_id)
+
+                elif kind in {"analysis_finished", "download_finished"}:
+                    # Safety net only. Success/error/cancel normally finish the
+                    # job first; stale final events are ignored by job_id.
+                    self._finish_job(job_id)
+
                 elif kind == "update_available":
                     self._handle_update_available(payload)
                 elif kind == "update_current":
@@ -1364,13 +1409,11 @@ class DownloaderApp(ctk.CTk):
                     self._handle_update_progress(payload)
                 elif kind == "update_ready":
                     self._handle_update_ready(payload)
+
         except queue.Empty:
             pass
-        except Exception as exc:
-            # Never let one malformed/stale UI event permanently stop the event
-            # pump or leave controls disabled.
-            append_update_log(f"UI event error: {exc}")
-            self._set_busy(False)
+        except Exception:
+            LOGGER.exception("UI event pump error")
         finally:
             self.after(120, self._drain_events)
 
@@ -1436,6 +1479,9 @@ class DownloaderApp(ctk.CTk):
                 subprocess.Popen(["xdg-open", str(self.last_file)])
 
     def clear_form(self) -> None:
+        self.task_state = TaskState.IDLE
+        self.active_job_id = None
+        self.active_job_cancel = None
         self.url_var.set("")
         self.name_var.set("")
         self.current_info = None
@@ -1661,21 +1707,28 @@ class DownloaderApp(ctk.CTk):
         else:
             webbrowser.open(LATEST_RELEASE_WEB)
 
-    def _show_update_result(self) -> None:
+    def _show_update_result(self, attempt: int = 0) -> None:
         if not UPDATE_RESULT_FILE.exists():
+            if attempt < 14:
+                self.after(750, lambda: self._show_update_result(attempt + 1))
             return
         try:
             payload = json.loads(UPDATE_RESULT_FILE.read_text(encoding="utf-8"))
         except Exception:
-            payload = {}
+            LOGGER.exception("Could not read updater result")
+            if attempt < 14:
+                self.after(750, lambda: self._show_update_result(attempt + 1))
+            return
         try:
             UPDATE_RESULT_FILE.unlink(missing_ok=True)
         except Exception:
-            pass
+            LOGGER.exception("Could not remove updater result file")
 
         status = str(payload.get("status") or "")
         version = str(payload.get("version") or APP_VERSION)
         message = str(payload.get("message") or "")
+        LOGGER.info("Updater result status=%s version=%s message=%s", status, version, message)
+
         if status == "success":
             self.update_status_label.configure(text=f"Updated successfully to v{version}")
             self.update_detail_label.configure(text="The latest update is installed and ready.")
@@ -1683,7 +1736,9 @@ class DownloaderApp(ctk.CTk):
             self.top_update_button.grid_remove()
             messagebox.showinfo(APP_NAME, f"Updated successfully to v{version}.")
         elif status == "failed":
-            self.update_detail_label.configure(text="The update could not be installed. The previous version was restored.")
+            self.update_detail_label.configure(
+                text="The update could not be installed. The previous version was restored."
+            )
             messagebox.showwarning(
                 APP_NAME,
                 "The update could not be installed. Your previous working version was restored."
