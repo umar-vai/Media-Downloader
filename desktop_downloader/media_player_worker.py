@@ -135,7 +135,7 @@ def main() -> int:
             if frame is not None:
                 image_obj, pts = frame
                 pts_value = float(pts)
-                if last_frame_pts is None or abs(pts_value - last_frame_pts) > 0.0001 or paused:
+                if last_frame_pts is None or abs(pts_value - last_frame_pts) > 0.0001:
                     jpeg = encode_frame(image_obj)
                     if jpeg:
                         emit(
