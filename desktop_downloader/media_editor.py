@@ -1641,12 +1641,20 @@ class MediaEditorWindow(ctk.CTkToplevel):
     def reset_range(self) -> None:
         if not self.info:
             return
-        self.pause_playback()
-        self.start_var.set("00:00.000")
-        self.end_var.set(format_time(self.info.duration))
-        self.timeline.set_media(self.info.duration, 0.0, self.info.duration, 0.0)
-        self._update_range_labels()
-        self._seek_player(0.0)
+        previous = self._applying_history
+        self._applying_history = True
+        try:
+            self.pause_playback()
+            self.start_var.set("00:00.000")
+            self.end_var.set(format_time(self.info.duration))
+            self.timeline.set_media(self.info.duration, 0.0, self.info.duration, 0.0)
+            self._update_range_labels()
+            self._update_export_summary()
+            self._seek_player(0.0)
+        finally:
+            self._applying_history = previous
+        if not previous:
+            self._record_history_snapshot()
 
     def _crop_changed(self, value: str) -> None:
         custom = value == "Custom"
@@ -1743,39 +1751,62 @@ class MediaEditorWindow(ctk.CTkToplevel):
     def reset_video_edits(self) -> None:
         if self.render_busy:
             return
-        self.crop_var.set("Original")
-        self.rotate_var.set("0°")
-        self.speed_var.set("1.0x")
-        self._speed_changed("1.0x")
-        for entry in self.custom_entries:
-            entry.configure(state="disabled")
-        self.apply_crop_button.configure(state="disabled")
-        if self.info:
-            self.custom_x_var.set("0")
-            self.custom_y_var.set("0")
-            self.custom_w_var.set(str(self.info.width))
-            self.custom_h_var.set(str(self.info.height))
-        self._apply_player_video_transform()
-        self.schedule_preview(delay=40)
+        previous = self._applying_history
+        self._applying_history = True
+        try:
+            self.crop_var.set("Original")
+            self.rotate_var.set("0°")
+            self.speed_var.set("1.0x")
+            self._speed_changed("1.0x")
+            for entry in self.custom_entries:
+                entry.configure(state="disabled")
+            self.apply_crop_button.configure(state="disabled")
+            if self.info:
+                self.custom_x_var.set("0")
+                self.custom_y_var.set("0")
+                self.custom_w_var.set(str(self.info.width))
+                self.custom_h_var.set(str(self.info.height))
+            self._apply_player_video_transform()
+            self._update_export_summary()
+            self.schedule_preview(delay=40)
+        finally:
+            self._applying_history = previous
+        if not previous:
+            self._record_history_snapshot()
 
     def reset_audio_edits(self) -> None:
         if self.render_busy:
             return
-        self.mute_var.set(False)
-        self.volume_var.set(100)
-        self.speed_var.set("1.0x")
-        self._speed_changed("1.0x")
-        self.fade_in_var.set("0")
-        self.fade_out_var.set("0")
-        self._volume_changed(100)
-        self._sync_audio_state()
+        previous = self._applying_history
+        self._applying_history = True
+        try:
+            self.mute_var.set(False)
+            self.volume_var.set(100)
+            self.speed_var.set("1.0x")
+            self._speed_changed("1.0x")
+            self.fade_in_var.set("0")
+            self.fade_out_var.set("0")
+            self._volume_changed(100)
+            self._sync_audio_state()
+            self._update_export_summary()
+        finally:
+            self._applying_history = previous
+        if not previous:
+            self._record_history_snapshot()
 
     def reset_edits(self) -> None:
         if self.render_busy:
             return
-        self.reset_video_edits()
-        self.reset_audio_edits()
-        self.reset_range()
+        previous = self._applying_history
+        self._applying_history = True
+        try:
+            self.reset_video_edits()
+            self.reset_audio_edits()
+            self.reset_range()
+        finally:
+            self._applying_history = previous
+        if not previous:
+            self._record_history_snapshot()
         self.status_label.configure(text="All edits reset", text_color=MUTED)
         self.progress.stop()
         self.progress.configure(mode="determinate")
