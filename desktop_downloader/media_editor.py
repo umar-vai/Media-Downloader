@@ -898,9 +898,16 @@ class MediaEditorWindow(ctk.CTkToplevel):
             return image
         try:
             crop = compute_crop(self.info, self.crop_var.get(), self._current_custom_crop())
-            if crop:
+            if crop and self.info.width > 0 and self.info.height > 0:
                 x, y, width, height = crop
-                image = image.crop((x, y, x + width, y + height))
+                scale_x = image.width / self.info.width
+                scale_y = image.height / self.info.height
+                left = max(0, int(round(x * scale_x)))
+                top = max(0, int(round(y * scale_y)))
+                right = min(image.width, int(round((x + width) * scale_x)))
+                bottom = min(image.height, int(round((y + height) * scale_y)))
+                if right > left and bottom > top:
+                    image = image.crop((left, top, right, bottom))
         except Exception:
             pass
 
