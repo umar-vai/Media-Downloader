@@ -2,18 +2,38 @@ from __future__ import annotations
 
 import io
 import os
-import re
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
 
 import customtkinter as ctk
-from PIL import Image
-from imageio_ffmpeg import get_ffmpeg_exe
+import tkinter as tk
+from PIL import Image, ImageTk
 from tkinter import filedialog, messagebox
 
+from media_editor_engine import (
+    CROP_PRESETS,
+    CREATE_NO_WINDOW,
+    MediaInfo,
+    build_audio_filters,
+    build_export_command,
+    build_preview_clip_command,
+    build_video_filters,
+    compute_crop,
+    extract_preview_frame,
+    extract_waveform,
+    format_time,
+    parse_time,
+    probe_media,
+    safe_export_name,
+)
+from media_editor_widgets import TimelineCanvas
+
+
+APP_TITLE = "Media Editor"
 
 BG = "#060B14"
 SURFACE = "#0B1323"
@@ -32,44 +52,6 @@ DANGER = "#FF647C"
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus"}
-CROP_PRESETS = {
-    "Original": None,
-    "16:9": (16, 9),
-    "9:16": (9, 16),
-    "1:1": (1, 1),
-    "4:5": (4, 5),
-    "Custom": "custom",
-}
-
-
-def format_time(seconds: float) -> str:
-    total_ms = max(0, int(round(seconds * 1000)))
-    hours, rem = divmod(total_ms, 3_600_000)
-    minutes, rem = divmod(rem, 60_000)
-    secs, ms = divmod(rem, 1000)
-    if hours:
-        return f"{hours:02d}:{minutes:02d}:{secs:02d}.{ms:03d}"
-    return f"{minutes:02d}:{secs:02d}.{ms:03d}"
-
-
-def parse_time(value: str) -> float:
-    text = (value or "").strip()
-    if not text:
-        raise ValueError("Time cannot be empty.")
-    if ":" not in text:
-        return max(0.0, float(text))
-    parts = text.split(":")
-    if len(parts) > 3:
-        raise ValueError("Use SS, MM:SS or HH:MM:SS.")
-    try:
-        numbers = [float(part) for part in parts]
-    except ValueError as exc:
-        raise ValueError("Invalid time value.") from exc
-    if len(numbers) == 2:
-        return max(0.0, numbers[0] * 60 + numbers[1])
-    if len(numbers) == 3:
-        return max(0.0, numbers[0] * 3600 + numbers[1] * 60 + numbers[2])
-    return max(0.0, numbers[0])
 
 
 def _open_path(path: Path) -> None:
@@ -81,39 +63,12 @@ def _open_path(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
-def _even(value: int) -> int:
-    value = max(2, int(value))
-    return value if value % 2 == 0 else value - 1
-
-
-def probe_media(path: Path) -> dict[str, Any]:
-    command = [get_ffmpeg_exe(), "-hide_banner", "-i", str(path)]
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
-    text = result.stderr or ""
-    duration_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
-    duration = 0.0
-    if duration_match:
-        duration = (
-            int(duration_match.group(1)) * 3600
-            + int(duration_match.group(2)) * 60
-            + float(duration_match.group(3))
-        )
-    video_line = next((line for line in text.splitlines() if " Video: " in line), "")
-    audio_line = next((line for line in text.splitlines() if " Audio: " in line), "")
-    size_match = re.search(r"(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)", video_line)
-    width = int(size_match.group(1)) if size_match else 0
-    height = int(size_match.group(2)) if size_match else 0
-    has_video = bool(video_line)
-    has_audio = bool(audio_line)
-    if duration <= 0:
-        raise RuntimeError("Could not read media duration.")
-    return {
-        "duration": duration,
-        "has_video": has_video,
-        "has_audio": has_audio,
-        "width": width,
-        "height": height,
-    }
+def _short_path(path: Path, limit: int = 52) -> str:
+    text = str(path)
+    if len(text) <= limit:
+        return text
+    keep = max(12, (limit - 3) // 2)
+    return f"{text[:keep]}…{text[-keep:]}"
 
 
 class MediaEditorWindow(ctk.CTkToplevel):
@@ -122,549 +77,1367 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.parent = parent
         self.source_path = Path(source_path)
         self.output_dir = Path(output_dir or self.source_path.parent)
-        self.media: dict[str, Any] = {}
-        self.preview_image: ctk.CTkImage | None = None
-        self.last_export: Path | None = None
-        self.exporting = False
+        self.info: MediaInfo | None = None
 
-        self.title("Media Editor")
-        self.geometry("1120x820")
-        self.minsize(980, 720)
-        self.configure(fg_color=BG)
+        self.preview_pil: Image.Image | None = None
+        self.preview_photo: ImageTk.PhotoImage | None = None
+        self.preview_generation = 0
+        self.preview_after_id: str | None = None
+        self.preview_lock = threading.Lock()
+        self.thumbnail_generation = 0
+
+        self.export_process: subprocess.Popen[str] | None = None
+        self.export_cancelled = False
+        self.preview_clip_busy = False
+        self.last_export: Path | None = None
+
+        self.temp_dir = Path(tempfile.gettempdir()) / "MediaDownloaderEditor"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
 
         self.start_var = ctk.StringVar(value="00:00.000")
         self.end_var = ctk.StringVar(value="")
+        self.playhead_var = ctk.DoubleVar(value=0.0)
+
         self.crop_var = ctk.StringVar(value="Original")
         self.rotate_var = ctk.StringVar(value="0°")
         self.speed_var = ctk.StringVar(value="1.0x")
-        self.volume_var = ctk.DoubleVar(value=100.0)
+        self.custom_x_var = ctk.StringVar(value="0")
+        self.custom_y_var = ctk.StringVar(value="0")
+        self.custom_w_var = ctk.StringVar(value="")
+        self.custom_h_var = ctk.StringVar(value="")
+
         self.mute_var = ctk.BooleanVar(value=False)
+        self.volume_var = ctk.DoubleVar(value=100.0)
         self.fade_in_var = ctk.StringVar(value="0")
         self.fade_out_var = ctk.StringVar(value="0")
+
+        self.output_name_var = ctk.StringVar(value=f"{self.source_path.stem}_edited")
         self.format_var = ctk.StringVar(value="MP4")
         self.quality_var = ctk.StringVar(value="High")
-        self.output_name_var = ctk.StringVar(value=f"{self.source_path.stem}_edited")
-        self.preview_time_var = ctk.DoubleVar(value=0.0)
-        self.custom_x = ctk.StringVar(value="0")
-        self.custom_y = ctk.StringVar(value="0")
-        self.custom_w = ctk.StringVar(value="")
-        self.custom_h = ctk.StringVar(value="")
+
+        self.title(APP_TITLE)
+        self.geometry("1280x840")
+        self.minsize(1100, 740)
+        self.configure(fg_color=BG)
+        self.protocol("WM_DELETE_WINDOW", self._close)
 
         self._build_ui()
-        self.after(80, self._load_media)
+        self.after(80, self._start_load)
 
-    def _card(self, master: Any) -> ctk.CTkFrame:
-        return ctk.CTkFrame(master, fg_color=SURFACE, corner_radius=16, border_width=1, border_color=BORDER)
+    def _card(self, master: Any, **kwargs: Any) -> ctk.CTkFrame:
+        return ctk.CTkFrame(
+            master,
+            fg_color=SURFACE,
+            corner_radius=16,
+            border_width=1,
+            border_color=BORDER,
+            **kwargs,
+        )
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
+        self._build_topbar()
+
+        workspace = ctk.CTkFrame(self, fg_color="transparent")
+        workspace.grid(row=1, column=0, sticky="nsew", padx=18, pady=(14, 10))
+        workspace.grid_columnconfigure(0, weight=5)
+        workspace.grid_columnconfigure(1, weight=2)
+        workspace.grid_rowconfigure(0, weight=1)
+
+        self._build_preview(workspace)
+        self._build_inspector(workspace)
+
+        self._build_timeline()
+        self._build_bottom_bar()
+
+    def _build_topbar(self) -> None:
         top = ctk.CTkFrame(self, height=62, corner_radius=0, fg_color=SURFACE)
         top.grid(row=0, column=0, sticky="ew")
         top.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(top, text="ME", width=36, height=36, corner_radius=10, fg_color=PURPLE, text_color=TEXT,
-                     font=("Segoe UI Semibold", 13)).grid(row=0, column=0, padx=(22, 12), pady=13)
-        title = ctk.CTkFrame(top, fg_color="transparent")
-        title.grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(title, text="MEDIA EDITOR", text_color=TEXT, font=("Segoe UI Semibold", 13)).pack(anchor="w")
-        self.source_label = ctk.CTkLabel(title, text=self.source_path.name, text_color=MUTED, font=("Segoe UI", 9))
-        self.source_label.pack(anchor="w")
-        ctk.CTkButton(top, text="Open source", width=110, height=34, fg_color=SURFACE_2, hover_color=SURFACE_3,
-                      border_width=1, border_color=BORDER, command=self.open_source).grid(row=0, column=2, padx=(10, 22))
 
-        body = ctk.CTkScrollableFrame(self, fg_color="transparent", scrollbar_button_color=SURFACE_3,
-                                      scrollbar_button_hover_color=PURPLE)
-        body.grid(row=1, column=0, sticky="nsew", padx=22, pady=(14, 20))
-        body.grid_columnconfigure(0, weight=3)
-        body.grid_columnconfigure(1, weight=2)
+        ctk.CTkLabel(
+            top,
+            text="ME",
+            width=38,
+            height=38,
+            corner_radius=10,
+            fg_color=PURPLE,
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 13),
+        ).grid(row=0, column=0, padx=(18, 12), pady=12)
 
-        preview_card = self._card(body)
-        preview_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 12))
-        preview_card.grid_columnconfigure(0, weight=1)
-        self.preview_label = ctk.CTkLabel(
-            preview_card,
-            text="Loading preview…",
-            height=350,
-            fg_color="#040810",
+        title_wrap = ctk.CTkFrame(top, fg_color="transparent")
+        title_wrap.grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(
+            title_wrap,
+            text="MEDIA EDITOR",
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 13),
+        ).pack(anchor="w")
+        self.source_label = ctk.CTkLabel(
+            title_wrap,
+            text=self.source_path.name,
             text_color=MUTED,
-            font=("Segoe UI", 12),
+            font=("Segoe UI", 9),
         )
-        self.preview_label.grid(row=0, column=0, sticky="nsew", padx=14, pady=14)
+        self.source_label.pack(anchor="w", pady=(2, 0))
 
-        self.preview_slider = ctk.CTkSlider(
-            preview_card,
+        self.loading_chip = ctk.CTkLabel(
+            top,
+            text="LOADING",
+            height=28,
+            corner_radius=9,
+            fg_color="#2D2514",
+            text_color=WARNING,
+            font=("Segoe UI Semibold", 9),
+        )
+        self.loading_chip.grid(row=0, column=2, padx=(8, 8))
+
+        ctk.CTkButton(
+            top,
+            text="Reset edits",
+            width=105,
+            height=34,
+            corner_radius=9,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            command=self.reset_edits,
+        ).grid(row=0, column=3, padx=(8, 0))
+
+        ctk.CTkButton(
+            top,
+            text="Open source",
+            width=105,
+            height=34,
+            corner_radius=9,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            command=self.open_source,
+        ).grid(row=0, column=4, padx=(8, 18))
+
+    def _build_preview(self, workspace: ctk.CTkFrame) -> None:
+        card = self._card(workspace)
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
+        card.grid_columnconfigure(0, weight=1)
+        card.grid_rowconfigure(0, weight=1)
+
+        preview_wrap = ctk.CTkFrame(card, fg_color="#030812", corner_radius=11)
+        preview_wrap.grid(row=0, column=0, sticky="nsew", padx=12, pady=(12, 8))
+        preview_wrap.grid_columnconfigure(0, weight=1)
+        preview_wrap.grid_rowconfigure(0, weight=1)
+
+        self.preview_canvas = tk.Canvas(
+            preview_wrap,
+            bg="#030812",
+            bd=0,
+            highlightthickness=0,
+            cursor="crosshair",
+        )
+        self.preview_canvas.grid(row=0, column=0, sticky="nsew")
+        self.preview_canvas.bind("<Configure>", self._on_preview_resize)
+        self.preview_canvas.create_text(
+            20,
+            20,
+            text="Loading media…",
+            fill=MUTED,
+            anchor="nw",
+            font=("Segoe UI", 12),
+            tags="placeholder",
+        )
+
+        transport = ctk.CTkFrame(card, fg_color="transparent")
+        transport.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
+        transport.grid_columnconfigure(4, weight=1)
+
+        ctk.CTkButton(
+            transport,
+            text="◀ 5s",
+            width=68,
+            height=34,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            command=lambda: self.step_playhead(-5.0),
+        ).grid(row=0, column=0, padx=(0, 5))
+
+        ctk.CTkButton(
+            transport,
+            text="Set In",
+            width=72,
+            height=34,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            command=self.set_in_here,
+        ).grid(row=0, column=1, padx=5)
+
+        self.current_time_label = ctk.CTkLabel(
+            transport,
+            text="00:00.000 / --:--",
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 10),
+        )
+        self.current_time_label.grid(row=0, column=2, padx=10)
+
+        ctk.CTkButton(
+            transport,
+            text="Set Out",
+            width=76,
+            height=34,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            command=self.set_out_here,
+        ).grid(row=0, column=3, padx=5)
+
+        self.preview_status_label = ctk.CTkLabel(
+            transport,
+            text="",
+            text_color=MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+        )
+        self.preview_status_label.grid(row=0, column=4, sticky="w", padx=10)
+
+        ctk.CTkButton(
+            transport,
+            text="5s ▶",
+            width=68,
+            height=34,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            command=lambda: self.step_playhead(5.0),
+        ).grid(row=0, column=5, padx=(5, 0))
+
+    def _build_inspector(self, workspace: ctk.CTkFrame) -> None:
+        card = self._card(workspace)
+        card.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
+        card.grid_columnconfigure(0, weight=1)
+        card.grid_rowconfigure(0, weight=1)
+
+        self.tabs = ctk.CTkTabview(
+            card,
+            fg_color=SURFACE,
+            segmented_button_fg_color=SURFACE_2,
+            segmented_button_selected_color=PURPLE,
+            segmented_button_selected_hover_color=PURPLE_HOVER,
+            segmented_button_unselected_color=SURFACE_2,
+            segmented_button_unselected_hover_color=SURFACE_3,
+        )
+        self.tabs.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        self.tabs.add("Video")
+        self.tabs.add("Audio")
+        self.tabs.add("Export")
+
+        self._build_video_tab(self.tabs.tab("Video"))
+        self._build_audio_tab(self.tabs.tab("Audio"))
+        self._build_export_tab(self.tabs.tab("Export"))
+
+    def _field_label(self, master: Any, text: str) -> ctk.CTkLabel:
+        return ctk.CTkLabel(master, text=text, text_color=MUTED, font=("Segoe UI", 9), anchor="w")
+
+    def _build_video_tab(self, tab: ctk.CTkFrame) -> None:
+        tab.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            tab,
+            text="FRAME & SPEED",
+            text_color=CYAN,
+            font=("Segoe UI Semibold", 10),
+        ).grid(row=0, column=0, sticky="w", pady=(8, 12))
+
+        self._field_label(tab, "Crop / aspect ratio").grid(row=1, column=0, sticky="w")
+        self.crop_menu = ctk.CTkOptionMenu(
+            tab,
+            variable=self.crop_var,
+            values=list(CROP_PRESETS),
+            command=self._crop_changed,
+            fg_color=SURFACE_3,
+            button_color=PURPLE,
+            button_hover_color=PURPLE_HOVER,
+        )
+        self.crop_menu.grid(row=2, column=0, sticky="ew", pady=(4, 10))
+
+        row = ctk.CTkFrame(tab, fg_color="transparent")
+        row.grid(row=3, column=0, sticky="ew")
+        row.grid_columnconfigure(0, weight=1)
+        row.grid_columnconfigure(1, weight=1)
+
+        left = ctk.CTkFrame(row, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        self._field_label(left, "Rotate").pack(anchor="w")
+        self.rotate_menu = ctk.CTkOptionMenu(
+            left,
+            variable=self.rotate_var,
+            values=["0°", "90°", "180°", "270°"],
+            command=lambda _value: self.schedule_preview(),
+            fg_color=SURFACE_3,
+            button_color=PURPLE,
+        )
+        self.rotate_menu.pack(fill="x", pady=(4, 0))
+
+        right = ctk.CTkFrame(row, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+        self._field_label(right, "Speed").pack(anchor="w")
+        self.speed_menu = ctk.CTkOptionMenu(
+            right,
+            variable=self.speed_var,
+            values=["0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"],
+            fg_color=SURFACE_3,
+            button_color=PURPLE,
+        )
+        self.speed_menu.pack(fill="x", pady=(4, 0))
+
+        custom = ctk.CTkFrame(tab, fg_color=SURFACE_2, corner_radius=10)
+        custom.grid(row=4, column=0, sticky="ew", pady=(14, 0))
+        for column in range(2):
+            custom.grid_columnconfigure(column, weight=1)
+
+        ctk.CTkLabel(
+            custom,
+            text="CUSTOM CROP",
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 9),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(9, 6))
+
+        self.custom_entries: list[ctk.CTkEntry] = []
+        fields = [
+            ("X", self.custom_x_var),
+            ("Y", self.custom_y_var),
+            ("Width", self.custom_w_var),
+            ("Height", self.custom_h_var),
+        ]
+        for index, (label, variable) in enumerate(fields):
+            cell = ctk.CTkFrame(custom, fg_color="transparent")
+            cell.grid(row=1 + index // 2, column=index % 2, sticky="ew", padx=(10, 5) if index % 2 == 0 else (5, 10), pady=4)
+            self._field_label(cell, label).pack(anchor="w")
+            entry = ctk.CTkEntry(cell, textvariable=variable, height=32)
+            entry.pack(fill="x", pady=(2, 0))
+            entry.configure(state="disabled")
+            entry.bind("<Return>", lambda _event: self.apply_custom_crop())
+            self.custom_entries.append(entry)
+
+        self.apply_crop_button = ctk.CTkButton(
+            custom,
+            text="Apply custom crop",
+            height=34,
+            fg_color=SURFACE_3,
+            hover_color="#1B3153",
+            command=self.apply_custom_crop,
+            state="disabled",
+        )
+        self.apply_crop_button.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(8, 10))
+
+        ctk.CTkButton(
+            tab,
+            text="Reset video edits",
+            height=36,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.reset_video_edits,
+        ).grid(row=5, column=0, sticky="ew", pady=(14, 0))
+
+    def _build_audio_tab(self, tab: ctk.CTkFrame) -> None:
+        tab.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            tab,
+            text="AUDIO",
+            text_color=CYAN,
+            font=("Segoe UI Semibold", 10),
+        ).grid(row=0, column=0, sticky="w", pady=(8, 12))
+
+        self.mute_switch = ctk.CTkSwitch(
+            tab,
+            text="Mute audio",
+            variable=self.mute_var,
+            text_color=TEXT,
+            progress_color=PURPLE,
+            button_color=TEXT,
+            button_hover_color=CYAN,
+            command=self._sync_audio_state,
+        )
+        self.mute_switch.grid(row=1, column=0, sticky="w", pady=(0, 14))
+
+        self.volume_text = ctk.CTkLabel(
+            tab,
+            text="Volume 100%",
+            text_color=MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+        )
+        self.volume_text.grid(row=2, column=0, sticky="w")
+        self.volume_slider = ctk.CTkSlider(
+            tab,
             from_=0,
-            to=1,
-            number_of_steps=1000,
-            variable=self.preview_time_var,
-            command=self._preview_position_changed,
+            to=200,
+            variable=self.volume_var,
+            number_of_steps=200,
             progress_color=CYAN,
             button_color=TEXT,
             button_hover_color=CYAN,
+            command=self._volume_changed,
+        )
+        self.volume_slider.grid(row=3, column=0, sticky="ew", pady=(5, 16))
+
+        fade = ctk.CTkFrame(tab, fg_color="transparent")
+        fade.grid(row=4, column=0, sticky="ew")
+        fade.grid_columnconfigure(0, weight=1)
+        fade.grid_columnconfigure(1, weight=1)
+
+        left = ctk.CTkFrame(fade, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        self._field_label(left, "Fade in (sec)").pack(anchor="w")
+        self.fade_in_entry = ctk.CTkEntry(left, textvariable=self.fade_in_var, height=34)
+        self.fade_in_entry.pack(fill="x", pady=(4, 0))
+
+        right = ctk.CTkFrame(fade, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+        self._field_label(right, "Fade out (sec)").pack(anchor="w")
+        self.fade_out_entry = ctk.CTkEntry(right, textvariable=self.fade_out_var, height=34)
+        self.fade_out_entry.pack(fill="x", pady=(4, 0))
+
+        ctk.CTkButton(
+            tab,
+            text="Reset audio edits",
+            height=36,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.reset_audio_edits,
+        ).grid(row=5, column=0, sticky="ew", pady=(18, 0))
+
+    def _build_export_tab(self, tab: ctk.CTkFrame) -> None:
+        tab.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            tab,
+            text="EXPORT",
+            text_color=CYAN,
+            font=("Segoe UI Semibold", 10),
+        ).grid(row=0, column=0, sticky="w", pady=(8, 12))
+
+        self._field_label(tab, "File name").grid(row=1, column=0, sticky="w")
+        self.output_name_entry = ctk.CTkEntry(tab, textvariable=self.output_name_var, height=36)
+        self.output_name_entry.grid(row=2, column=0, sticky="ew", pady=(4, 12))
+
+        export_row = ctk.CTkFrame(tab, fg_color="transparent")
+        export_row.grid(row=3, column=0, sticky="ew")
+        export_row.grid_columnconfigure(0, weight=1)
+        export_row.grid_columnconfigure(1, weight=1)
+
+        left = ctk.CTkFrame(export_row, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        self._field_label(left, "Format").pack(anchor="w")
+        self.format_menu = ctk.CTkOptionMenu(
+            left,
+            variable=self.format_var,
+            values=["MP4", "MKV", "MOV"],
+            fg_color=SURFACE_3,
+            button_color=PURPLE,
+        )
+        self.format_menu.pack(fill="x", pady=(4, 0))
+
+        right = ctk.CTkFrame(export_row, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+        self._field_label(right, "Quality").pack(anchor="w")
+        self.quality_menu = ctk.CTkOptionMenu(
+            right,
+            variable=self.quality_var,
+            values=["High", "Balanced", "Small"],
+            fg_color=SURFACE_3,
+            button_color=PURPLE,
+        )
+        self.quality_menu.pack(fill="x", pady=(4, 0))
+
+        ctk.CTkButton(
+            tab,
+            text="Choose output folder",
+            height=36,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            command=self.choose_output_folder,
+        ).grid(row=4, column=0, sticky="ew", pady=(14, 6))
+
+        self.output_dir_label = ctk.CTkLabel(
+            tab,
+            text=_short_path(self.output_dir),
+            text_color=MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+            wraplength=310,
+        )
+        self.output_dir_label.grid(row=5, column=0, sticky="ew")
+
+        ctk.CTkLabel(
+            tab,
+            text="Edits are non-destructive. Your source file is never overwritten.",
+            text_color="#667996",
+            font=("Segoe UI", 9),
+            justify="left",
+            wraplength=310,
+        ).grid(row=6, column=0, sticky="ew", pady=(16, 0))
+
+    def _build_timeline(self) -> None:
+        card = self._card(self)
+        card.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 10))
+        card.grid_columnconfigure(0, weight=1)
+
+        header = ctk.CTkFrame(card, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=12, pady=(9, 4))
+        header.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(
+            header,
+            text="TIMELINE",
+            text_color=CYAN,
+            font=("Segoe UI Semibold", 9),
+        ).grid(row=0, column=0, sticky="w")
+
+        self.selection_label = ctk.CTkLabel(
+            header,
+            text="Selection: --",
+            text_color=MUTED,
+            font=("Segoe UI", 9),
+        )
+        self.selection_label.grid(row=0, column=1, sticky="w", padx=(12, 0))
+
+        self.media_info_label = ctk.CTkLabel(
+            header,
+            text="",
+            text_color="#667996",
+            font=("Segoe UI", 9),
+        )
+        self.media_info_label.grid(row=0, column=3, sticky="e")
+
+        self.timeline = TimelineCanvas(
+            card,
+            on_seek=self._on_timeline_seek,
+            on_range_change=self._on_range_change,
+        )
+        self.timeline.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
+
+        range_row = ctk.CTkFrame(card, fg_color="transparent")
+        range_row.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
+        range_row.grid_columnconfigure(1, weight=1)
+        range_row.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(range_row, text="IN", text_color=MUTED, font=("Segoe UI Semibold", 8)).grid(row=0, column=0, padx=(0, 6))
+        self.start_entry = ctk.CTkEntry(range_row, textvariable=self.start_var, height=32, width=150)
+        self.start_entry.grid(row=0, column=1, sticky="w")
+        self.start_entry.bind("<Return>", lambda _event: self.apply_range_entries())
+        self.start_entry.bind("<FocusOut>", lambda _event: self.apply_range_entries(silent=True))
+
+        ctk.CTkLabel(range_row, text="OUT", text_color=MUTED, font=("Segoe UI Semibold", 8)).grid(row=0, column=2, padx=(16, 6))
+        self.end_entry = ctk.CTkEntry(range_row, textvariable=self.end_var, height=32, width=150)
+        self.end_entry.grid(row=0, column=3, sticky="w")
+        self.end_entry.bind("<Return>", lambda _event: self.apply_range_entries())
+        self.end_entry.bind("<FocusOut>", lambda _event: self.apply_range_entries(silent=True))
+
+        ctk.CTkButton(
+            range_row,
+            text="Reset range",
+            width=95,
+            height=32,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.reset_range,
+        ).grid(row=0, column=4, padx=(16, 0))
+
+    def _build_bottom_bar(self) -> None:
+        bar = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=0, height=62)
+        bar.grid(row=3, column=0, sticky="ew")
+        bar.grid_columnconfigure(0, weight=1)
+
+        status_wrap = ctk.CTkFrame(bar, fg_color="transparent")
+        status_wrap.grid(row=0, column=0, sticky="ew", padx=(18, 10), pady=10)
+        status_wrap.grid_columnconfigure(0, weight=1)
+
+        self.status_label = ctk.CTkLabel(
+            status_wrap,
+            text="Loading media…",
+            text_color=MUTED,
+            font=("Segoe UI", 10),
+            anchor="w",
+        )
+        self.status_label.grid(row=0, column=0, sticky="ew")
+
+        self.progress = ctk.CTkProgressBar(
+            status_wrap,
+            height=7,
+            corner_radius=4,
+            fg_color=SURFACE_3,
+            progress_color=CYAN,
+            mode="determinate",
+        )
+        self.progress.grid(row=1, column=0, sticky="ew", pady=(5, 0))
+        self.progress.set(0)
+
+        self.preview_clip_button = ctk.CTkButton(
+            bar,
+            text="Preview edit (15s)",
+            width=132,
+            height=40,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            command=self.preview_edit_clip,
             state="disabled",
         )
-        self.preview_slider.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
+        self.preview_clip_button.grid(row=0, column=1, padx=6, pady=10)
 
-        preview_actions = ctk.CTkFrame(preview_card, fg_color="transparent")
-        preview_actions.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 16))
-        preview_actions.grid_columnconfigure(0, weight=1)
-        self.preview_time_label = ctk.CTkLabel(preview_actions, text="00:00.000", text_color=MUTED, font=("Segoe UI", 10))
-        self.preview_time_label.grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(preview_actions, text="Set start here", width=105, height=34, fg_color=SURFACE_2,
-                      hover_color=SURFACE_3, command=self.set_start_from_preview).grid(row=0, column=1, padx=4)
-        ctk.CTkButton(preview_actions, text="Set end here", width=100, height=34, fg_color=SURFACE_2,
-                      hover_color=SURFACE_3, command=self.set_end_from_preview).grid(row=0, column=2, padx=4)
-        self.refresh_button = ctk.CTkButton(preview_actions, text="Refresh frame", width=110, height=34, fg_color=PURPLE,
-                                            hover_color=PURPLE_HOVER, command=self.refresh_preview)
-        self.refresh_button.grid(row=0, column=3, padx=(4, 0))
-
-        trim_card = self._card(body)
-        trim_card.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(0, 12))
-        for column in range(2):
-            trim_card.grid_columnconfigure(column, weight=1)
-        ctk.CTkLabel(trim_card, text="TRIM / CUT", text_color=CYAN, font=("Segoe UI Semibold", 10)).grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 8)
+        self.cancel_button = ctk.CTkButton(
+            bar,
+            text="Cancel",
+            width=82,
+            height=40,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.cancel_export,
+            state="disabled",
         )
-        ctk.CTkLabel(trim_card, text="Start", text_color=MUTED).grid(row=1, column=0, sticky="w", padx=16)
-        ctk.CTkLabel(trim_card, text="End", text_color=MUTED).grid(row=1, column=1, sticky="w", padx=16)
-        ctk.CTkEntry(trim_card, textvariable=self.start_var, height=38).grid(row=2, column=0, sticky="ew", padx=(16, 8), pady=(5, 15))
-        ctk.CTkEntry(trim_card, textvariable=self.end_var, height=38).grid(row=2, column=1, sticky="ew", padx=(8, 16), pady=(5, 15))
+        self.cancel_button.grid(row=0, column=2, padx=6, pady=10)
 
-        video_card = self._card(body)
-        video_card.grid(row=2, column=0, sticky="ew", padx=(0, 8), pady=(0, 12))
-        for column in range(3):
-            video_card.grid_columnconfigure(column, weight=1)
-        ctk.CTkLabel(video_card, text="VIDEO CONTROLS", text_color=CYAN, font=("Segoe UI Semibold", 10)).grid(
-            row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(14, 8)
+        self.open_export_button = ctk.CTkButton(
+            bar,
+            text="Open export",
+            width=105,
+            height=40,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            command=self.open_export,
+            state="disabled",
         )
-        ctk.CTkLabel(video_card, text="Crop / Aspect", text_color=MUTED).grid(row=1, column=0, sticky="w", padx=16)
-        ctk.CTkLabel(video_card, text="Rotate", text_color=MUTED).grid(row=1, column=1, sticky="w", padx=8)
-        ctk.CTkLabel(video_card, text="Speed", text_color=MUTED).grid(row=1, column=2, sticky="w", padx=8)
-        self.crop_menu = ctk.CTkOptionMenu(video_card, variable=self.crop_var, values=list(CROP_PRESETS),
-                                           command=self._crop_changed, fg_color=SURFACE_3, button_color=PURPLE)
-        self.crop_menu.grid(row=2, column=0, sticky="ew", padx=(16, 8), pady=(5, 10))
-        self.rotate_menu = ctk.CTkOptionMenu(video_card, variable=self.rotate_var, values=["0°", "90°", "180°", "270°"],
-                                             command=lambda _: self.refresh_preview(), fg_color=SURFACE_3, button_color=PURPLE)
-        self.rotate_menu.grid(row=2, column=1, sticky="ew", padx=8, pady=(5, 10))
-        self.speed_menu = ctk.CTkOptionMenu(video_card, variable=self.speed_var,
-                                            values=["0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"],
-                                            fg_color=SURFACE_3, button_color=PURPLE)
-        self.speed_menu.grid(row=2, column=2, sticky="ew", padx=(8, 16), pady=(5, 10))
+        self.open_export_button.grid(row=0, column=3, padx=6, pady=10)
 
-        custom = ctk.CTkFrame(video_card, fg_color="transparent")
-        custom.grid(row=3, column=0, columnspan=3, sticky="ew", padx=16, pady=(0, 10))
-        for col in range(4):
-            custom.grid_columnconfigure(col, weight=1)
-        self.custom_entries: list[ctk.CTkEntry] = []
-        for col, (label, variable) in enumerate([
-            ("X", self.custom_x), ("Y", self.custom_y), ("Width", self.custom_w), ("Height", self.custom_h)
-        ]):
-            wrap = ctk.CTkFrame(custom, fg_color="transparent")
-            wrap.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 5, 0))
-            ctk.CTkLabel(wrap, text=label, text_color=MUTED, font=("Segoe UI", 9)).pack(anchor="w")
-            entry = ctk.CTkEntry(wrap, textvariable=variable, height=34)
-            entry.pack(fill="x", pady=(3, 0))
-            self.custom_entries.append(entry)
-
-        audio = ctk.CTkFrame(video_card, fg_color="transparent")
-        audio.grid(row=4, column=0, columnspan=3, sticky="ew", padx=16, pady=(0, 14))
-        audio.grid_columnconfigure(1, weight=1)
-        self.mute_switch = ctk.CTkSwitch(audio, text="Mute audio", variable=self.mute_var, text_color=TEXT,
-                                         progress_color=PURPLE, command=self._sync_audio_controls)
-        self.mute_switch.grid(row=0, column=0, sticky="w")
-        self.volume_slider = ctk.CTkSlider(audio, from_=0, to=200, variable=self.volume_var, number_of_steps=200,
-                                           progress_color=CYAN, button_color=TEXT)
-        self.volume_slider.grid(row=0, column=1, sticky="ew", padx=(16, 8))
-        self.volume_label = ctk.CTkLabel(audio, text="Volume 100%", width=95, text_color=MUTED)
-        self.volume_label.grid(row=0, column=2, sticky="e")
-        self.volume_slider.configure(command=self._volume_changed)
-
-        side = ctk.CTkFrame(body, fg_color="transparent")
-        side.grid(row=0, column=1, rowspan=3, sticky="nsew", padx=(8, 0))
-        side.grid_columnconfigure(0, weight=1)
-
-        fade_card = self._card(side)
-        fade_card.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        for column in range(2):
-            fade_card.grid_columnconfigure(column, weight=1)
-        ctk.CTkLabel(fade_card, text="AUDIO FADE", text_color=CYAN, font=("Segoe UI Semibold", 10)).grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(14, 8)
+        self.export_button = ctk.CTkButton(
+            bar,
+            text="Export edited media",
+            width=155,
+            height=40,
+            fg_color=CYAN,
+            hover_color=CYAN_HOVER,
+            text_color="#031018",
+            font=("Segoe UI Semibold", 11),
+            command=self.export_media,
+            state="disabled",
         )
-        ctk.CTkLabel(fade_card, text="Fade in (sec)", text_color=MUTED).grid(row=1, column=0, sticky="w", padx=16)
-        ctk.CTkLabel(fade_card, text="Fade out (sec)", text_color=MUTED).grid(row=1, column=1, sticky="w", padx=8)
-        self.fade_in_entry = ctk.CTkEntry(fade_card, textvariable=self.fade_in_var, height=36)
-        self.fade_in_entry.grid(row=2, column=0, sticky="ew", padx=(16, 8), pady=(5, 14))
-        self.fade_out_entry = ctk.CTkEntry(fade_card, textvariable=self.fade_out_var, height=36)
-        self.fade_out_entry.grid(row=2, column=1, sticky="ew", padx=(8, 16), pady=(5, 14))
+        self.export_button.grid(row=0, column=4, padx=(6, 18), pady=10)
 
-        export_card = self._card(side)
-        export_card.grid(row=1, column=0, sticky="ew", pady=(0, 12))
-        export_card.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(export_card, text="EXPORT", text_color=CYAN, font=("Segoe UI Semibold", 10)).grid(
-            row=0, column=0, sticky="w", padx=16, pady=(14, 8)
-        )
-        ctk.CTkLabel(export_card, text="File name", text_color=MUTED).grid(row=1, column=0, sticky="w", padx=16)
-        ctk.CTkEntry(export_card, textvariable=self.output_name_var, height=38).grid(
-            row=2, column=0, sticky="ew", padx=16, pady=(5, 10)
-        )
-        row = ctk.CTkFrame(export_card, fg_color="transparent")
-        row.grid(row=3, column=0, sticky="ew", padx=16)
-        for column in range(2):
-            row.grid_columnconfigure(column, weight=1)
-        format_wrap = ctk.CTkFrame(row, fg_color="transparent")
-        format_wrap.grid(row=0, column=0, sticky="ew", padx=(0, 5))
-        ctk.CTkLabel(format_wrap, text="Format", text_color=MUTED).pack(anchor="w")
-        self.format_menu = ctk.CTkOptionMenu(format_wrap, variable=self.format_var, values=["MP4", "MKV", "MOV"],
-                                              fg_color=SURFACE_3, button_color=PURPLE)
-        self.format_menu.pack(fill="x", pady=(4, 0))
-        quality_wrap = ctk.CTkFrame(row, fg_color="transparent")
-        quality_wrap.grid(row=0, column=1, sticky="ew", padx=(5, 0))
-        ctk.CTkLabel(quality_wrap, text="Quality", text_color=MUTED).pack(anchor="w")
-        self.quality_menu = ctk.CTkOptionMenu(quality_wrap, variable=self.quality_var,
-                                               values=["High", "Medium", "Small"],
-                                               fg_color=SURFACE_3, button_color=PURPLE)
-        self.quality_menu.pack(fill="x", pady=(4, 0))
-        ctk.CTkButton(export_card, text="Choose output folder", height=36, fg_color=SURFACE_2,
-                      hover_color=SURFACE_3, command=self.choose_output_folder).grid(
-            row=4, column=0, sticky="ew", padx=16, pady=(12, 6)
-        )
-        self.output_dir_label = ctk.CTkLabel(export_card, text=str(self.output_dir), text_color=MUTED,
-                                             font=("Segoe UI", 9), wraplength=330, justify="left")
-        self.output_dir_label.grid(row=5, column=0, sticky="w", padx=16, pady=(0, 12))
+    def _start_load(self) -> None:
+        threading.Thread(target=self._load_worker, daemon=True).start()
 
-        action_card = self._card(side)
-        action_card.grid(row=2, column=0, sticky="ew")
-        action_card.grid_columnconfigure(0, weight=1)
-        self.status_label = ctk.CTkLabel(action_card, text="Loading media…", text_color=MUTED, anchor="w")
-        self.status_label.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
-        self.progress = ctk.CTkProgressBar(action_card, height=8, fg_color=SURFACE_3, progress_color=CYAN)
-        self.progress.grid(row=1, column=0, sticky="ew", padx=16)
-        self.progress.set(0)
-        self.export_button = ctk.CTkButton(action_card, text="Export edited media", height=48, fg_color=CYAN,
-                                           hover_color=CYAN_HOVER, text_color="#031018",
-                                           font=("Segoe UI Semibold", 12), command=self.export_media, state="disabled")
-        self.export_button.grid(row=2, column=0, sticky="ew", padx=16, pady=(12, 7))
-        self.open_export_button = ctk.CTkButton(action_card, text="Open exported file", height=38, fg_color=SURFACE_2,
-                                                hover_color=SURFACE_3, command=self.open_export, state="disabled")
-        self.open_export_button.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 14))
-
-        self._crop_changed("Original")
-
-    def _load_media(self) -> None:
+    def _load_worker(self) -> None:
         try:
             if not self.source_path.exists():
-                raise FileNotFoundError("Source file no longer exists.")
-            self.media = probe_media(self.source_path)
-            duration = float(self.media["duration"])
-            self.end_var.set(format_time(duration))
-            self.preview_slider.configure(to=max(duration, 0.001), state="normal")
-            self.preview_time_var.set(min(duration / 2, 2.0))
-            self.custom_w.set(str(self.media.get("width") or ""))
-            self.custom_h.set(str(self.media.get("height") or ""))
-            kind = "Video" if self.media["has_video"] else "Audio"
-            details = f"{kind} • {format_time(duration)}"
-            if self.media["has_video"] and self.media["width"] and self.media["height"]:
-                details += f" • {self.media['width']}×{self.media['height']}"
-            self.source_label.configure(text=f"{self.source_path.name}  •  {details}")
-            if not self.media["has_video"]:
-                self.crop_menu.configure(state="disabled")
-                self.rotate_menu.configure(state="disabled")
-                self.preview_slider.configure(state="disabled")
-                self.refresh_button.configure(state="disabled")
-                self.preview_label.configure(text="Audio file\nUse trim, speed, volume and fade controls.", image=None)
-                self.format_menu.configure(values=["MP3", "M4A", "WAV"])
-                suffix = self.source_path.suffix.upper().lstrip(".")
-                self.format_var.set(suffix if suffix in {"MP3", "M4A", "WAV"} else "MP3")
-            else:
-                self.format_menu.configure(values=["MP4", "MKV", "MOV"])
-                suffix = self.source_path.suffix.upper().lstrip(".")
-                self.format_var.set(suffix if suffix in {"MP4", "MKV", "MOV"} else "MP4")
-                self.refresh_preview()
-            if not self.media["has_audio"]:
-                self.mute_switch.configure(state="disabled")
-                self.volume_slider.configure(state="disabled")
-                self.fade_in_entry.configure(state="disabled")
-                self.fade_out_entry.configure(state="disabled")
-            self.status_label.configure(text="Ready to edit", text_color=SUCCESS)
-            self.export_button.configure(state="normal")
+                raise FileNotFoundError("The source file no longer exists.")
+            info = probe_media(self.source_path)
+            self.after(0, lambda: self._apply_loaded_media(info))
         except Exception as exc:
-            self.status_label.configure(text="Could not load media", text_color=DANGER)
-            messagebox.showerror("Media Editor", str(exc), parent=self)
+            self.after(0, lambda: self._load_failed(str(exc)))
 
-    def _preview_position_changed(self, value: float) -> None:
-        self.preview_time_label.configure(text=format_time(float(value)))
+    def _apply_loaded_media(self, info: MediaInfo) -> None:
+        self.info = info
+        self.start_var.set("00:00.000")
+        self.end_var.set(format_time(info.duration))
+        self.playhead_var.set(min(info.duration, 1.0))
+        self.custom_w_var.set(str(info.width or ""))
+        self.custom_h_var.set(str(info.height or ""))
 
-    def set_start_from_preview(self) -> None:
-        self.start_var.set(format_time(float(self.preview_time_var.get())))
+        kind = "Video" if info.has_video else "Audio"
+        meta = f"{kind} • {format_time(info.duration)}"
+        if info.has_video and info.width and info.height:
+            meta += f" • {info.width}×{info.height}"
+            if info.fps:
+                meta += f" • {info.fps:g} fps"
+        self.source_label.configure(text=f"{self.source_path.name}  •  {meta}")
+        self.media_info_label.configure(text=meta)
 
-    def set_end_from_preview(self) -> None:
-        self.end_var.set(format_time(float(self.preview_time_var.get())))
+        self.timeline.set_media(info.duration, 0.0, info.duration, self.playhead_var.get())
+        self._update_range_labels()
+        self._update_current_time_label()
 
-    def _crop_changed(self, value: str) -> None:
-        custom = value == "Custom"
-        for entry in getattr(self, "custom_entries", []):
-            entry.configure(state="normal" if custom else "disabled")
-        if self.media.get("has_video"):
-            self.refresh_preview()
-
-    def _volume_changed(self, value: float) -> None:
-        self.volume_label.configure(text=f"Volume {int(float(value))}%")
-
-    def _sync_audio_controls(self) -> None:
-        state = "disabled" if self.mute_var.get() else "normal"
-        if self.media.get("has_audio", True):
-            self.volume_slider.configure(state=state)
-            self.fade_in_entry.configure(state=state)
-            self.fade_out_entry.configure(state=state)
-
-    def _crop_filter(self) -> str | None:
-        if not self.media.get("has_video"):
-            return None
-        preset = self.crop_var.get()
-        if preset == "Original":
-            return None
-        source_w = int(self.media.get("width") or 0)
-        source_h = int(self.media.get("height") or 0)
-        if source_w <= 0 or source_h <= 0:
-            raise ValueError("Video dimensions could not be detected.")
-        if preset == "Custom":
-            x = max(0, int(self.custom_x.get() or 0))
-            y = max(0, int(self.custom_y.get() or 0))
-            width = _even(int(self.custom_w.get()))
-            height = _even(int(self.custom_h.get()))
-            if x + width > source_w or y + height > source_h:
-                raise ValueError("Custom crop is outside the source frame.")
-            return f"crop={width}:{height}:{x}:{y}"
-        ratio = CROP_PRESETS[preset]
-        if not isinstance(ratio, tuple):
-            return None
-        target = ratio[0] / ratio[1]
-        source = source_w / source_h
-        if source > target:
-            height = _even(source_h)
-            width = _even(int(height * target))
+        if info.has_video:
+            self.format_menu.configure(values=["MP4", "MKV", "MOV"])
+            source_format = self.source_path.suffix.upper().lstrip(".")
+            self.format_var.set(source_format if source_format in {"MP4", "MKV", "MOV"} else "MP4")
+            self.tabs.set("Video")
+            self.schedule_preview(delay=10)
+            self._start_thumbnail_generation()
         else:
-            width = _even(source_w)
-            height = _even(int(width / target))
-        x = max(0, (source_w - width) // 2)
-        y = max(0, (source_h - height) // 2)
-        return f"crop={width}:{height}:{x}:{y}"
+            self.format_menu.configure(values=["MP3", "M4A", "WAV"])
+            source_format = self.source_path.suffix.upper().lstrip(".")
+            self.format_var.set(source_format if source_format in {"MP3", "M4A", "WAV"} else "MP3")
+            self.tabs.set("Audio")
+            self.crop_menu.configure(state="disabled")
+            self.rotate_menu.configure(state="disabled")
+            self.speed_menu.configure(state="normal")
+            self._start_waveform_generation()
 
-    def _video_filters(self, include_speed: bool = True) -> list[str]:
-        filters: list[str] = []
-        crop = self._crop_filter()
-        if crop:
-            filters.append(crop)
-        rotate = self.rotate_var.get()
-        if rotate == "90°":
-            filters.append("transpose=1")
-        elif rotate == "180°":
-            filters.extend(["hflip", "vflip"])
-        elif rotate == "270°":
-            filters.append("transpose=2")
-        speed = float(self.speed_var.get().rstrip("x"))
-        if include_speed and abs(speed - 1.0) > 0.001:
-            filters.append(f"setpts=PTS/{speed:g}")
-        return filters
+        if not info.has_audio:
+            self.mute_switch.configure(state="disabled")
+            self.volume_slider.configure(state="disabled")
+            self.fade_in_entry.configure(state="disabled")
+            self.fade_out_entry.configure(state="disabled")
 
-    def _audio_filters(self, output_duration: float) -> list[str]:
-        filters: list[str] = []
-        speed = float(self.speed_var.get().rstrip("x"))
-        if abs(speed - 1.0) > 0.001:
-            filters.append(f"atempo={speed:g}")
-        volume = float(self.volume_var.get()) / 100.0
-        if abs(volume - 1.0) > 0.001:
-            filters.append(f"volume={volume:.3f}")
-        fade_in = max(0.0, float(self.fade_in_var.get() or 0))
-        fade_out = max(0.0, float(self.fade_out_var.get() or 0))
-        if fade_in > 0:
-            filters.append(f"afade=t=in:st=0:d={min(fade_in, output_duration):.3f}")
-        if fade_out > 0:
-            start = max(0.0, output_duration - fade_out)
-            filters.append(f"afade=t=out:st={start:.3f}:d={min(fade_out, output_duration):.3f}")
-        return filters
+        self.loading_chip.configure(text="READY", fg_color="#0D2A2A", text_color=SUCCESS)
+        self.status_label.configure(text="Ready to edit", text_color=SUCCESS)
+        self.export_button.configure(state="normal")
+        self.preview_clip_button.configure(state="normal")
+
+    def _load_failed(self, error: str) -> None:
+        self.loading_chip.configure(text="ERROR", fg_color="#31131B", text_color=DANGER)
+        self.status_label.configure(text="Could not load media", text_color=DANGER)
+        self.preview_canvas.delete("all")
+        self.preview_canvas.create_text(
+            max(20, self.preview_canvas.winfo_width() / 2),
+            max(20, self.preview_canvas.winfo_height() / 2),
+            text="Media could not be loaded",
+            fill=DANGER,
+            font=("Segoe UI Semibold", 14),
+        )
+        messagebox.showerror(APP_TITLE, error, parent=self)
+
+    def _on_preview_resize(self, _event=None) -> None:
+        if self.preview_pil is not None:
+            self._draw_preview_image(self.preview_pil)
+
+    def _draw_preview_image(self, image: Image.Image) -> None:
+        width = max(100, self.preview_canvas.winfo_width() - 18)
+        height = max(100, self.preview_canvas.winfo_height() - 18)
+        display = image.copy()
+        display.thumbnail((width, height))
+        self.preview_photo = ImageTk.PhotoImage(display)
+
+        self.preview_canvas.delete("all")
+        self.preview_canvas.create_image(
+            self.preview_canvas.winfo_width() / 2,
+            self.preview_canvas.winfo_height() / 2,
+            image=self.preview_photo,
+            anchor="center",
+        )
+
+    def schedule_preview(self, delay: int = 140) -> None:
+        if not self.info or not self.info.has_video:
+            return
+        if self.preview_after_id is not None:
+            try:
+                self.after_cancel(self.preview_after_id)
+            except Exception:
+                pass
+        self.preview_after_id = self.after(delay, self.refresh_preview)
 
     def refresh_preview(self) -> None:
-        if not self.media.get("has_video") or not self.source_path.exists():
+        if not self.info or not self.info.has_video:
             return
-        position = float(self.preview_time_var.get())
-        self.preview_label.configure(text="Rendering frame…", image=None)
-        threading.Thread(target=self._preview_worker, args=(position,), daemon=True).start()
-
-    def _preview_worker(self, position: float) -> None:
-        try:
-            filters = self._video_filters(include_speed=False)
-            filters.append("scale=760:430:force_original_aspect_ratio=decrease")
-            command = [
-                get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
-                "-ss", f"{position:.3f}", "-i", str(self.source_path),
-                "-frames:v", "1", "-vf", ",".join(filters),
-                "-f", "image2pipe", "-vcodec", "png", "pipe:1",
-            ]
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25)
-            if result.returncode != 0 or not result.stdout:
-                raise RuntimeError(result.stderr.decode("utf-8", errors="replace")[-800:] or "Preview failed.")
-            data = result.stdout
-            self.after(0, lambda: self._apply_preview(data))
-        except Exception as exc:
-            self.after(0, lambda: self.preview_label.configure(text=f"Preview unavailable\n{exc}", image=None))
-
-    def _apply_preview(self, data: bytes) -> None:
-        try:
-            image = Image.open(io.BytesIO(data)).convert("RGB")
-            self.preview_image = ctk.CTkImage(light_image=image, dark_image=image, size=image.size)
-            self.preview_label.configure(image=self.preview_image, text="")
-        except Exception as exc:
-            self.preview_label.configure(text=f"Preview unavailable\n{exc}", image=None)
-
-    def _validate_range(self) -> tuple[float, float, float]:
-        start = parse_time(self.start_var.get())
-        end = parse_time(self.end_var.get())
-        duration = float(self.media["duration"])
-        if start >= duration:
-            raise ValueError("Start time must be before the end of the media.")
-        end = min(end, duration)
-        if end <= start:
-            raise ValueError("End time must be after start time.")
-        return start, end, end - start
-
-    def choose_output_folder(self) -> None:
-        selected = filedialog.askdirectory(initialdir=str(self.output_dir), parent=self)
-        if selected:
-            self.output_dir = Path(selected)
-            self.output_dir_label.configure(text=str(self.output_dir))
-
-    def open_source(self) -> None:
-        try:
-            if os.name == "nt":
-                os.startfile(str(self.source_path))
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(self.source_path)])
-            else:
-                subprocess.Popen(["xdg-open", str(self.source_path)])
-        except Exception as exc:
-            messagebox.showerror("Media Editor", str(exc), parent=self)
-
-    def _build_output_path(self) -> Path:
-        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", self.output_name_var.get().strip()).strip(" .")
-        if not name:
-            name = f"{self.source_path.stem}_edited"
-        extension = "." + self.format_var.get().lower()
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        candidate = self.output_dir / f"{name}{extension}"
-        if candidate.resolve() == self.source_path.resolve():
-            candidate = self.output_dir / f"{name}_edited{extension}"
-        if not candidate.exists():
-            return candidate
-        index = 2
-        while True:
-            alternate = candidate.with_name(f"{candidate.stem}_{index}{candidate.suffix}")
-            if not alternate.exists():
-                return alternate
-            index += 1
-
-    def export_media(self) -> None:
-        if self.exporting:
-            return
-        try:
-            start, end, clip_duration = self._validate_range()
-            output = self._build_output_path()
-            speed = float(self.speed_var.get().rstrip("x"))
-            output_duration = clip_duration / speed
-            video_filters = self._video_filters() if self.media.get("has_video") else []
-            audio_filters = []
-            if self.media.get("has_audio") and not self.mute_var.get():
-                audio_filters = self._audio_filters(output_duration)
-        except Exception as exc:
-            messagebox.showerror("Media Editor", str(exc), parent=self)
-            return
-
-        self.exporting = True
-        self.export_button.configure(state="disabled")
-        self.open_export_button.configure(state="disabled")
-        self.status_label.configure(text="Exporting edited media…", text_color=WARNING)
-        self.progress.start()
+        self.preview_after_id = None
+        self.preview_generation += 1
+        generation = self.preview_generation
+        position = float(self.playhead_var.get())
+        self.preview_status_label.configure(text="Rendering preview…", text_color=WARNING)
         threading.Thread(
-            target=self._export_worker,
-            args=(start, clip_duration, output, video_filters, audio_filters),
+            target=self._preview_worker,
+            args=(generation, position),
             daemon=True,
         ).start()
 
-    def _export_worker(
-        self,
-        start: float,
-        clip_duration: float,
-        output: Path,
-        video_filters: list[str],
-        audio_filters: list[str],
-    ) -> None:
+    def _preview_worker(self, generation: int, position: float) -> None:
         try:
-            command = [
-                get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
-                "-ss", f"{start:.3f}", "-i", str(self.source_path), "-t", f"{clip_duration:.3f}",
-            ]
-            if self.media.get("has_video"):
-                command += ["-map", "0:v:0"]
-                if video_filters:
-                    command += ["-vf", ",".join(video_filters)]
-                quality = self.quality_var.get()
-                crf = {"High": "18", "Medium": "23", "Small": "28"}.get(quality, "18")
-                command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
-                if self.media.get("has_audio") and not self.mute_var.get():
-                    command += ["-map", "0:a:0?"]
-                    if audio_filters:
-                        command += ["-af", ",".join(audio_filters)]
-                    command += ["-c:a", "aac", "-b:a", "192k"]
-                else:
-                    command += ["-an"]
-                if output.suffix.lower() in {".mp4", ".mov"}:
-                    command += ["-movflags", "+faststart"]
-            else:
-                if audio_filters:
-                    command += ["-af", ",".join(audio_filters)]
-                suffix = output.suffix.lower()
-                if suffix == ".mp3":
-                    command += ["-c:a", "libmp3lame", "-b:a", "192k"]
-                elif suffix == ".m4a":
-                    command += ["-c:a", "aac", "-b:a", "192k"]
-                elif suffix == ".wav":
-                    command += ["-c:a", "pcm_s16le"]
-            command.append(str(output))
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                    encoding="utf-8", errors="replace")
-            if result.returncode != 0:
-                raise RuntimeError((result.stderr or "FFmpeg export failed.")[-1800:])
+            with self.preview_lock:
+                if generation != self.preview_generation or not self.info:
+                    return
+                filters = build_video_filters(
+                    self.info,
+                    self.crop_var.get(),
+                    self._current_custom_crop(),
+                    self.rotate_var.get(),
+                    self._speed_value(),
+                    include_speed=False,
+                    preview_size=(960, 540),
+                )
+                data = extract_preview_frame(self.source_path, position, filters, timeout=10)
+            if generation != self.preview_generation:
+                return
+            image = Image.open(io.BytesIO(data)).convert("RGB")
+            self.after(0, lambda: self._apply_preview_frame(generation, image))
+        except Exception as exc:
+            if generation == self.preview_generation:
+                self.after(0, lambda: self._preview_failed(str(exc)))
+
+    def _apply_preview_frame(self, generation: int, image: Image.Image) -> None:
+        if generation != self.preview_generation:
+            return
+        self.preview_pil = image
+        self._draw_preview_image(image)
+        self.preview_status_label.configure(text="Preview ready", text_color=MUTED)
+
+    def _preview_failed(self, error: str) -> None:
+        self.preview_status_label.configure(text="Preview failed", text_color=DANGER)
+        self.status_label.configure(text=f"Preview error: {error[-180:]}", text_color=DANGER)
+
+    def _start_thumbnail_generation(self) -> None:
+        if not self.info or not self.info.has_video:
+            return
+        self.thumbnail_generation += 1
+        generation = self.thumbnail_generation
+        info = self.info
+        threading.Thread(
+            target=self._thumbnail_worker,
+            args=(generation, info),
+            daemon=True,
+        ).start()
+
+    def _thumbnail_worker(self, generation: int, info: MediaInfo) -> None:
+        images: list[Image.Image] = []
+        count = 9
+        for index in range(count):
+            if generation != self.thumbnail_generation:
+                return
+            position = 0.0 if count == 1 else info.duration * index / (count - 1)
+            try:
+                filters = [
+                    "scale=150:84:force_original_aspect_ratio=decrease",
+                    "pad=150:84:(ow-iw)/2:(oh-ih)/2:color=black",
+                ]
+                data = extract_preview_frame(self.source_path, position, filters, timeout=7)
+                images.append(Image.open(io.BytesIO(data)).convert("RGB"))
+            except Exception:
+                continue
+        if generation == self.thumbnail_generation and images:
+            self.after(0, lambda: self.timeline.set_thumbnails(images))
+
+    def _start_waveform_generation(self) -> None:
+        threading.Thread(target=self._waveform_worker, daemon=True).start()
+
+    def _waveform_worker(self) -> None:
+        try:
+            data = extract_waveform(self.source_path)
+            image = Image.open(io.BytesIO(data)).convert("RGB")
+            self.after(0, lambda: self._apply_waveform(image))
+        except Exception as exc:
+            self.after(0, lambda: self._preview_failed(str(exc)))
+
+    def _apply_waveform(self, image: Image.Image) -> None:
+        self.preview_pil = image
+        self._draw_preview_image(image)
+        self.preview_status_label.configure(text="Audio waveform", text_color=MUTED)
+
+    def _on_timeline_seek(self, value: float) -> None:
+        self.playhead_var.set(value)
+        self._update_current_time_label()
+        self.schedule_preview()
+
+    def _on_range_change(self, start: float, end: float) -> None:
+        self.start_var.set(format_time(start))
+        self.end_var.set(format_time(end))
+        self.playhead_var.set(self.timeline.playhead)
+        self._update_range_labels()
+        self._update_current_time_label()
+        self.schedule_preview()
+
+    def _update_current_time_label(self) -> None:
+        if not self.info:
+            self.current_time_label.configure(text="00:00.000 / --:--")
+            return
+        self.current_time_label.configure(
+            text=f"{format_time(self.playhead_var.get())} / {format_time(self.info.duration)}"
+        )
+
+    def _update_range_labels(self) -> None:
+        if not self.info:
+            self.selection_label.configure(text="Selection: --")
+            return
+        try:
+            start = parse_time(self.start_var.get())
+            end = parse_time(self.end_var.get())
+            duration = max(0.0, end - start)
+            self.selection_label.configure(
+                text=f"Selection: {format_time(duration)}  •  {format_time(start)} → {format_time(end)}"
+            )
+        except Exception:
+            self.selection_label.configure(text="Selection: invalid range")
+
+    def apply_range_entries(self, silent: bool = False) -> None:
+        if not self.info:
+            return
+        try:
+            start = parse_time(self.start_var.get())
+            end = parse_time(self.end_var.get())
+            start = max(0.0, min(start, self.info.duration))
+            end = max(0.0, min(end, self.info.duration))
+            if end <= start:
+                raise ValueError("OUT must be after IN.")
+            self.start_var.set(format_time(start))
+            self.end_var.set(format_time(end))
+            self.timeline.set_range(start, end)
+            self.playhead_var.set(self.timeline.playhead)
+            self._update_range_labels()
+            self._update_current_time_label()
+            self.schedule_preview()
+        except Exception as exc:
+            if not silent:
+                messagebox.showerror(APP_TITLE, str(exc), parent=self)
+
+    def set_in_here(self) -> None:
+        if not self.info:
+            return
+        playhead = float(self.playhead_var.get())
+        end = parse_time(self.end_var.get())
+        if playhead >= end:
+            messagebox.showwarning(APP_TITLE, "IN must be before OUT.", parent=self)
+            return
+        self.start_var.set(format_time(playhead))
+        self.timeline.set_range(playhead, end)
+        self._update_range_labels()
+
+    def set_out_here(self) -> None:
+        if not self.info:
+            return
+        playhead = float(self.playhead_var.get())
+        start = parse_time(self.start_var.get())
+        if playhead <= start:
+            messagebox.showwarning(APP_TITLE, "OUT must be after IN.", parent=self)
+            return
+        self.end_var.set(format_time(playhead))
+        self.timeline.set_range(start, playhead)
+        self._update_range_labels()
+
+    def step_playhead(self, delta: float) -> None:
+        if not self.info:
+            return
+        value = max(0.0, min(self.info.duration, self.playhead_var.get() + delta))
+        self.playhead_var.set(value)
+        self.timeline.set_playhead(value)
+        self._update_current_time_label()
+        self.schedule_preview(delay=40)
+
+    def reset_range(self) -> None:
+        if not self.info:
+            return
+        self.start_var.set("00:00.000")
+        self.end_var.set(format_time(self.info.duration))
+        self.playhead_var.set(0.0)
+        self.timeline.set_media(self.info.duration, 0.0, self.info.duration, 0.0)
+        self._update_range_labels()
+        self._update_current_time_label()
+        self.schedule_preview(delay=40)
+
+    def _crop_changed(self, value: str) -> None:
+        custom = value == "Custom"
+        for entry in self.custom_entries:
+            entry.configure(state="normal" if custom else "disabled")
+        self.apply_crop_button.configure(state="normal" if custom else "disabled")
+        if custom and self.info:
+            if not self.custom_w_var.get():
+                self.custom_w_var.set(str(self.info.width))
+            if not self.custom_h_var.get():
+                self.custom_h_var.set(str(self.info.height))
+        self.schedule_preview(delay=40)
+
+    def _current_custom_crop(self) -> tuple[int, int, int, int] | None:
+        if self.crop_var.get() != "Custom":
+            return None
+        return (
+            int(self.custom_x_var.get() or 0),
+            int(self.custom_y_var.get() or 0),
+            int(self.custom_w_var.get() or 0),
+            int(self.custom_h_var.get() or 0),
+        )
+
+    def apply_custom_crop(self) -> None:
+        if not self.info:
+            return
+        try:
+            crop = self._current_custom_crop()
+            compute_crop(self.info, "Custom", crop)
+            self.schedule_preview(delay=20)
+            self.status_label.configure(text="Custom crop applied to preview", text_color=SUCCESS)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, str(exc), parent=self)
+
+    def _speed_value(self) -> float:
+        return float(self.speed_var.get().rstrip("x"))
+
+    def _volume_changed(self, value: float) -> None:
+        self.volume_text.configure(text=f"Volume {int(float(value))}%")
+
+    def _sync_audio_state(self) -> None:
+        if not self.info or not self.info.has_audio:
+            return
+        state = "disabled" if self.mute_var.get() else "normal"
+        self.volume_slider.configure(state=state)
+        self.fade_in_entry.configure(state=state)
+        self.fade_out_entry.configure(state=state)
+
+    def reset_video_edits(self) -> None:
+        self.crop_var.set("Original")
+        self.rotate_var.set("0°")
+        self.speed_var.set("1.0x")
+        for entry in self.custom_entries:
+            entry.configure(state="disabled")
+        self.apply_crop_button.configure(state="disabled")
+        if self.info:
+            self.custom_x_var.set("0")
+            self.custom_y_var.set("0")
+            self.custom_w_var.set(str(self.info.width))
+            self.custom_h_var.set(str(self.info.height))
+        self.schedule_preview(delay=40)
+
+    def reset_audio_edits(self) -> None:
+        self.mute_var.set(False)
+        self.volume_var.set(100)
+        self.fade_in_var.set("0")
+        self.fade_out_var.set("0")
+        self._volume_changed(100)
+        self._sync_audio_state()
+
+    def reset_edits(self) -> None:
+        self.reset_video_edits()
+        self.reset_audio_edits()
+        self.reset_range()
+        self.status_label.configure(text="All edits reset", text_color=MUTED)
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
+        self.progress.set(0)
+
+    def _validated_settings(self) -> dict[str, Any]:
+        if not self.info:
+            raise RuntimeError("Media is still loading.")
+
+        start = parse_time(self.start_var.get())
+        end = parse_time(self.end_var.get())
+        start = max(0.0, min(start, self.info.duration))
+        end = max(0.0, min(end, self.info.duration))
+        if end <= start:
+            raise ValueError("OUT must be after IN.")
+
+        speed = self._speed_value()
+        fade_in = max(0.0, float(self.fade_in_var.get() or 0))
+        fade_out = max(0.0, float(self.fade_out_var.get() or 0))
+        custom_crop = self._current_custom_crop()
+        if self.info.has_video:
+            compute_crop(self.info, self.crop_var.get(), custom_crop)
+
+        return {
+            "start": start,
+            "end": end,
+            "crop_preset": self.crop_var.get(),
+            "custom_crop": custom_crop,
+            "rotate": self.rotate_var.get(),
+            "speed": speed,
+            "mute": bool(self.mute_var.get()),
+            "volume_percent": float(self.volume_var.get()),
+            "fade_in": fade_in,
+            "fade_out": fade_out,
+            "quality": self.quality_var.get(),
+        }
+
+    def choose_output_folder(self) -> None:
+        selected = filedialog.askdirectory(
+            title="Choose output folder",
+            initialdir=str(self.output_dir if self.output_dir.exists() else self.output_dir.parent),
+            parent=self,
+        )
+        if selected:
+            self.output_dir = Path(selected)
+            self.output_dir_label.configure(text=_short_path(self.output_dir))
+
+    def _build_output_path(self) -> Path:
+        name = safe_export_name(self.output_name_var.get(), f"{self.source_path.stem}_edited")
+        extension = "." + self.format_var.get().lower()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        candidate = self.output_dir / f"{name}{extension}"
+        try:
+            if candidate.resolve() == self.source_path.resolve():
+                candidate = self.output_dir / f"{name}_edited{extension}"
+        except Exception:
+            pass
+
+        if not candidate.exists():
+            return candidate
+
+        index = 2
+        while True:
+            alt = candidate.with_name(f"{candidate.stem}_{index}{candidate.suffix}")
+            if not alt.exists():
+                return alt
+            index += 1
+
+    def preview_edit_clip(self) -> None:
+        if self.preview_clip_busy or self.export_process is not None:
+            return
+        try:
+            settings = self._validated_settings()
+            if not self.info:
+                return
+            start = float(self.playhead_var.get())
+            if start < settings["start"] or start >= settings["end"]:
+                start = settings["start"]
+            duration = min(15.0, settings["end"] - start)
+            suffix = ".mp4" if self.info.has_video else ".mp3"
+            output = self.temp_dir / f"preview_{os.getpid()}{suffix}"
+            command = build_preview_clip_command(
+                self.source_path,
+                output,
+                self.info,
+                start=start,
+                duration=duration,
+                crop_preset=settings["crop_preset"],
+                custom_crop=settings["custom_crop"],
+                rotate=settings["rotate"],
+                speed=settings["speed"],
+                mute=settings["mute"],
+                volume_percent=settings["volume_percent"],
+                fade_in=settings["fade_in"],
+                fade_out=settings["fade_out"],
+            )
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, str(exc), parent=self)
+            return
+
+        self.preview_clip_busy = True
+        self.preview_clip_button.configure(state="disabled", text="Rendering preview…")
+        self.export_button.configure(state="disabled")
+        self.progress.configure(mode="indeterminate")
+        self.progress.start()
+        self.status_label.configure(text="Rendering a 15-second edited preview…", text_color=WARNING)
+
+        threading.Thread(
+            target=self._preview_clip_worker,
+            args=(command, output),
+            daemon=True,
+        ).start()
+
+    def _preview_clip_worker(self, command: list[str], output: Path) -> None:
+        try:
+            output.unlink(missing_ok=True)
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=CREATE_NO_WINDOW,
+                timeout=60,
+            )
+            if result.returncode != 0 or not output.exists():
+                raise RuntimeError((result.stderr or "Preview render failed.")[-1600:])
+            self.after(0, lambda: self._preview_clip_done(output))
+        except Exception as exc:
+            self.after(0, lambda: self._preview_clip_failed(str(exc)))
+
+    def _preview_clip_done(self, output: Path) -> None:
+        self.preview_clip_busy = False
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
+        self.progress.set(0)
+        self.preview_clip_button.configure(state="normal", text="Preview edit (15s)")
+        self.export_button.configure(state="normal")
+        self.status_label.configure(text="Preview rendered. Opening in your media player…", text_color=SUCCESS)
+        try:
+            _open_path(output)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, str(exc), parent=self)
+
+    def _preview_clip_failed(self, error: str) -> None:
+        self.preview_clip_busy = False
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
+        self.progress.set(0)
+        self.preview_clip_button.configure(state="normal", text="Preview edit (15s)")
+        self.export_button.configure(state="normal")
+        self.status_label.configure(text="Preview render failed", text_color=DANGER)
+        messagebox.showerror(APP_TITLE, error, parent=self)
+
+    def export_media(self) -> None:
+        if self.export_process is not None or self.preview_clip_busy:
+            return
+        try:
+            settings = self._validated_settings()
+            if not self.info:
+                return
+            output = self._build_output_path()
+            command, expected_duration = build_export_command(
+                self.source_path,
+                output,
+                self.info,
+                start=settings["start"],
+                end=settings["end"],
+                crop_preset=settings["crop_preset"],
+                custom_crop=settings["custom_crop"],
+                rotate=settings["rotate"],
+                speed=settings["speed"],
+                mute=settings["mute"],
+                volume_percent=settings["volume_percent"],
+                fade_in=settings["fade_in"],
+                fade_out=settings["fade_out"],
+                quality=settings["quality"],
+            )
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, str(exc), parent=self)
+            return
+
+        self.export_cancelled = False
+        self.export_button.configure(state="disabled", text="Exporting…")
+        self.preview_clip_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal")
+        self.open_export_button.configure(state="disabled")
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
+        self.progress.set(0)
+        self.status_label.configure(text=f"Exporting {output.name}…", text_color=WARNING)
+
+        threading.Thread(
+            target=self._export_worker,
+            args=(command, output, expected_duration),
+            daemon=True,
+        ).start()
+
+    def _export_worker(self, command: list[str], output: Path, expected_duration: float) -> None:
+        error_lines: list[str] = []
+        try:
+            output.unlink(missing_ok=True)
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            self.export_process = process
+
+            if process.stdout is not None:
+                for raw in process.stdout:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    if "=" not in line:
+                        error_lines.append(line)
+                        error_lines = error_lines[-20:]
+                        continue
+                    key, value = line.split("=", 1)
+                    if key in {"out_time_ms", "out_time_us"}:
+                        try:
+                            seconds = int(value) / 1_000_000
+                            fraction = max(0.0, min(1.0, seconds / max(0.001, expected_duration)))
+                            self.after(0, lambda f=fraction: self._apply_export_progress(f))
+                        except Exception:
+                            pass
+
+            returncode = process.wait()
+            cancelled = self.export_cancelled
+            self.export_process = None
+
+            if cancelled:
+                try:
+                    output.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                self.after(0, self._export_cancelled_ui)
+                return
+
+            if returncode != 0 or not output.exists():
+                raise RuntimeError("\n".join(error_lines)[-1800:] or "FFmpeg export failed.")
+
             self.after(0, lambda: self._export_done(output))
         except Exception as exc:
+            self.export_process = None
             self.after(0, lambda: self._export_failed(str(exc)))
 
+    def _apply_export_progress(self, fraction: float) -> None:
+        self.progress.set(fraction)
+        self.status_label.configure(text=f"Exporting… {fraction * 100:.0f}%", text_color=WARNING)
+
+    def cancel_export(self) -> None:
+        process = self.export_process
+        if process is None:
+            return
+        self.export_cancelled = True
+        self.status_label.configure(text="Cancelling export…", text_color=WARNING)
+        try:
+            process.terminate()
+        except Exception:
+            pass
+
+    def _export_cancelled_ui(self) -> None:
+        self.progress.set(0)
+        self.export_button.configure(state="normal", text="Export edited media")
+        self.preview_clip_button.configure(state="normal")
+        self.cancel_button.configure(state="disabled")
+        self.status_label.configure(text="Export cancelled", text_color=MUTED)
+
     def _export_done(self, output: Path) -> None:
-        self.exporting = False
-        self.progress.stop()
-        self.progress.set(1)
         self.last_export = output
-        self.status_label.configure(text=f"Export complete • {output.name}", text_color=SUCCESS)
-        self.export_button.configure(state="normal")
+        self.progress.set(1)
+        self.export_button.configure(state="normal", text="Export edited media")
+        self.preview_clip_button.configure(state="normal")
+        self.cancel_button.configure(state="disabled")
         self.open_export_button.configure(state="normal")
-        messagebox.showinfo("Media Editor", f"Export completed successfully.\n\n{output}", parent=self)
+        self.status_label.configure(text=f"Export complete • {output.name}", text_color=SUCCESS)
+
+        try:
+            self.parent.last_file = output
+            self.parent.open_file_button.configure(state="normal")
+        except Exception:
+            pass
+
+        messagebox.showinfo(
+            APP_TITLE,
+            f"Export completed successfully.\n\n{output}",
+            parent=self,
+        )
 
     def _export_failed(self, error: str) -> None:
-        self.exporting = False
-        self.progress.stop()
         self.progress.set(0)
+        self.export_button.configure(state="normal", text="Export edited media")
+        self.preview_clip_button.configure(state="normal")
+        self.cancel_button.configure(state="disabled")
         self.status_label.configure(text="Export failed", text_color=DANGER)
-        self.export_button.configure(state="normal")
-        messagebox.showerror("Media Editor", error, parent=self)
+        messagebox.showerror(APP_TITLE, error, parent=self)
 
     def open_export(self) -> None:
         if self.last_export and self.last_export.exists():
             try:
-                if os.name == "nt":
-                    os.startfile(str(self.last_export))
-                elif sys.platform == "darwin":
-                    subprocess.Popen(["open", str(self.last_export)])
-                else:
-                    subprocess.Popen(["xdg-open", str(self.last_export)])
+                _open_path(self.last_export)
             except Exception as exc:
-                messagebox.showerror("Media Editor", str(exc), parent=self)
+                messagebox.showerror(APP_TITLE, str(exc), parent=self)
+
+    def open_source(self) -> None:
+        try:
+            _open_path(self.source_path)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, str(exc), parent=self)
+
+    def _close(self) -> None:
+        if self.export_process is not None:
+            if not messagebox.askyesno(
+                APP_TITLE,
+                "An export is still running. Cancel it and close the editor?",
+                parent=self,
+            ):
+                return
+            self.cancel_export()
+        self.thumbnail_generation += 1
+        self.preview_generation += 1
+        self.destroy()
