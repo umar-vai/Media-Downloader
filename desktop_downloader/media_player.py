@@ -105,11 +105,11 @@ class EmbeddedMediaPlayer:
                         continue
             return False
 
-    def next_frame(self) -> tuple[bytes, tuple[int, int], float | None, Any] | None:
+    def next_frame(self, force_refresh: bool = False) -> tuple[bytes, tuple[int, int], float | None, Any] | None:
         """Return RGB bytes, size, PTS and ffpyplayer's scheduling value."""
         with self._lock:
             self._ensure_open()
-            frame, schedule = self._player.get_frame()
+            frame, schedule = self._player.get_frame(force_refresh=force_refresh)
             if frame is None:
                 return None
             image, pts = frame
