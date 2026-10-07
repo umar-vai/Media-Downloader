@@ -26,6 +26,8 @@ APP_ASSET_NAME = "MediaDownloader.exe"
 LEGACY_APP_ASSET_NAME = "Team" + "Fahad" + "YouTubeDownloader.exe"
 ASSET_CANDIDATES = (APP_ASSET_NAME, LEGACY_APP_ASSET_NAME)
 CHECKSUM_ASSET_NAME = f"{APP_ASSET_NAME}.sha256"
+INSTALLER_ASSET_NAME = "MediaDownloaderSetup.exe"
+INSTALLER_CHECKSUM_ASSET_NAME = f"{INSTALLER_ASSET_NAME}.sha256"
 LATEST_CHECKSUM_REDIRECT = f"{GITHUB_WEB_BASE}/releases/latest/download/{CHECKSUM_ASSET_NAME}"
 USER_AGENT = "MediaDownloader-Updater/1.3"
 
@@ -42,6 +44,8 @@ class ReleaseInfo:
     asset_url: str
     checksum_url: str
     html_url: str
+    installer_url: str = ""
+    installer_checksum_url: str = ""
 
 
 def normalize_version(value: str) -> tuple[int, int, int]:
@@ -365,6 +369,8 @@ def _release_from_web_html(html: str) -> ReleaseInfo:
         asset_url=f"{base}/{APP_ASSET_NAME}",
         checksum_url=f"{base}/{CHECKSUM_ASSET_NAME}",
         html_url=f"{GITHUB_WEB_BASE}/releases/tag/{encoded_tag}",
+        installer_url=f"{base}/{INSTALLER_ASSET_NAME}",
+        installer_checksum_url=f"{base}/{INSTALLER_CHECKSUM_ASSET_NAME}",
     )
 
 
@@ -397,6 +403,8 @@ def _release_from_payload(payload: dict) -> ReleaseInfo:
         asset_url=assets[selected_name],
         checksum_url=assets[f"{selected_name}.sha256"],
         html_url=str(payload.get("html_url") or "").strip(),
+        installer_url=assets.get(INSTALLER_ASSET_NAME, ""),
+        installer_checksum_url=assets.get(INSTALLER_CHECKSUM_ASSET_NAME, ""),
     )
 
 
@@ -518,6 +526,8 @@ def _release_from_redirect_result(final_url: str, checksum_text: str) -> Release
         asset_url=f"{base}/{APP_ASSET_NAME}",
         checksum_url=f"{base}/{CHECKSUM_ASSET_NAME}",
         html_url=f"{GITHUB_WEB_BASE}/releases/tag/{encoded_tag}",
+        installer_url=f"{base}/{INSTALLER_ASSET_NAME}",
+        installer_checksum_url=f"{base}/{INSTALLER_CHECKSUM_ASSET_NAME}",
     )
 
 
@@ -578,26 +588,31 @@ def _fetch_checksum(url: str, timeout: int) -> str:
     raise UpdateError("Could not download the update checksum. " + " | ".join(errors))
 
 
-def download_release(
-    release: ReleaseInfo,
+def _download_release_asset(
+    asset_url: str,
+    checksum_url: str,
+    asset_name: str,
     destination_dir: Path,
     progress_callback: Callable[[int, int], None] | None = None,
     timeout: int = 45,
 ) -> Path:
+    if not asset_url or not checksum_url:
+        raise UpdateError(f"Release is missing {asset_name} or its checksum.")
+
     destination_dir.mkdir(parents=True, exist_ok=True)
-    partial_path = destination_dir / f"{APP_ASSET_NAME}.part"
-    final_path = destination_dir / APP_ASSET_NAME
+    partial_path = destination_dir / f"{asset_name}.part"
+    final_path = destination_dir / asset_name
 
     try:
-        expected_hash = _fetch_checksum(release.checksum_url, timeout)
+        expected_hash = _fetch_checksum(checksum_url, timeout)
 
         last_error: BaseException | None = None
         for attempt in range(1, 6):
             try:
                 partial_path.unlink(missing_ok=True)
                 request = urllib.request.Request(
-                    release.asset_url,
-                    headers=_headers_for_url(release.asset_url, accept="application/octet-stream"),
+                    asset_url,
+                    headers=_headers_for_url(asset_url, accept="application/octet-stream"),
                 )
                 response = _open_with_retries(request, timeout=timeout, attempts=2)
                 downloaded = 0
@@ -624,11 +639,14 @@ def download_release(
             if attempt < 5:
                 time.sleep(min(10.0, 1.5 * (2 ** (attempt - 1))))
 
+        curl_error: UpdateError | None = None
+        powershell_error: UpdateError | None = None
+        bits_error: UpdateError | None = None
+
         if last_error:
-            curl_error: UpdateError | None = None
             try:
                 partial_path.unlink(missing_ok=True)
-                _curl_download(release.asset_url, partial_path, timeout)
+                _curl_download(asset_url, partial_path, timeout)
                 if progress_callback:
                     size = partial_path.stat().st_size
                     progress_callback(size, size)
@@ -636,42 +654,40 @@ def download_release(
             except UpdateError as exc:
                 curl_error = exc
 
-            if last_error:
-                powershell_error: UpdateError | None = None
-                try:
-                    partial_path.unlink(missing_ok=True)
-                    _powershell_download(release.asset_url, partial_path, timeout)
-                    if progress_callback:
-                        size = partial_path.stat().st_size
-                        progress_callback(size, size)
-                    last_error = None
-                except UpdateError as exc:
-                    powershell_error = exc
+        if last_error:
+            try:
+                partial_path.unlink(missing_ok=True)
+                _powershell_download(asset_url, partial_path, timeout)
+                if progress_callback:
+                    size = partial_path.stat().st_size
+                    progress_callback(size, size)
+                last_error = None
+            except UpdateError as exc:
+                powershell_error = exc
 
-            if last_error:
-                bits_error: UpdateError | None = None
-                try:
-                    partial_path.unlink(missing_ok=True)
-                    _bits_download(release.asset_url, partial_path, timeout)
-                    if progress_callback:
-                        size = partial_path.stat().st_size
-                        progress_callback(size, size)
-                    last_error = None
-                except UpdateError as exc:
-                    bits_error = exc
+        if last_error:
+            try:
+                partial_path.unlink(missing_ok=True)
+                _bits_download(asset_url, partial_path, timeout)
+                if progress_callback:
+                    size = partial_path.stat().st_size
+                    progress_callback(size, size)
+                last_error = None
+            except UpdateError as exc:
+                bits_error = exc
 
-            if last_error:
-                if isinstance(last_error, urllib.error.HTTPError):
-                    urllib_detail = f"HTTP {last_error.code}"
-                else:
-                    urllib_detail = _reason_text(last_error)
-                raise UpdateError(
-                    "All automatic update download transports failed. "
-                    f"urllib: {urllib_detail}. "
-                    f"curl: {curl_error or 'not available'}. "
-                    f"PowerShell: {powershell_error or 'not available'}. "
-                    f"BITS: {bits_error or 'not available'}"
-                )
+        if last_error:
+            if isinstance(last_error, urllib.error.HTTPError):
+                urllib_detail = f"HTTP {last_error.code}"
+            else:
+                urllib_detail = _reason_text(last_error)
+            raise UpdateError(
+                "All automatic update download transports failed. "
+                f"urllib: {urllib_detail}. "
+                f"curl: {curl_error or 'not available'}. "
+                f"PowerShell: {powershell_error or 'not available'}. "
+                f"BITS: {bits_error or 'not available'}"
+            )
 
         if not partial_path.exists() or partial_path.stat().st_size <= 0:
             raise UpdateError("The downloaded update file is empty.")
@@ -690,3 +706,35 @@ def download_release(
         except Exception:
             pass
         raise
+
+
+def download_release(
+    release: ReleaseInfo,
+    destination_dir: Path,
+    progress_callback: Callable[[int, int], None] | None = None,
+    timeout: int = 45,
+) -> Path:
+    return _download_release_asset(
+        release.asset_url,
+        release.checksum_url,
+        APP_ASSET_NAME,
+        destination_dir,
+        progress_callback=progress_callback,
+        timeout=timeout,
+    )
+
+
+def download_installer_release(
+    release: ReleaseInfo,
+    destination_dir: Path,
+    progress_callback: Callable[[int, int], None] | None = None,
+    timeout: int = 45,
+) -> Path:
+    return _download_release_asset(
+        release.installer_url,
+        release.installer_checksum_url,
+        INSTALLER_ASSET_NAME,
+        destination_dir,
+        progress_callback=progress_callback,
+        timeout=timeout,
+    )
