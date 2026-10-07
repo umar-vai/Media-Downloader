@@ -248,22 +248,18 @@ class EmbeddedMediaPlayer:
             self._ready.set()
 
     def _reader_loop(self) -> None:
-        buffer = b""
         try:
             while not self._closed and self.available and self._ipc is not None:
-                chunk = self._ipc.read(4096)
-                if not chunk:
+                raw = self._ipc.readline()
+                if not raw:
                     break
-                buffer += chunk
-                while b"\n" in buffer:
-                    raw, buffer = buffer.split(b"\n", 1)
-                    if not raw.strip():
-                        continue
-                    try:
-                        message = json.loads(raw.decode("utf-8", errors="replace"))
-                    except json.JSONDecodeError:
-                        continue
-                    self._handle_message(message)
+                if not raw.strip():
+                    continue
+                try:
+                    message = json.loads(raw.decode("utf-8", errors="replace"))
+                except json.JSONDecodeError:
+                    continue
+                self._handle_message(message)
         except Exception as exc:
             with self._lock:
                 if not self._last_error:
