@@ -1795,11 +1795,15 @@ class DownloaderApp(ctk.CTk):
             LOGGER.info("Editor window closed")
 
     def open_last_file(self) -> None:
+        if not self.last_file or not self.last_file.exists():
+            self._sync_recent_file()
         if self.last_file and self.last_file.exists():
             if os.name == "nt":
                 os.startfile(str(self.last_file))
             else:
                 subprocess.Popen(["xdg-open", str(self.last_file)])
+        else:
+            self.open_history()
 
     def clear_form(self) -> None:
         self._cancel_auto_analyze()
@@ -2110,6 +2114,50 @@ class DownloaderApp(ctk.CTk):
         save_settings(self.settings)
         self.top_update_button.grid_remove()
         self.update_detail_label.configure(text="Update reminder snoozed for 24 hours.")
+
+    def _sync_recent_file(self) -> None:
+        recent = self.history_store.most_recent_existing()
+        self.last_file = Path(str(recent["file_path"])) if recent else None
+        if hasattr(self, "open_file_button"):
+            self.open_file_button.configure(state="normal" if self.last_file else "disabled")
+
+    def open_history(self) -> None:
+        existing = self.history_window
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                self.history_window = None
+
+        try:
+            self.history_window = HistoryWindow(
+                self,
+                self.history_store,
+                on_edit=lambda path: self.open_editor(path),
+                on_change=self._sync_recent_file,
+            )
+            self.history_window.bind(
+                "<Destroy>",
+                lambda event: self._history_destroyed(event),
+                add="+",
+            )
+            self.history_window.focus()
+            LOGGER.info("Download history window opened")
+        except Exception as exc:
+            LOGGER.exception("Could not open download history")
+            self.history_window = None
+            messagebox.showerror(APP_NAME, f"Could not open Download History.\n\n{exc}")
+
+    def _history_destroyed(self, event: Any) -> None:
+        window = self.history_window
+        if window is not None and event.widget is window:
+            self.history_window = None
+            self._sync_recent_file()
+            LOGGER.info("Download history window closed")
 
     def open_settings(self) -> None:
         existing = self.settings_window
