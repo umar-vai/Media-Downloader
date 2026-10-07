@@ -16,6 +16,7 @@ from PIL import Image, ImageTk
 from tkinter import filedialog, messagebox
 
 from app_logging import get_logger
+from editor_history import EditorHistory, EditorSnapshot
 from media_editor_engine import (
     CROP_PRESETS,
     CREATE_NO_WINDOW,
@@ -103,6 +104,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.last_export: Path | None = None
         self.ui_queue: queue.Queue[tuple[Any, tuple[Any, ...]]] = queue.Queue()
         self._closing = False
+        self.history = EditorHistory(limit=60)
+        self._applying_history = False
 
         self.temp_dir = Path(tempfile.gettempdir()) / "MediaDownloaderEditor"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -142,6 +145,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.bind("<Right>", lambda event: self._on_arrow_shortcut(event, 1, False))
         self.bind("<Shift-Left>", lambda event: self._on_arrow_shortcut(event, -1, True))
         self.bind("<Shift-Right>", lambda event: self._on_arrow_shortcut(event, 1, True))
+        self.bind("<Control-z>", lambda event: self._on_history_shortcut(event, "undo"))
+        self.bind("<Control-y>", lambda event: self._on_history_shortcut(event, "redo"))
+        self.bind("<Control-Shift-Z>", lambda event: self._on_history_shortcut(event, "redo"))
         self.after(40, self._drain_ui_queue)
         self.after(80, self._start_load)
 
