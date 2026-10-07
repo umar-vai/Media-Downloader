@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import queue
 import subprocess
 import sys
 import tempfile
@@ -90,6 +91,8 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.export_cancelled = False
         self.preview_clip_busy = False
         self.last_export: Path | None = None
+        self.ui_queue: queue.Queue[tuple[Any, tuple[Any, ...]]] = queue.Queue()
+        self._closing = False
 
         self.temp_dir = Path(tempfile.gettempdir()) / "MediaDownloaderEditor"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -122,7 +125,30 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self._close)
 
         self._build_ui()
+        self.after(40, self._drain_ui_queue)
         self.after(80, self._start_load)
+
+    def _post_ui(self, callback: Any, *args: Any) -> None:
+        if not self._closing:
+            self.ui_queue.put((callback, args))
+
+    def _drain_ui_queue(self) -> None:
+        if self._closing:
+            return
+        try:
+            while True:
+                callback, args = self.ui_queue.get_nowait()
+                callback(*args)
+        except queue.Empty:
+            pass
+        except Exception as exc:
+            try:
+                self.status_label.configure(text=f"Editor UI error: {exc}", text_color=DANGER)
+            except Exception:
+                pass
+        finally:
+            if not self._closing:
+                self.after(40, self._drain_ui_queue)
 
     def _card(self, master: Any, **kwargs: Any) -> ctk.CTkFrame:
         return ctk.CTkFrame(
@@ -748,9 +774,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
             if not self.source_path.exists():
                 raise FileNotFoundError("The source file no longer exists.")
             info = probe_media(self.source_path)
-            self.after(0, lambda: self._apply_loaded_media(info))
+            self._post_ui(self._apply_loaded_media, info)
         except Exception as exc:
-            self.after(0, lambda: self._load_failed(str(exc)))
+            self._post_ui(self._load_failed, str(exc))
 
     def _apply_loaded_media(self, info: MediaInfo) -> None:
         self.info = info
@@ -850,35 +876,40 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.preview_generation += 1
         generation = self.preview_generation
         position = float(self.playhead_var.get())
+        try:
+            filters = build_video_filters(
+                self.info,
+                self.crop_var.get(),
+                self._current_custom_crop(),
+                self.rotate_var.get(),
+                self._speed_value(),
+                include_speed=False,
+                preview_size=(960, 540),
+            )
+        except Exception as exc:
+            self._preview_failed(str(exc))
+            return
+
         self.preview_status_label.configure(text="Rendering preview…", text_color=WARNING)
         threading.Thread(
             target=self._preview_worker,
-            args=(generation, position),
+            args=(generation, position, filters),
             daemon=True,
         ).start()
 
-    def _preview_worker(self, generation: int, position: float) -> None:
+    def _preview_worker(self, generation: int, position: float, filters: list[str]) -> None:
         try:
             with self.preview_lock:
-                if generation != self.preview_generation or not self.info:
+                if generation != self.preview_generation:
                     return
-                filters = build_video_filters(
-                    self.info,
-                    self.crop_var.get(),
-                    self._current_custom_crop(),
-                    self.rotate_var.get(),
-                    self._speed_value(),
-                    include_speed=False,
-                    preview_size=(960, 540),
-                )
                 data = extract_preview_frame(self.source_path, position, filters, timeout=10)
             if generation != self.preview_generation:
                 return
             image = Image.open(io.BytesIO(data)).convert("RGB")
-            self.after(0, lambda: self._apply_preview_frame(generation, image))
+            self._post_ui(self._apply_preview_frame, generation, image)
         except Exception as exc:
             if generation == self.preview_generation:
-                self.after(0, lambda: self._preview_failed(str(exc)))
+                self._post_ui(self._preview_failed, str(exc))
 
     def _apply_preview_frame(self, generation: int, image: Image.Image) -> None:
         if generation != self.preview_generation:
@@ -920,7 +951,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             except Exception:
                 continue
         if generation == self.thumbnail_generation and images:
-            self.after(0, lambda: self.timeline.set_thumbnails(images))
+            self._post_ui(self.timeline.set_thumbnails, images)
 
     def _start_waveform_generation(self) -> None:
         threading.Thread(target=self._waveform_worker, daemon=True).start()
@@ -929,9 +960,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
         try:
             data = extract_waveform(self.source_path)
             image = Image.open(io.BytesIO(data)).convert("RGB")
-            self.after(0, lambda: self._apply_waveform(image))
+            self._post_ui(self._apply_waveform, image)
         except Exception as exc:
-            self.after(0, lambda: self._preview_failed(str(exc)))
+            self._post_ui(self._preview_failed, str(exc))
 
     def _apply_waveform(self, image: Image.Image) -> None:
         self.preview_pil = image
@@ -1240,9 +1271,9 @@ class MediaEditorWindow(ctk.CTkToplevel):
             )
             if result.returncode != 0 or not output.exists():
                 raise RuntimeError((result.stderr or "Preview render failed.")[-1600:])
-            self.after(0, lambda: self._preview_clip_done(output))
+            self._post_ui(self._preview_clip_done, output)
         except Exception as exc:
-            self.after(0, lambda: self._preview_clip_failed(str(exc)))
+            self._post_ui(self._preview_clip_failed, str(exc))
 
     def _preview_clip_done(self, output: Path) -> None:
         self.preview_clip_busy = False
@@ -1341,7 +1372,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
                         try:
                             seconds = int(value) / 1_000_000
                             fraction = max(0.0, min(1.0, seconds / max(0.001, expected_duration)))
-                            self.after(0, lambda f=fraction: self._apply_export_progress(f))
+                            self._post_ui(self._apply_export_progress, fraction)
                         except Exception:
                             pass
 
@@ -1354,16 +1385,16 @@ class MediaEditorWindow(ctk.CTkToplevel):
                     output.unlink(missing_ok=True)
                 except Exception:
                     pass
-                self.after(0, self._export_cancelled_ui)
+                self._post_ui(self._export_cancelled_ui)
                 return
 
             if returncode != 0 or not output.exists():
                 raise RuntimeError("\n".join(error_lines)[-1800:] or "FFmpeg export failed.")
 
-            self.after(0, lambda: self._export_done(output))
+            self._post_ui(self._export_done, output)
         except Exception as exc:
             self.export_process = None
-            self.after(0, lambda: self._export_failed(str(exc)))
+            self._post_ui(self._export_failed, str(exc))
 
     def _apply_export_progress(self, fraction: float) -> None:
         self.progress.set(fraction)
@@ -1440,4 +1471,5 @@ class MediaEditorWindow(ctk.CTkToplevel):
             self.cancel_export()
         self.thumbnail_generation += 1
         self.preview_generation += 1
+        self._closing = True
         self.destroy()
