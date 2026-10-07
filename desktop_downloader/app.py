@@ -24,6 +24,7 @@ from imageio_ffmpeg import get_ffmpeg_exe
 from tkinter import filedialog, messagebox
 
 from app_logging import get_logger, log_path
+from diagnostics_window import DiagnosticsWindow
 from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
 from media_sources import browser_headers, detect_platform, extraction_attempts, is_supported_media_url, platform_name, request_options, video_format_selector
@@ -174,6 +175,7 @@ class DownloaderApp(ctk.CTk):
         self.is_busy = False
         self.edit_after_download = False
         self.editor_window: MediaEditorWindow | None = None
+        self.diagnostics_window: DiagnosticsWindow | None = None
         self.task_state = TaskState.IDLE
         self._job_counter = 0
         self.active_job_id: int | None = None
@@ -962,14 +964,14 @@ class DownloaderApp(ctk.CTk):
         self.save_location_label.grid(row=0, column=0, sticky="w")
         ctk.CTkButton(
             footer,
-            text="Open diagnostics log",
-            width=132,
+            text="Diagnostics",
+            width=108,
             height=26,
             fg_color="transparent",
             hover_color=SURFACE_2,
             text_color=MUTED,
             font=("Segoe UI", 9),
-            command=self.open_app_log,
+            command=self.open_diagnostics,
         ).grid(row=1, column=0, sticky="w", pady=(5, 0))
         ctk.CTkLabel(
             footer,
@@ -1955,6 +1957,38 @@ class DownloaderApp(ctk.CTk):
         save_settings(self.settings)
         self.top_update_button.grid_remove()
         self.update_detail_label.configure(text="Update reminder snoozed for 24 hours.")
+
+    def open_diagnostics(self) -> None:
+        existing = self.diagnostics_window
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                self.diagnostics_window = None
+
+        try:
+            self.diagnostics_window = DiagnosticsWindow(self)
+            self.diagnostics_window.bind(
+                "<Destroy>",
+                lambda event: self._diagnostics_destroyed(event),
+                add="+",
+            )
+            self.diagnostics_window.focus()
+            LOGGER.info("Diagnostics window opened")
+        except Exception as exc:
+            LOGGER.exception("Could not open diagnostics window")
+            self.diagnostics_window = None
+            messagebox.showerror(APP_NAME, f"Could not open diagnostics.\n\n{exc}")
+
+    def _diagnostics_destroyed(self, event: Any) -> None:
+        window = self.diagnostics_window
+        if window is not None and event.widget is window:
+            self.diagnostics_window = None
+            LOGGER.info("Diagnostics window closed")
 
     def open_app_log(self) -> None:
         path = log_path()

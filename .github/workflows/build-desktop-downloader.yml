@@ -44,6 +44,7 @@ jobs:
         run: |
           python -m py_compile desktop_downloader/app.py
           python -m py_compile desktop_downloader/app_logging.py
+          python -m py_compile desktop_downloader/diagnostics_window.py
           python -m py_compile desktop_downloader/editor_history.py
           python -m py_compile desktop_downloader/install_mode.py
           python -m py_compile desktop_downloader/media_editor.py
