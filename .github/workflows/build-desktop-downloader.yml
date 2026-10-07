@@ -39,6 +39,7 @@ jobs:
         shell: pwsh
         run: |
           python -m py_compile desktop_downloader/app.py
+          python -m py_compile desktop_downloader/media_editor.py
           python -m py_compile desktop_downloader/launcher.py
           python -m py_compile desktop_downloader/media_sources.py
           python -m py_compile desktop_downloader/update_manager.py
