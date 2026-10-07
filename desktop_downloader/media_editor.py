@@ -479,6 +479,16 @@ class MediaEditorWindow(ctk.CTkToplevel):
             font=("Segoe UI Semibold", 10),
         ).grid(row=0, column=0, sticky="w", pady=(8, 12))
 
+        self._field_label(tab, "Playback / export speed").grid(row=1, column=0, sticky="w")
+        self.audio_speed_menu = ctk.CTkOptionMenu(
+            tab,
+            variable=self.speed_var,
+            values=["0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"],
+            fg_color=SURFACE_3,
+            button_color=PURPLE,
+        )
+        self.audio_speed_menu.grid(row=2, column=0, sticky="ew", pady=(4, 14))
+
         self.mute_switch = ctk.CTkSwitch(
             tab,
             text="Mute audio",
@@ -489,7 +499,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             button_hover_color=CYAN,
             command=self._sync_audio_state,
         )
-        self.mute_switch.grid(row=1, column=0, sticky="w", pady=(0, 14))
+        self.mute_switch.grid(row=3, column=0, sticky="w", pady=(0, 14))
 
         self.volume_text = ctk.CTkLabel(
             tab,
@@ -498,7 +508,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             font=("Segoe UI", 9),
             anchor="w",
         )
-        self.volume_text.grid(row=2, column=0, sticky="w")
+        self.volume_text.grid(row=4, column=0, sticky="w")
         self.volume_slider = ctk.CTkSlider(
             tab,
             from_=0,
@@ -510,10 +520,10 @@ class MediaEditorWindow(ctk.CTkToplevel):
             button_hover_color=CYAN,
             command=self._volume_changed,
         )
-        self.volume_slider.grid(row=3, column=0, sticky="ew", pady=(5, 16))
+        self.volume_slider.grid(row=5, column=0, sticky="ew", pady=(5, 16))
 
         fade = ctk.CTkFrame(tab, fg_color="transparent")
-        fade.grid(row=4, column=0, sticky="ew")
+        fade.grid(row=6, column=0, sticky="ew")
         fade.grid_columnconfigure(0, weight=1)
         fade.grid_columnconfigure(1, weight=1)
 
@@ -539,7 +549,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
             border_color=BORDER,
             text_color=MUTED,
             command=self.reset_audio_edits,
-        ).grid(row=5, column=0, sticky="ew", pady=(18, 0))
+        ).grid(row=7, column=0, sticky="ew", pady=(18, 0))
 
     def _build_export_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_columnconfigure(0, weight=1)
