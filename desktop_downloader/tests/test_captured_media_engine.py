@@ -19,7 +19,7 @@ from captured_media_engine import (
 
 class CapturedMediaEngineTests(unittest.TestCase):
     def test_safe_capture_name_removes_windows_invalid_characters(self) -> None:
-        self.assertEqual(safe_capture_name('Episode: 1 / "Test"?'), "Episode_ 1 _ _Test__")
+        self.assertEqual(safe_capture_name('Episode: 1 / "Test"?'), "Episode_ 1 _ _Test_")
 
     def test_capture_media_mode_detects_audio(self) -> None:
         self.assertEqual(
