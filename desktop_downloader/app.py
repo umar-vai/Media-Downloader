@@ -2159,6 +2159,189 @@ class DownloaderApp(ctk.CTk):
         self.top_update_button.grid_remove()
         self.update_detail_label.configure(text="Update reminder snoozed for 24 hours.")
 
+    def _browser_extension_dir(self) -> Path | None:
+        if getattr(sys, "frozen", False):
+            candidate = Path(sys.executable).resolve().parent / "browser_extension"
+        else:
+            candidate = Path(__file__).resolve().parent / "browser_extension"
+        return candidate if candidate.exists() else None
+
+    def _start_browser_capture_bridge(self) -> None:
+        token = str(self.settings.get("browser_capture_token") or "").strip()
+        if not token:
+            token = generate_capture_token()
+            self.settings["browser_capture_token"] = token
+            save_settings(self.settings)
+
+        try:
+            requested_port = int(self.settings.get("browser_capture_port") or DEFAULT_CAPTURE_PORT)
+        except (TypeError, ValueError):
+            requested_port = DEFAULT_CAPTURE_PORT
+
+        try:
+            bridge = BrowserCaptureBridge(
+                self.capture_store,
+                token,
+                port=requested_port,
+                on_capture=lambda item: self.events.put(("browser_capture", item)),
+            )
+            actual_port = bridge.start()
+            self.capture_bridge = bridge
+            if actual_port != requested_port:
+                self.settings["browser_capture_port"] = actual_port
+                save_settings(self.settings)
+            LOGGER.info("Browser capture bridge started on 127.0.0.1:%s", actual_port)
+        except Exception as exc:
+            self.capture_bridge = None
+            LOGGER.exception("Browser capture bridge could not start")
+            self.events.put(("browser_capture_error", str(exc)))
+        self._sync_browser_capture_button()
+
+    def _sync_browser_capture_button(self) -> None:
+        if not hasattr(self, "browser_capture_button"):
+            return
+        count = len(self.capture_store.list())
+        running = bool(self.capture_bridge and self.capture_bridge.running)
+        label = f"Capture ({count})" if count else "Capture"
+        self.browser_capture_button.configure(
+            text=label,
+            text_color=TEXT if running else WARNING,
+            border_color=BORDER if running else "#5B4616",
+        )
+
+    def _regenerate_browser_capture_token(self) -> str:
+        token = generate_capture_token()
+        self.settings["browser_capture_token"] = token
+        save_settings(self.settings)
+        if self.capture_bridge is not None:
+            self.capture_bridge.token = token
+        LOGGER.info("Browser capture pairing token regenerated")
+        return token
+
+    def open_browser_capture(self) -> None:
+        existing = self.browser_capture_window
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    existing.refresh()
+                    return
+            except Exception:
+                self.browser_capture_window = None
+
+        try:
+            self.browser_capture_window = BrowserCaptureWindow(
+                self,
+                store=self.capture_store,
+                bridge=self.capture_bridge,
+                token=str(self.settings.get("browser_capture_token") or ""),
+                extension_dir=self._browser_extension_dir(),
+                on_download=self.start_captured_download,
+                on_regenerate_token=self._regenerate_browser_capture_token,
+                on_open_release=self.open_release_page,
+            )
+            self.browser_capture_window.bind(
+                "<Destroy>",
+                lambda event: self._browser_capture_destroyed(event),
+                add="+",
+            )
+            self.browser_capture_window.focus()
+            LOGGER.info("Browser Capture window opened")
+        except Exception as exc:
+            LOGGER.exception("Could not open Browser Capture window")
+            self.browser_capture_window = None
+            messagebox.showerror(APP_NAME, f"Could not open Browser Capture.\n\n{exc}")
+
+    def _browser_capture_destroyed(self, event: Any) -> None:
+        window = self.browser_capture_window
+        if window is not None and event.widget is window:
+            self.browser_capture_window = None
+            LOGGER.info("Browser Capture window closed")
+
+    def start_captured_download(self, capture: dict[str, Any], edit_after_download: bool = False) -> None:
+        if self.is_busy:
+            messagebox.showinfo(
+                APP_NAME,
+                "Another task is already running. Finish or cancel it before downloading a captured stream.",
+                parent=self,
+            )
+            return
+
+        item = dict(capture or {})
+        title = str(item.get("title") or "Captured media")
+        host = capture_host(item) or "media host"
+
+        job_id, cancel_event = self._begin_job(TaskState.DOWNLOADING)
+        self.edit_after_download = bool(edit_after_download)
+        self.progress.set(0)
+        self.progress_label.configure(text="0%")
+        self.speed_label.configure(text=f"{str(item.get('kind') or 'media').upper()} • {host}")
+        self._set_status(f"Downloading captured media from {host}…", "working")
+        self._set_busy(True)
+
+        threading.Thread(
+            target=self._captured_download_worker,
+            args=(job_id, cancel_event, item, title),
+            daemon=True,
+            name=f"captured-download-{job_id}",
+        ).start()
+
+    def _captured_download_worker(
+        self,
+        job_id: int,
+        cancel_event: threading.Event,
+        capture: dict[str, Any],
+        title: str,
+    ) -> None:
+        def progress(ratio: float, detail: str) -> None:
+            self._put_job_event(
+                "progress",
+                job_id,
+                {
+                    "percent": max(0.0, min(100.0, float(ratio) * 100.0)),
+                    "detail": detail or "Downloading captured media…",
+                },
+            )
+
+        try:
+            path = download_captured_media(
+                capture,
+                self.download_dir,
+                base_name=title,
+                cancel_event=cancel_event,
+                on_progress=progress,
+            )
+            if cancel_event.is_set():
+                raise CaptureDownloadCancelled("Captured media download cancelled.")
+
+            self._put_job_event(
+                "done",
+                job_id,
+                {
+                    "path": str(path),
+                    "title": title,
+                    # Store the page URL in History, never the signed media URL.
+                    "source_url": str(capture.get("page_url") or ""),
+                    "platform": capture_host(capture, prefer_page=True) or capture_host(capture) or "browser",
+                    "creator": "",
+                    "mode": capture_media_mode(capture),
+                    "quality": str(capture.get("kind") or "captured").upper(),
+                    "duration_seconds": int(capture.get("duration_seconds") or 0),
+                },
+            )
+        except CaptureDownloadCancelled:
+            self._put_job_event("cancelled", job_id, "Captured media download cancelled")
+        except Exception as exc:
+            self._put_job_event(
+                "error",
+                job_id,
+                f"Captured media download failed.\n\n{str(exc) or exc.__class__.__name__}",
+            )
+        finally:
+            self._put_job_event("download_finished", job_id, None)
+
     def _sync_recent_file(self) -> None:
         recent = self.history_store.most_recent_existing()
         self.last_file = Path(str(recent["file_path"])) if recent else None
