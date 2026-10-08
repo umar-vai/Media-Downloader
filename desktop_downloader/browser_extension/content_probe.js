@@ -75,9 +75,12 @@
     const target = event.target;
     if (!(target instanceof HTMLMediaElement)) return;
     const current = target.currentSrc || target.src || "";
-    if (isHttp(current)) report(current, target.tagName.toLowerCase());
-    // Always provide a page-level fallback for embedded/blob/MSE players.
-    reportPageFallback();
+    if (isHttp(current)) {
+      report(current, target.tagName.toLowerCase());
+    } else {
+      // blob:/MediaSource and source-less players need a page/iframe fallback.
+      reportPageFallback();
+    }
     setTimeout(scanPerformance, 500);
     setTimeout(scanPerformance, 1800);
   }, true);
