@@ -100,19 +100,24 @@ async function sendCaptureGroup(item, allItems, button) {
   }
 
   const candidates = relatedCaptures(item, allItems);
+  const batchId = crypto.randomUUID();
   const old = button.textContent;
   button.disabled = true;
 
   try {
     for (let index = 0; index < candidates.length; index += 1) {
       button.textContent = candidates.length > 1 ? `Sending ${index + 1}/${candidates.length}…` : "Sending…";
+      const payload = {
+        ...candidates[index],
+        capture_group_id: batchId
+      };
       const response = await fetch(`http://127.0.0.1:${cfg.port}/capture`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "X-Media-Downloader-Token": cfg.token
         },
-        body: JSON.stringify(candidates[index])
+        body: JSON.stringify(payload)
       });
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || "Send failed");
