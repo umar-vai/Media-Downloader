@@ -305,7 +305,7 @@ class DownloaderApp(ctk.CTk):
             self.after(1500, lambda: self.check_for_updates(manual=False))
 
     def _close_app(self) -> None:
-        active = self.is_busy or self.update_downloading
+        active = self.is_busy or self.update_downloading or self.download_queue.queued_count() > 0
         if active:
             should_confirm = bool(self.settings.get("confirm_before_exit", True))
             if should_confirm and not messagebox.askyesno(
@@ -1753,11 +1753,14 @@ class DownloaderApp(ctk.CTk):
                     self.speed_label.configure(text="")
                     self.edit_after_download = False
                     LOGGER.error("Job %s failed: %s", job_id, data)
+                    active_request = self.download_queue.active()
+                    is_capture_error = bool(active_request and active_request.source_type == "capture")
                     if self.active_download_request_id:
                         self.download_queue.fail(self.active_download_request_id, str(data or "Download failed"))
                     self._refresh_capture_panel()
                     self._finish_job(job_id)
-                    messagebox.showerror(APP_NAME, str(data))
+                    if not is_capture_error:
+                        messagebox.showerror(APP_NAME, str(data))
 
                 elif kind == "cancelled":
                     self.task_state = TaskState.CANCELLED
