@@ -343,8 +343,9 @@ class BrowserCapturePanel(ctk.CTkFrame):
             if kind not in {"hls", "dash"}:
                 singles.append(item)
                 continue
+            group_id = str(item.get("capture_group_id") or "")
             key = (
-                str(item.get("page_url") or ""),
+                group_id or str(item.get("page_url") or ""),
                 str(item.get("title") or ""),
                 int(item.get("tab_id") or 0),
                 kind,
@@ -559,6 +560,21 @@ class BrowserCapturePanel(ctk.CTkFrame):
                         anchor="w",
                     ).grid(row=4, column=0, columnspan=3, sticky="w", padx=14, pady=(0, 2))
                     action_row = 5
+            elif job_status == "failed":
+                error = str(job.get("error") or job.get("detail") or "The detected stream could not be downloaded.")
+                error = " ".join(error.split())
+                if len(error) > 260:
+                    error = error[:257] + "…"
+                ctk.CTkLabel(
+                    card,
+                    text=error,
+                    text_color=DANGER,
+                    font=("Segoe UI", 8),
+                    anchor="w",
+                    justify="left",
+                    wraplength=820,
+                ).grid(row=3, column=0, columnspan=3, sticky="w", padx=14, pady=(2, 2))
+                action_row = 4
 
         actions = ctk.CTkFrame(card, fg_color="transparent")
         actions.grid(row=action_row, column=0, columnspan=3, sticky="w", padx=12, pady=(8, 12))
