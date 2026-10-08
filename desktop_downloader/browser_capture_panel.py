@@ -333,28 +333,87 @@ class BrowserCapturePanel(ctk.CTkFrame):
             queue_color = MUTED
         self.queue_label.configure(text=queue_text, text_color=queue_color)
 
-        items = [item for item in self.store.list() if self._matches(item)]
+        raw_items = [item for item in self.store.list() if self._matches(item)]
         self._recommended_ids = set()
-        groups: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
-        for item in items:
+        grouped: dict[tuple[str, str, int, str, str], list[dict[str, Any]]] = {}
+        singles: list[dict[str, Any]] = []
+
+        for item in raw_items:
+            kind = str(item.get("kind") or "").lower()
+            if kind not in {"hls", "dash"}:
+                singles.append(item)
+                continue
             key = (
                 str(item.get("page_url") or ""),
                 str(item.get("title") or ""),
                 int(item.get("tab_id") or 0),
+                kind,
+                _host(str(item.get("url") or "")),
             )
-            groups.setdefault(key, []).append(item)
-        for group in groups.values():
-            known = [
-                item
-                for item in group
-                if str(item.get("quality_status") or "") == "ready"
-                and int(item.get("height") or 0) > 0
-            ]
+            grouped.setdefault(key, []).append(item)
+
+        items: list[dict[str, Any]] = list(singles)
+        for group in grouped.values():
+            active_candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            terminal_candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            known: list[dict[str, Any]] = []
+            for item in group:
+                state = self.get_job_state(str(item.get("id") or "")) or {}
+                status = str(state.get("status") or "")
+                if status in {"queued", "running"}:
+                    active_candidates.append((item, state))
+                elif status in {"completed", "failed", "cancelled"}:
+                    terminal_candidates.append((item, state))
+                if str(item.get("quality_status") or "") == "ready" and int(item.get("height") or 0) > 0:
+                    known.append(item)
+
+            if active_candidates:
+                representative = max(
+                    active_candidates,
+                    key=lambda pair: float(pair[1].get("created_at") or 0),
+                )[0]
+            elif terminal_candidates:
+                representative = max(
+                    terminal_candidates,
+                    key=lambda pair: float(pair[1].get("created_at") or 0),
+                )[0]
+            elif known:
+                representative = max(known, key=capture_rank)
+            else:
+                representative = group[0]
+
+            display_item = dict(representative)
+            quality_values: set[str] = set()
+            for member in group:
+                member_qualities = member.get("available_qualities")
+                if isinstance(member_qualities, list):
+                    quality_values.update(str(value) for value in member_qualities if value)
+                height = int(member.get("height") or 0)
+                if height > 0:
+                    quality_values.add(f"{height}p")
+
+            def quality_number(label: str) -> int:
+                try:
+                    return int(str(label).lower().replace("p", "").split("60", 1)[0])
+                except (TypeError, ValueError):
+                    return 0
+
+            display_item["available_qualities"] = sorted(
+                quality_values,
+                key=quality_number,
+                reverse=True,
+            )
+            display_item["stream_count"] = len(group)
             if known:
                 best = max(known, key=capture_rank)
                 best_id = str(best.get("id") or "")
                 if best_id:
                     self._recommended_ids.add(best_id)
+                if str(display_item.get("id") or "") == best_id:
+                    self._recommended_ids.add(str(display_item.get("id") or ""))
+            items.append(display_item)
+
+        items.sort(key=lambda item: float(item.get("captured_at") or 0), reverse=True)
 
         for child in self.list_frame.winfo_children():
             child.destroy()
@@ -417,8 +476,11 @@ class BrowserCapturePanel(ctk.CTkFrame):
         detail_parts = [source]
         if captured:
             detail_parts.append(captured)
+        stream_count = int(item.get("stream_count") or 1)
         if available_qualities:
             detail_parts.append("Available: " + " / ".join(available_qualities[:6]))
+        if stream_count > 1:
+            detail_parts.append(f"{stream_count} related streams grouped")
         elif quality_status == "checking":
             detail_parts.append("Checking available quality…")
         ctk.CTkLabel(
