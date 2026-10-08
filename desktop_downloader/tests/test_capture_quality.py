@@ -8,7 +8,7 @@ DESKTOP_DIR = Path(__file__).resolve().parents[1]
 if str(DESKTOP_DIR) not in sys.path:
     sys.path.insert(0, str(DESKTOP_DIR))
 
-from capture_quality import capture_rank, quality_summary_from_info, select_best_capture
+from capture_quality import capture_rank, quality_summary_from_info, related_capture_candidates, select_best_capture
 
 
 class CaptureQualityTests(unittest.TestCase):
@@ -52,6 +52,63 @@ class CaptureQualityTests(unittest.TestCase):
         }
         best = select_best_capture([selected, high], selected)
         self.assertEqual(best["id"], "1080")
+
+    def test_capture_batch_prevents_stale_higher_quality_selection(self) -> None:
+        fresh = {
+            "id": "fresh-720",
+            "capture_group_id": "batch-new",
+            "page_url": "https://example.com/watch/1",
+            "title": "Episode",
+            "tab_id": 1,
+            "kind": "hls",
+            "url": "https://cdn.example.com/new-720.m3u8",
+            "height": 720,
+            "width": 1280,
+            "captured_at": 200,
+        }
+        stale = {
+            "id": "stale-1080",
+            "capture_group_id": "batch-old",
+            "page_url": "https://example.com/watch/1",
+            "title": "Episode",
+            "tab_id": 1,
+            "kind": "hls",
+            "url": "https://cdn.example.com/old-1080.m3u8",
+            "height": 1080,
+            "width": 1920,
+            "captured_at": 100,
+        }
+        candidates = related_capture_candidates([stale, fresh], fresh)
+        self.assertEqual([item["id"] for item in candidates], ["fresh-720"])
+        self.assertEqual(select_best_capture([stale, fresh], fresh)["id"], "fresh-720")
+
+    def test_related_candidates_are_sorted_best_first(self) -> None:
+        low = {
+            "id": "low",
+            "capture_group_id": "batch-1",
+            "page_url": "https://example.com/watch/1",
+            "title": "Episode",
+            "tab_id": 1,
+            "kind": "hls",
+            "url": "https://cdn.example.com/720.m3u8",
+            "height": 720,
+            "width": 1280,
+            "captured_at": 100,
+        }
+        high = {
+            "id": "high",
+            "capture_group_id": "batch-1",
+            "page_url": "https://example.com/watch/1",
+            "title": "Episode",
+            "tab_id": 1,
+            "kind": "hls",
+            "url": "https://cdn.example.com/1080.m3u8",
+            "height": 1080,
+            "width": 1920,
+            "captured_at": 99,
+        }
+        candidates = related_capture_candidates([low, high], low)
+        self.assertEqual([item["id"] for item in candidates], ["high", "low"])
 
     def test_same_resolution_prefers_master_playlist(self) -> None:
         variant = {
