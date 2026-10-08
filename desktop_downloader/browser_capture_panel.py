@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -88,6 +89,8 @@ class BrowserCapturePanel(ctk.CTkFrame):
 
         self.search_var = ctk.StringVar()
         self.kind_var = ctk.StringVar(value="All")
+        self._network_label = ""
+        self._network_label_at = 0.0
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
@@ -121,7 +124,7 @@ class BrowserCapturePanel(ctk.CTkFrame):
         ).grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
             header,
-            text="Play a video in Chrome or Edge. Detected media appears here automatically.",
+            text="Play a video in Chrome or Edge. Best detected quality is selected automatically.",
             text_color=MUTED,
             font=("Segoe UI", 12),
             anchor="w",
@@ -303,12 +306,18 @@ class BrowserCapturePanel(ctk.CTkFrame):
             fg_color="#0E3025" if running else "#351722",
             text_color=SUCCESS if running else DANGER,
         )
+        now = time.monotonic()
+        if not self._network_label or (now - self._network_label_at) >= 2.0:
+            self._network_label = safe_proxy_label()
+            self._network_label_at = now
         if running:
             self.connection_text.configure(
-                text=f"Browser bridge ready on port {bridge.port}. {safe_proxy_label()}."
+                text=f"Browser bridge ready on port {bridge.port}. {self._network_label}."
             )
         else:
-            self.connection_text.configure(text=f"Browser Capture bridge is offline. {safe_proxy_label()}.")
+            self.connection_text.configure(
+                text=f"Browser Capture bridge is offline. {self._network_label}."
+            )
 
         queued, active = self.get_queue_summary()
         if active:
@@ -352,6 +361,10 @@ class BrowserCapturePanel(ctk.CTkFrame):
         host = _host(str(item.get("url") or "")) or "Media host"
         page_host = _host(str(item.get("page_url") or ""))
         captured = _time_label(item.get("captured_at"))
+        quality_status = str(item.get("quality_status") or "")
+        quality_label = str(item.get("quality_label") or ("Checking…" if quality_status == "checking" else "Auto"))
+        qualities = item.get("available_qualities")
+        available_qualities = [str(value) for value in qualities] if isinstance(qualities, list) else []
         job = self.get_job_state(capture_id) or {}
         job_status = str(job.get("status") or "")
         progress = max(0.0, min(1.0, float(job.get("progress") or 0.0)))
@@ -380,13 +393,31 @@ class BrowserCapturePanel(ctk.CTkFrame):
         detail_parts = [source]
         if captured:
             detail_parts.append(captured)
+        if available_qualities:
+            detail_parts.append("Available: " + " / ".join(available_qualities[:6]))
+        elif quality_status == "checking":
+            detail_parts.append("Checking available quality…")
         ctk.CTkLabel(
             card,
             text=" • ".join(detail_parts),
             text_color=MUTED,
             font=("Segoe UI", 9),
             anchor="w",
-        ).grid(row=1, column=0, sticky="w", padx=14)
+            justify="left",
+            wraplength=760,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=14)
+
+        quality_good = quality_status == "ready" and quality_label not in {"Unknown", "Auto"}
+        ctk.CTkLabel(
+            card,
+            text=quality_label,
+            width=84,
+            height=26,
+            corner_radius=8,
+            fg_color="#241C52" if quality_good else SURFACE_3,
+            text_color=TEXT if quality_good else MUTED,
+            font=("Segoe UI Semibold", 8),
+        ).grid(row=0, column=1, padx=(6, 4), pady=(10, 0))
 
         ctk.CTkLabel(
             card,
@@ -397,7 +428,7 @@ class BrowserCapturePanel(ctk.CTkFrame):
             fg_color="#0E3025" if kind != "PAGE" else "#2D2514",
             text_color=SUCCESS if kind != "PAGE" else WARNING,
             font=("Segoe UI Semibold", 8),
-        ).grid(row=0, column=1, padx=(6, 14), pady=(10, 0))
+        ).grid(row=0, column=2, padx=(4, 14), pady=(10, 0))
 
         action_row = 2
         if job_status:
@@ -458,8 +489,8 @@ class BrowserCapturePanel(ctk.CTkFrame):
         else:
             ctk.CTkButton(
                 actions,
-                text="Download",
-                width=90,
+                text="Download best",
+                width=108,
                 height=31,
                 fg_color=PURPLE,
                 hover_color=PURPLE_HOVER,
