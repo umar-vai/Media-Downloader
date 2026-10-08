@@ -13,6 +13,7 @@ from yt_dlp.utils import DownloadError
 
 from browser_capture import sanitize_capture, sanitize_headers
 from media_editor_engine import ffmpeg_exe
+from network_proxy import yt_dlp_proxy_options
 
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 
@@ -83,8 +84,10 @@ def capture_download_options(
         "overwrites": False,
         "retries": 5,
         "fragment_retries": 5,
+        "concurrent_fragment_downloads": 6,
         "socket_timeout": 30,
         "http_headers": headers,
+        **yt_dlp_proxy_options(),
         "outtmpl": str(output_dir / f"{name}.%(ext)s"),
         "ffmpeg_location": ffmpeg_exe(),
         "merge_output_format": "mp4",
