@@ -13,7 +13,6 @@ from typing import Any
 import yt_dlp
 from imageio_ffmpeg import get_ffmpeg_exe
 
-from install_mode import install_mode_name
 from browser_capture import BrowserCaptureBridge, CaptureStore, generate_capture_token
 from install_mode import executable_dir, install_mode_name
 from media_player import _mpv_executable
