@@ -129,7 +129,7 @@ def capture_rank(capture: dict[str, Any]) -> tuple[int, int, int, float]:
     height = _as_int(capture.get("height"))
     width = _as_int(capture.get("width"))
     captured_at = _as_float(capture.get("captured_at"))
-    return (multi, height, width, captured_at)
+    return (height, multi, width, captured_at)
 
 
 def select_best_capture(
