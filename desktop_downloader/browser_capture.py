@@ -264,7 +264,7 @@ class BrowserCaptureBridge:
                 server.daemon_threads = True
                 server.bridge = self  # type: ignore[attr-defined]
                 self._server = server
-                self.port = candidate
+                self.port = int(server.server_address[1])
                 break
             except OSError as exc:
                 last_error = exc
