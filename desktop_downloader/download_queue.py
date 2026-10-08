@@ -138,7 +138,12 @@ class DownloadQueue:
             return 0
 
     def queued_count(self) -> int:
-        return sum(1 for request_id in self._pending if (self._find(request_id) or DownloadRequest("", "", {})).status == "queued")
+        count = 0
+        for request_id in self._pending:
+            request = self._find(request_id)
+            if request is not None and request.status == "queued":
+                count += 1
+        return count
 
     def running_count(self) -> int:
         return 1 if self.active() is not None else 0
