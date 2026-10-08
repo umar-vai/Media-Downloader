@@ -15,7 +15,7 @@ DEFAULT_CAPTURE_PORT = 38471
 MAX_CAPTURE_BODY = 128 * 1024
 MAX_CAPTURES = 120
 ALLOWED_HEADERS = {"referer", "origin", "user-agent", "cookie", "authorization", "accept-language"}
-ALLOWED_KINDS = {"direct", "hls", "dash", "unknown"}
+ALLOWED_KINDS = {"direct", "hls", "dash", "page", "unknown"}
 
 
 def generate_capture_token() -> str:
