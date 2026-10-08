@@ -50,30 +50,81 @@ async function testConnection(showText = true) {
   }
 }
 
-async function sendCapture(item, button) {
+function mediaHost(url) {
+  try { return new URL(url).hostname; } catch (_) { return ""; }
+}
+
+function inferQualityHint(url) {
+  const value = String(url || "").toLowerCase();
+  const explicit = value.match(/(?:^|[^0-9])(2160|1440|1080|720|540|480|360|240)p(?:[^0-9]|$)/);
+  if (explicit) return `${explicit[1]}p`;
+
+  const dimensions = value.match(/(?:^|[^0-9])(\d{3,4})x(\d{3,4})(?:[^0-9]|$)/);
+  if (dimensions) {
+    const height = Number(dimensions[2]);
+    if ([2160, 1440, 1080, 720, 540, 480, 360, 240].includes(height)) return `${height}p`;
+  }
+
+  try {
+    const parsed = new URL(url);
+    for (const key of ["height", "h", "quality", "res", "resolution"]) {
+      const raw = String(parsed.searchParams.get(key) || "").toLowerCase();
+      const match = raw.match(/(2160|1440|1080|720|540|480|360|240)/);
+      if (match) return `${match[1]}p`;
+    }
+  } catch (_) {}
+  return "";
+}
+
+function relatedCaptures(item, allItems) {
+  const page = String(item.page_url || "");
+  const title = String(item.title || "");
+  const kind = String(item.kind || "");
+  const host = mediaHost(item.url);
+  if (!["hls", "dash", "direct"].includes(kind)) return [item];
+
+  const related = allItems.filter((candidate) => {
+    return String(candidate.kind || "") === kind &&
+      String(candidate.page_url || "") === page &&
+      String(candidate.title || "") === title &&
+      mediaHost(candidate.url) === host;
+  });
+  return related.length ? related : [item];
+}
+
+async function sendCaptureGroup(item, allItems, button) {
   const cfg = await settings();
   if (!cfg.token) {
     connectionText.textContent = "Pair the extension first.";
     return;
   }
+
+  const candidates = relatedCaptures(item, allItems);
   const old = button.textContent;
   button.disabled = true;
-  button.textContent = "Sending…";
+
   try {
-    const response = await fetch(`http://127.0.0.1:${cfg.port}/capture`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Media-Downloader-Token": cfg.token
-      },
-      body: JSON.stringify(item)
-    });
-    const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || "Send failed");
+    for (let index = 0; index < candidates.length; index += 1) {
+      button.textContent = candidates.length > 1 ? `Sending ${index + 1}/${candidates.length}…` : "Sending…";
+      const response = await fetch(`http://127.0.0.1:${cfg.port}/capture`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Media-Downloader-Token": cfg.token
+        },
+        body: JSON.stringify(candidates[index])
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || "Send failed");
+    }
+
     button.textContent = "Sent";
     statusBadge.textContent = "Connected";
     statusBadge.classList.add("ok");
-    setTimeout(() => { button.disabled = false; button.textContent = old; }, 1100);
+    connectionText.textContent = candidates.length > 1
+      ? `Sent ${candidates.length} related streams. Desktop will auto-select the best quality.`
+      : "Sent to desktop. Best available quality will be selected automatically.";
+    setTimeout(() => { button.disabled = false; button.textContent = old; }, 1400);
   } catch (error) {
     button.disabled = false;
     button.textContent = "Retry";
@@ -110,7 +161,9 @@ async function render() {
     let host = "media";
     try { host = new URL(item.url).hostname; } catch (_) {}
     const kind = String(item.kind || "media").toUpperCase();
-    meta.innerHTML = `<span class="kind">${kind}</span> • ${host}`;
+    const qualityHint = inferQualityHint(item.url);
+    const qualityText = qualityHint || (item.kind === "page" ? "Auto" : "Best resolved in app");
+    meta.innerHTML = `<span class="kind">${kind}</span> • ${qualityText} • ${host}`;
     card.appendChild(meta);
 
     if (item.kind === "page") {
@@ -123,8 +176,8 @@ async function render() {
     const actions = document.createElement("div");
     actions.className = "row";
     const send = document.createElement("button");
-    send.textContent = "Send to app";
-    send.addEventListener("click", () => sendCapture(item, send));
+    send.textContent = item.kind === "page" ? "Send to app" : "Send best to app";
+    send.addEventListener("click", () => sendCaptureGroup(item, items, send));
     actions.appendChild(send);
     card.appendChild(actions);
     capturesRoot.appendChild(card);
