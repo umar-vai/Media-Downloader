@@ -389,6 +389,22 @@ class DownloaderApp(ctk.CTk):
         self.top_update_button.grid(row=0, column=2, padx=(12, 0))
         self.top_update_button.grid_remove()
 
+        self.browser_capture_button = ctk.CTkButton(
+            top,
+            text="Capture",
+            width=82,
+            height=30,
+            corner_radius=9,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 9),
+            command=self.open_browser_capture,
+        )
+        self.browser_capture_button.grid(row=0, column=3, padx=(12, 0))
+
         ctk.CTkButton(
             top,
             text="History",
@@ -402,7 +418,7 @@ class DownloaderApp(ctk.CTk):
             text_color=TEXT,
             font=("Segoe UI Semibold", 9),
             command=self.open_history,
-        ).grid(row=0, column=3, padx=(12, 0))
+        ).grid(row=0, column=4, padx=(8, 0))
 
         ctk.CTkButton(
             top,
@@ -417,7 +433,7 @@ class DownloaderApp(ctk.CTk):
             text_color=TEXT,
             font=("Segoe UI Semibold", 9),
             command=self.open_settings,
-        ).grid(row=0, column=4, padx=(8, 0))
+        ).grid(row=0, column=5, padx=(8, 0))
 
         ctk.CTkLabel(
             top,
@@ -427,7 +443,7 @@ class DownloaderApp(ctk.CTk):
             fg_color=SURFACE_2,
             text_color=CYAN,
             font=("Segoe UI Semibold", 10),
-        ).grid(row=0, column=5, padx=(12, 24))
+        ).grid(row=0, column=6, padx=(12, 24))
 
     def _build_hero(self) -> None:
         hero = ctk.CTkFrame(self.content, fg_color="transparent")
