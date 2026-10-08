@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from network_proxy import active_proxy_url
+
 GITHUB_REPOSITORY = "umar-vai/Media-Downloader"
 GITHUB_WEB_BASE = f"https://github.com/{GITHUB_REPOSITORY}"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
@@ -66,15 +68,25 @@ def _reason_text(exc: BaseException) -> str:
     return text[:240] or exc.__class__.__name__
 
 
+def _proxy_opener() -> urllib.request.OpenerDirector:
+    proxy = active_proxy_url()
+    if proxy:
+        return urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        )
+    return urllib.request.build_opener()
+
+
 def _open_with_retries(
     request: urllib.request.Request,
     timeout: int,
     attempts: int = 4,
 ) -> urllib.response.addinfourl:
     last_error: BaseException | None = None
+    opener = _proxy_opener()
     for attempt in range(1, max(1, attempts) + 1):
         try:
-            return urllib.request.urlopen(request, timeout=timeout)
+            return opener.open(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
             last_error = exc
             if exc.code not in {408, 425, 429, 500, 502, 503, 504} or attempt >= attempts:
@@ -179,6 +191,9 @@ def _curl_base_command(timeout: int, accept: str | None = None) -> list[str]:
         "-H",
         f"Accept: {accept or '*/*'}",
     ]
+    proxy = active_proxy_url()
+    if proxy:
+        command.extend(["--proxy", proxy])
     return command
 
 
@@ -231,10 +246,12 @@ def _curl_download(url: str, destination: Path, timeout: int) -> None:
 
 def _powershell_read(url: str, timeout: int) -> bytes:
     executable = _powershell_executable()
+    proxy = active_proxy_url()
+    proxy_arg = f" -Proxy '{proxy.replace("'", "''")}'" if proxy else ""
     script = (
         "$ProgressPreference='SilentlyContinue'; "
         "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; "
-        f"$r=Invoke-WebRequest -UseBasicParsing -Uri '{url}' -TimeoutSec {max(15, timeout)}; "
+        f"$r=Invoke-WebRequest -UseBasicParsing -Uri '{url}'{proxy_arg} -TimeoutSec {max(15, timeout)}; "
         "[Console]::Out.Write($r.Content)"
     )
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -263,12 +280,17 @@ def _bits_download(url: str, destination: Path, timeout: int) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     escaped_url = url.replace("'", "''")
     escaped_destination = str(destination).replace("'", "''")
+    proxy = active_proxy_url()
+    proxy_bits = ""
+    if proxy:
+        escaped_proxy = proxy.replace("'", "''")
+        proxy_bits = f" -ProxyUsage Override -ProxyList '{escaped_proxy}'"
     script = (
         "$ErrorActionPreference='Stop'; "
         "$ProgressPreference='SilentlyContinue'; "
         "Import-Module BitsTransfer -ErrorAction Stop; "
-        f"Start-BitsTransfer -Source '{escaped_url}' -Destination '{escaped_destination}' "
-        "-TransferType Download -Priority Foreground -ErrorAction Stop"
+        f"Start-BitsTransfer -Source '{escaped_url}' -Destination '{escaped_destination}'"
+        f"{proxy_bits} -TransferType Download -Priority Foreground -ErrorAction Stop"
     )
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
@@ -310,11 +332,13 @@ def _powershell_download(url: str, destination: Path, timeout: int) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     escaped_url = url.replace("'", "''")
     escaped_destination = str(destination).replace("'", "''")
+    proxy = active_proxy_url()
+    proxy_arg = f" -Proxy '{proxy.replace("'", "''")}'" if proxy else ""
     script = (
         "$ProgressPreference='SilentlyContinue'; "
         "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; "
-        f"Invoke-WebRequest -UseBasicParsing -Uri '{escaped_url}' -OutFile '{escaped_destination}' "
-        f"-TimeoutSec {max(30, timeout)}"
+        f"Invoke-WebRequest -UseBasicParsing -Uri '{escaped_url}' -OutFile '{escaped_destination}'"
+        f"{proxy_arg} -TimeoutSec {max(30, timeout)}"
     )
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
