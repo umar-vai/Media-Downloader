@@ -63,6 +63,7 @@ class BrowserCaptureWindow(ctk.CTkToplevel):
         on_download: Callable[[dict[str, Any], bool], None],
         on_regenerate_token: Callable[[], str],
         on_open_release: Callable[[], None],
+        on_change: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(master)
         self.title("Browser Capture")
@@ -78,6 +79,7 @@ class BrowserCaptureWindow(ctk.CTkToplevel):
         self.on_download = on_download
         self.on_regenerate_token = on_regenerate_token
         self.on_open_release = on_open_release
+        self.on_change = on_change
 
         self.search_var = ctk.StringVar()
         self.kind_var = ctk.StringVar(value="All")
@@ -441,10 +443,14 @@ class BrowserCaptureWindow(ctk.CTkToplevel):
 
     def remove_capture(self, capture_id: str) -> None:
         self.store.remove(capture_id)
+        if self.on_change:
+            self.on_change()
         self.refresh()
 
     def clear_captures(self) -> None:
         count = self.store.clear()
+        if self.on_change:
+            self.on_change()
         self.refresh()
         self.footer_label.configure(text=f"Cleared {count} captured stream{'s' if count != 1 else ''}.")
         self.after(1800, self._restore_footer)
