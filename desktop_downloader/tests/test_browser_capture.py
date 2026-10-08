@@ -57,6 +57,40 @@ class BrowserCaptureTests(unittest.TestCase):
         )
         self.assertEqual(item["kind"], "page")
 
+    def test_store_preserves_quality_metadata_on_duplicate(self) -> None:
+        store = CaptureStore()
+        first = store.add(
+            {
+                "id": "first",
+                "url": "https://cdn.example.com/master.m3u8",
+                "page_url": "https://example.com/watch/1",
+                "title": "Episode",
+                "tab_id": 1,
+                "kind": "hls",
+            }
+        )
+        store.update_metadata(
+            first["id"],
+            {
+                "quality_status": "ready",
+                "quality_label": "Best 1080p",
+                "height": 1080,
+                "available_qualities": ["1080p", "720p"],
+            },
+        )
+        second = store.add(
+            {
+                "id": "second",
+                "url": "https://cdn.example.com/master.m3u8",
+                "page_url": "https://example.com/watch/1",
+                "title": "Episode",
+                "tab_id": 1,
+                "kind": "hls",
+            }
+        )
+        self.assertEqual(second["quality_label"], "Best 1080p")
+        self.assertEqual(second["height"], 1080)
+
     def test_store_collapses_duplicate_tab_and_url(self) -> None:
         store = CaptureStore(limit=10)
         first = store.add(
