@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Media Downloader Browser Capture",
+  "version": "1.0.0",
+  "description": "Capture non-DRM media requests from Chrome/Edge and send them to Media Downloader.",
+  "permissions": ["storage", "tabs", "webRequest"],
+  "host_permissions": ["<all_urls>", "http://127.0.0.1/*"],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "action": {
+    "default_title": "Media Downloader Browser Capture",
+    "default_popup": "popup.html"
+  }
+}
