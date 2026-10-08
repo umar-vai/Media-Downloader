@@ -45,6 +45,19 @@ class BrowserCaptureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sanitize_capture({"url": "file:///C:/video.mp4"})
 
+    def test_capture_group_id_is_preserved(self) -> None:
+        item = sanitize_capture(
+            {
+                "url": "https://cdn.example.com/master.m3u8",
+                "page_url": "https://example.com/watch/1",
+                "title": "Episode",
+                "tab_id": 1,
+                "kind": "hls",
+                "capture_group_id": "batch-123",
+            }
+        )
+        self.assertEqual(item["capture_group_id"], "batch-123")
+
     def test_accepts_page_fallback_capture(self) -> None:
         item = sanitize_capture(
             {
