@@ -67,6 +67,7 @@ jobs:
           python -m unittest discover -s desktop_downloader/tests -v
           python -c "import json, pathlib; json.loads(pathlib.Path('desktop_downloader/browser_extension/manifest.json').read_text(encoding='utf-8')); print('Browser extension manifest OK')"
           node --check desktop_downloader/browser_extension/service_worker.js
+          node --check desktop_downloader/browser_extension/content_probe.js
           node --check desktop_downloader/browser_extension/popup.js
           python desktop_downloader/tests/smoke_editor_export.py
           python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from yt_dlp import YoutubeDL; from yt_dlp.networking.impersonate import ImpersonateTarget; y=YoutubeDL({'quiet': True}); assert y._impersonate_target_available(ImpersonateTarget('chrome')), 'Chrome impersonation target unavailable'"
