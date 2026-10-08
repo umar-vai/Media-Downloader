@@ -13,6 +13,7 @@ import customtkinter as ctk
 from tkinter import messagebox
 
 from browser_capture import BrowserCaptureBridge, CaptureStore
+from capture_quality import capture_rank
 from network_proxy import safe_proxy_label
 
 BG = "#060B14"
@@ -91,6 +92,7 @@ class BrowserCapturePanel(ctk.CTkFrame):
         self.kind_var = ctk.StringVar(value="All")
         self._network_label = ""
         self._network_label_at = 0.0
+        self._recommended_ids: set[str] = set()
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
@@ -332,6 +334,28 @@ class BrowserCapturePanel(ctk.CTkFrame):
         self.queue_label.configure(text=queue_text, text_color=queue_color)
 
         items = [item for item in self.store.list() if self._matches(item)]
+        self._recommended_ids = set()
+        groups: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
+        for item in items:
+            key = (
+                str(item.get("page_url") or ""),
+                str(item.get("title") or ""),
+                int(item.get("tab_id") or 0),
+            )
+            groups.setdefault(key, []).append(item)
+        for group in groups.values():
+            known = [
+                item
+                for item in group
+                if str(item.get("quality_status") or "") == "ready"
+                and int(item.get("height") or 0) > 0
+            ]
+            if known:
+                best = max(known, key=capture_rank)
+                best_id = str(best.get("id") or "")
+                if best_id:
+                    self._recommended_ids.add(best_id)
+
         for child in self.list_frame.winfo_children():
             child.destroy()
 
@@ -408,9 +432,13 @@ class BrowserCapturePanel(ctk.CTkFrame):
         ).grid(row=1, column=0, columnspan=3, sticky="w", padx=14)
 
         quality_good = quality_status == "ready" and quality_label not in {"Unknown", "Auto"}
+        is_recommended = capture_id in self._recommended_ids
+        badge_text = quality_label
+        if is_recommended and quality_good:
+            badge_text = "BEST • " + quality_label.replace("Best ", "")
         ctk.CTkLabel(
             card,
-            text=quality_label,
+            text=badge_text,
             width=84,
             height=26,
             corner_radius=8,
@@ -452,11 +480,11 @@ class BrowserCapturePanel(ctk.CTkFrame):
                 text_color=state_color,
                 font=("Segoe UI Semibold", 9),
                 anchor="w",
-            ).grid(row=2, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 2))
+            ).grid(row=2, column=0, columnspan=3, sticky="w", padx=14, pady=(8, 2))
             action_row = 3
             if job_status == "running":
                 progress_bar = ctk.CTkProgressBar(card, height=6, progress_color=PURPLE)
-                progress_bar.grid(row=3, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 4))
+                progress_bar.grid(row=3, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 4))
                 progress_bar.set(progress)
                 action_row = 4
                 detail = str(job.get("detail") or "")
@@ -467,11 +495,11 @@ class BrowserCapturePanel(ctk.CTkFrame):
                         text_color=MUTED,
                         font=("Segoe UI", 8),
                         anchor="w",
-                    ).grid(row=4, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 2))
+                    ).grid(row=4, column=0, columnspan=3, sticky="w", padx=14, pady=(0, 2))
                     action_row = 5
 
         actions = ctk.CTkFrame(card, fg_color="transparent")
-        actions.grid(row=action_row, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 12))
+        actions.grid(row=action_row, column=0, columnspan=3, sticky="w", padx=12, pady=(8, 12))
 
         if job_status in {"queued", "running"}:
             ctk.CTkButton(
