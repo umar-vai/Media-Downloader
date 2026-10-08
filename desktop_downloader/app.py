@@ -26,8 +26,8 @@ from tkinter import filedialog, messagebox
 from app_logging import get_logger, log_path
 from browser_capture import BrowserCaptureBridge, CaptureStore, DEFAULT_CAPTURE_PORT, generate_capture_token
 from browser_capture_panel import BrowserCapturePanel
-from captured_media_engine import CaptureDownloadCancelled, capture_host, capture_media_mode, download_captured_media
-from capture_quality import inspect_capture_quality, select_best_capture
+from captured_media_engine import CaptureDownloadCancelled, capture_host, capture_media_mode, cleanup_failed_capture_parts, download_captured_media
+from capture_quality import inspect_capture_quality, related_capture_candidates, select_best_capture
 from diagnostics_window import DiagnosticsWindow
 from download_queue import DownloadQueue, DownloadRequest
 from history_store import HistoryStore, make_history_entry
@@ -2532,6 +2532,14 @@ class DownloaderApp(ctk.CTk):
     def _start_captured_request(self, request: DownloadRequest) -> None:
         payload = dict(request.payload or {})
         item = dict(payload.get("capture") or {})
+        raw_candidates = payload.get("fallback_captures")
+        candidates = [
+            dict(candidate)
+            for candidate in raw_candidates
+            if isinstance(candidate, dict)
+        ] if isinstance(raw_candidates, list) else [item]
+        if not candidates:
+            candidates = [item]
         title = str(payload.get("title") or item.get("title") or "Captured media")
         host = capture_host(item) or "media host"
 
@@ -2540,19 +2548,22 @@ class DownloaderApp(ctk.CTk):
         self.edit_after_download = bool(request.edit_after_download)
         self.progress.set(0)
         self.progress_label.configure(text="0%")
-        self.speed_label.configure(text=f"{str(item.get('kind') or 'media').upper()} • {host}")
-        self._set_status(f"Downloading captured media from {host}…", "working")
+        quality = str(item.get("quality_label") or item.get("height") or str(item.get("kind") or "media").upper())
+        self.speed_label.configure(text=f"{quality} • {host}")
+        self._set_status(f"Downloading best available capture from {host}…", "working")
         self._set_busy(True)
         threading.Thread(
             target=self._captured_download_worker,
-            args=(job_id, cancel_event, item, title),
+            args=(job_id, cancel_event, candidates, title),
             daemon=True,
             name=f"captured-download-{job_id}",
         ).start()
 
     def start_captured_download(self, capture: dict[str, Any], edit_after_download: bool = False) -> None:
         clicked_item = dict(capture or {})
-        item = select_best_capture(self.capture_store.list(), clicked_item)
+        all_captures = self.capture_store.list()
+        candidates = related_capture_candidates(all_captures, clicked_item)
+        item = dict(candidates[0]) if candidates else select_best_capture(all_captures, clicked_item)
         capture_id = str(item.get("id") or clicked_item.get("id") or "")
         title = str(clicked_item.get("title") or item.get("title") or "Captured media")
         if str(item.get("id") or "") != str(clicked_item.get("id") or ""):
@@ -2564,7 +2575,11 @@ class DownloaderApp(ctk.CTk):
             )
         request = self.download_queue.enqueue(
             "capture",
-            {"capture": item, "title": title},
+            {
+                "capture": item,
+                "fallback_captures": candidates,
+                "title": title,
+            },
             edit_after_download=bool(edit_after_download),
             capture_id=capture_id,
         )
@@ -2579,27 +2594,77 @@ class DownloaderApp(ctk.CTk):
         self,
         job_id: int,
         cancel_event: threading.Event,
-        capture: dict[str, Any],
+        captures: list[dict[str, Any]],
         title: str,
     ) -> None:
-        def progress(ratio: float, detail: str) -> None:
-            self._put_job_event(
-                "progress",
-                job_id,
-                {
-                    "percent": max(0.0, min(100.0, float(ratio) * 100.0)),
-                    "detail": detail or "Downloading captured media…",
-                },
-            )
+        candidates = [dict(item) for item in captures if isinstance(item, dict)]
+        if not candidates:
+            self._put_job_event("error", job_id, "No usable captured stream is available.")
+            self._put_job_event("download_finished", job_id, None)
+            return
+
+        last_error: Exception | None = None
+        used_capture: dict[str, Any] | None = None
+        path: Path | None = None
+
+        for index, capture in enumerate(candidates, start=1):
+            if cancel_event.is_set():
+                self._put_job_event("cancelled", job_id, "Captured media download cancelled")
+                self._put_job_event("download_finished", job_id, None)
+                return
+
+            quality = str(capture.get("quality_label") or "")
+            if not quality:
+                height = int(capture.get("height") or 0)
+                quality = f"{height}p" if height else str(capture.get("kind") or "media").upper()
+            prefix = f"Trying {quality} ({index}/{len(candidates)})"
+
+            def progress(ratio: float, detail: str, *, _prefix: str = prefix) -> None:
+                message = _prefix
+                if detail:
+                    message += f" • {detail}"
+                self._put_job_event(
+                    "progress",
+                    job_id,
+                    {
+                        "percent": max(0.0, min(100.0, float(ratio) * 100.0)),
+                        "detail": message,
+                    },
+                )
+
+            attempt_started = time.time()
+            try:
+                self._put_job_event("status", job_id, prefix)
+                path = download_captured_media(
+                    capture,
+                    self.download_dir,
+                    base_name=title,
+                    cancel_event=cancel_event,
+                    on_progress=progress,
+                )
+                used_capture = capture
+                break
+            except CaptureDownloadCancelled:
+                self._put_job_event("cancelled", job_id, "Captured media download cancelled")
+                self._put_job_event("download_finished", job_id, None)
+                return
+            except Exception as exc:
+                last_error = exc
+                LOGGER.warning(
+                    "Captured candidate failed job=%s attempt=%s/%s kind=%s quality=%s error=%s",
+                    job_id,
+                    index,
+                    len(candidates),
+                    capture.get("kind"),
+                    quality,
+                    str(exc),
+                )
+                cleanup_failed_capture_parts(self.download_dir, title, attempt_started)
+                continue
 
         try:
-            path = download_captured_media(
-                capture,
-                self.download_dir,
-                base_name=title,
-                cancel_event=cancel_event,
-                on_progress=progress,
-            )
+            if path is None or used_capture is None:
+                raise last_error or RuntimeError("No captured stream candidate could be downloaded.")
             if cancel_event.is_set():
                 raise CaptureDownloadCancelled("Captured media download cancelled.")
 
@@ -2610,12 +2675,12 @@ class DownloaderApp(ctk.CTk):
                     "path": str(path),
                     "title": title,
                     # Store the page URL in History, never the signed media URL.
-                    "source_url": str(capture.get("page_url") or ""),
-                    "platform": capture_host(capture, prefer_page=True) or capture_host(capture) or "browser",
+                    "source_url": str(used_capture.get("page_url") or ""),
+                    "platform": capture_host(used_capture, prefer_page=True) or capture_host(used_capture) or "browser",
                     "creator": "",
-                    "mode": capture_media_mode(capture),
-                    "quality": str(capture.get("quality_label") or capture.get("kind") or "captured"),
-                    "duration_seconds": int(capture.get("duration_seconds") or 0),
+                    "mode": capture_media_mode(used_capture),
+                    "quality": str(used_capture.get("quality_label") or used_capture.get("kind") or "captured"),
+                    "duration_seconds": int(used_capture.get("duration_seconds") or 0),
                 },
             )
         except CaptureDownloadCancelled:
@@ -2624,7 +2689,7 @@ class DownloaderApp(ctk.CTk):
             self._put_job_event(
                 "error",
                 job_id,
-                f"Captured media download failed.\n\n{str(exc) or exc.__class__.__name__}",
+                f"All detected stream candidates failed.\n\n{str(exc) or exc.__class__.__name__}",
             )
         finally:
             self._put_job_event("download_finished", job_id, None)
