@@ -12,6 +12,7 @@ import customtkinter as ctk
 from tkinter import messagebox
 
 from browser_capture import BrowserCaptureBridge, CaptureStore
+from network_proxy import safe_proxy_label
 
 BG = "#060B14"
 SURFACE = "#0B1323"
@@ -303,7 +304,11 @@ class BrowserCapturePanel(ctk.CTkFrame):
             text_color=SUCCESS if running else DANGER,
         )
         if running:
-            self.connection_text.configure(text=f"Browser bridge ready on port {bridge.port}. Play a video to detect it.")
+            self.connection_text.configure(
+                text=f"Browser bridge ready on port {bridge.port}. {safe_proxy_label()}."
+            )
+        else:
+            self.connection_text.configure(text=f"Browser Capture bridge is offline. {safe_proxy_label()}.")
 
         queued, active = self.get_queue_summary()
         if active:
