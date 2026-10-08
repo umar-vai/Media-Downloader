@@ -24,6 +24,9 @@ from imageio_ffmpeg import get_ffmpeg_exe
 from tkinter import filedialog, messagebox
 
 from app_logging import get_logger, log_path
+from browser_capture import BrowserCaptureBridge, CaptureStore, DEFAULT_CAPTURE_PORT, generate_capture_token
+from browser_capture_window import BrowserCaptureWindow
+from captured_media_engine import CaptureDownloadCancelled, capture_host, capture_media_mode, download_captured_media
 from diagnostics_window import DiagnosticsWindow
 from history_store import HistoryStore, make_history_entry
 from history_window import HistoryWindow
@@ -106,6 +109,8 @@ def default_settings() -> dict[str, Any]:
         "video_quality": "720p",
         "audio_format": "MP3",
         "audio_quality": "192",
+        "browser_capture_token": "",
+        "browser_capture_port": DEFAULT_CAPTURE_PORT,
         "snooze_version": "",
         "snooze_until": 0,
     }
@@ -144,6 +149,13 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
     ):
         value = settings.get(key, fallback)
         settings[key] = value if isinstance(value, bool) else fallback
+
+    settings["browser_capture_token"] = str(settings.get("browser_capture_token") or "").strip()
+    try:
+        capture_port = int(settings.get("browser_capture_port") or DEFAULT_CAPTURE_PORT)
+    except (TypeError, ValueError):
+        capture_port = DEFAULT_CAPTURE_PORT
+    settings["browser_capture_port"] = capture_port if 1 <= capture_port <= 65535 else DEFAULT_CAPTURE_PORT
 
     settings["snooze_version"] = str(settings.get("snooze_version") or "")
     try:
@@ -242,12 +254,18 @@ class DownloaderApp(ctk.CTk):
         self.diagnostics_window: DiagnosticsWindow | None = None
         self.settings_window: SettingsWindow | None = None
         self.history_window: HistoryWindow | None = None
+        self.browser_capture_window: BrowserCaptureWindow | None = None
         self.task_state = TaskState.IDLE
         self._job_counter = 0
         self.active_job_id: int | None = None
         self.active_job_cancel: threading.Event | None = None
 
         self.settings = load_settings()
+        if not str(self.settings.get("browser_capture_token") or "").strip():
+            self.settings["browser_capture_token"] = generate_capture_token()
+            save_settings(self.settings)
+        self.capture_store = CaptureStore()
+        self.capture_bridge: BrowserCaptureBridge | None = None
         self.history_store = HistoryStore(HISTORY_FILE)
         self.download_dir = Path(str(self.settings.get("download_dir") or DEFAULT_DOWNLOAD_DIR)).expanduser()
         self.latest_release: ReleaseInfo | None = None
@@ -273,6 +291,7 @@ class DownloaderApp(ctk.CTk):
         self._center_window()
         self._build_ui()
         self._sync_recent_file()
+        self._start_browser_capture_bridge()
         LOGGER.info("App started version=%s executable=%s", APP_VERSION, sys.executable)
         self.after(120, self._drain_events)
         self.after(700, lambda: self._show_update_result(attempt=0))
@@ -293,6 +312,11 @@ class DownloaderApp(ctk.CTk):
                 self.active_job_cancel.set()
             if self.update_cancel_event is not None:
                 self.update_cancel_event.set()
+        if self.capture_bridge is not None:
+            try:
+                self.capture_bridge.stop()
+            except Exception:
+                LOGGER.exception("Could not stop browser capture bridge")
         LOGGER.info(
             "App closing task_state=%s update_downloading=%s",
             self.task_state.value,
