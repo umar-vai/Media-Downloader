@@ -109,7 +109,7 @@ class BrowserCaptureWindow(ctk.CTkToplevel):
         ).grid(row=0, column=0, sticky="w", padx=20, pady=(18, 2))
         ctk.CTkLabel(
             header,
-            text="Capture direct MP4/WebM, HLS and DASH media requests from Chrome or Edge.",
+            text="Capture direct media, HLS/DASH streams, and page fallbacks from Chrome or Edge.",
             text_color=MUTED,
             font=("Segoe UI", 10),
             anchor="w",
@@ -223,7 +223,7 @@ class BrowserCaptureWindow(ctk.CTkToplevel):
 
         ctk.CTkSegmentedButton(
             toolbar,
-            values=["All", "HLS", "DASH", "Direct"],
+            values=["All", "HLS", "DASH", "Direct", "Page"],
             variable=self.kind_var,
             command=lambda _value: self.refresh(),
             height=34,
