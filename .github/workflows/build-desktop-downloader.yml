@@ -60,6 +60,7 @@ jobs:
           python -m py_compile desktop_downloader/media_editor_widgets.py
           python -m py_compile desktop_downloader/launcher.py
           python -m py_compile desktop_downloader/media_sources.py
+          python -m py_compile desktop_downloader/network_proxy.py
           python -m py_compile desktop_downloader/self_test.py
           python -m py_compile desktop_downloader/settings_window.py
           python -m py_compile desktop_downloader/update_manager.py
