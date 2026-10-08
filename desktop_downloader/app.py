@@ -1733,6 +1733,29 @@ class DownloaderApp(ctk.CTk):
                     # job first; stale final events are ignored by job_id.
                     self._finish_job(job_id)
 
+                elif kind == "browser_capture":
+                    self._sync_browser_capture_button()
+                    window = self.browser_capture_window
+                    if window is not None:
+                        try:
+                            if window.winfo_exists():
+                                window.refresh()
+                        except Exception:
+                            self.browser_capture_window = None
+                    if not self.is_busy:
+                        capture = dict(payload or {})
+                        host = capture_host(capture) or "browser"
+                        self._set_status(
+                            f"Browser media captured • {str(capture.get('kind') or 'media').upper()} • {host}",
+                            "ready",
+                        )
+
+                elif kind == "browser_capture_error":
+                    self._sync_browser_capture_button()
+                    LOGGER.error("Browser capture bridge error: %s", payload)
+                    if not self.is_busy:
+                        self._set_status("Browser Capture is offline", "error")
+
                 elif kind == "update_available":
                     self._handle_update_available(payload)
                 elif kind == "update_current":
