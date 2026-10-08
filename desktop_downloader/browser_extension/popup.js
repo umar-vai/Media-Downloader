@@ -109,8 +109,16 @@ async function render() {
     meta.className = "meta";
     let host = "media";
     try { host = new URL(item.url).hostname; } catch (_) {}
-    meta.innerHTML = `<span class="kind">${String(item.kind || "media").toUpperCase()}</span> • ${host}`;
+    const kind = String(item.kind || "media").toUpperCase();
+    meta.innerHTML = `<span class="kind">${kind}</span> • ${host}`;
     card.appendChild(meta);
+
+    if (item.kind === "page") {
+      const note = document.createElement("div");
+      note.className = "meta";
+      note.textContent = "Page fallback: the desktop app will try to extract the playing video.";
+      card.appendChild(note);
+    }
 
     const actions = document.createElement("div");
     actions.className = "row";
@@ -145,7 +153,12 @@ clearButton.addEventListener("click", async () => {
   await render();
 });
 
+chrome.storage.onChanged.addListener((_changes, areaName) => {
+  if (areaName === "session") render().catch(() => {});
+});
+
 document.addEventListener("DOMContentLoaded", async () => {
   await testConnection(false);
   await render();
+  setInterval(() => render().catch(() => {}), 1500);
 });
