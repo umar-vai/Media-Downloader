@@ -4,6 +4,8 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 
 from yt_dlp.networking.impersonate import ImpersonateTarget
 
+from network_proxy import yt_dlp_proxy_options
+
 SUPPORTED_PLATFORMS = {
     "youtube": "YouTube",
     "facebook": "Facebook",
@@ -82,7 +84,7 @@ def request_options(url: str) -> dict:
     above so Instagram stays on the standard yt-dlp request path. YouTube also
     uses the standard path.
     """
-    options = {"http_headers": browser_headers()}
+    options = {"http_headers": browser_headers(), **yt_dlp_proxy_options()}
     if detect_platform(url) == "facebook":
         options["impersonate"] = ImpersonateTarget("chrome")
     return options
@@ -149,7 +151,7 @@ def extraction_attempts(url: str) -> list[tuple[str, dict]]:
     Chrome/curl_cffi impersonation. Instagram and YouTube keep their standard
     paths.
     """
-    headers = {"http_headers": browser_headers()}
+    headers = {"http_headers": browser_headers(), **yt_dlp_proxy_options()}
     if detect_platform(url) != "facebook":
         return [(url, request_options(url))]
 
