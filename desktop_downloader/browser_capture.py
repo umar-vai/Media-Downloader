@@ -99,6 +99,8 @@ def sanitize_capture(payload: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         duration = 0
 
+    capture_group_id = str(payload.get("capture_group_id") or "").strip()[:120]
+
     return {
         "id": str(payload.get("id") or uuid.uuid4().hex),
         "captured_at": float(payload.get("captured_at") or time.time()),
@@ -110,6 +112,7 @@ def sanitize_capture(payload: Any) -> dict[str, Any]:
         "content_type": content_type,
         "headers": sanitize_headers(payload.get("headers")),
         "duration_seconds": duration,
+        "capture_group_id": capture_group_id,
     }
 
 
