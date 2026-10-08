@@ -1,0 +1,87 @@
+:root {
+  color-scheme: dark;
+  font-family: "Segoe UI", Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  width: 410px;
+  max-height: 600px;
+  background: #060b14;
+  color: #f7faff;
+}
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px;
+  background: #0b1323;
+  border-bottom: 1px solid #223456;
+}
+h1 { font-size: 15px; margin: 0; }
+header p { margin: 2px 0 0; color: #8798b5; font-size: 11px; }
+.badge {
+  font-size: 10px;
+  color: #ffb84d;
+  background: #2d2514;
+  border-radius: 8px;
+  padding: 6px 9px;
+}
+.badge.ok { color: #24d18c; background: #0e3025; }
+.pair, .toolbar { padding: 12px 14px; border-bottom: 1px solid #223456; }
+label, small { display: block; color: #8798b5; font-size: 10px; margin-bottom: 5px; }
+.row { display: flex; gap: 7px; }
+.row.secondary { align-items: center; margin-top: 7px; }
+input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 9px;
+  border-radius: 8px;
+  border: 1px solid #223456;
+  background: #101c31;
+  color: #f7faff;
+}
+button {
+  border: 1px solid #223456;
+  border-radius: 8px;
+  background: #7657ff;
+  color: white;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+button:hover { filter: brightness(1.08); }
+button.ghost { background: #101c31; color: #8798b5; }
+#connectionText { color: #8798b5; font-size: 10px; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; }
+.toolbar strong { font-size: 12px; }
+.toolbar small { margin: 2px 0 0; }
+main { padding: 8px; overflow-y: auto; max-height: 360px; }
+.empty { color: #8798b5; text-align: center; padding: 45px 12px; font-size: 12px; }
+.capture {
+  background: #101c31;
+  border: 1px solid #223456;
+  border-radius: 10px;
+  padding: 10px;
+  margin: 6px 0;
+}
+.capture h2 {
+  font-size: 12px;
+  margin: 0 0 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.meta { color: #8798b5; font-size: 10px; margin-bottom: 8px; }
+.capture .row { justify-content: flex-end; }
+.capture button { font-size: 10px; padding: 6px 8px; }
+.kind {
+  color: #23d5ff;
+  font-weight: 600;
+}
+footer {
+  padding: 10px 14px 12px;
+  color: #667996;
+  font-size: 9px;
+  line-height: 1.4;
+  border-top: 1px solid #223456;
+}
