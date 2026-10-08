@@ -123,6 +123,28 @@ class CaptureStore:
         item = sanitize_capture(payload)
         key = (item["tab_id"], item["url"])
         with self._lock:
+            previous = next(
+                (
+                    existing
+                    for existing in self._items
+                    if (existing.get("tab_id"), existing.get("url")) == key
+                ),
+                None,
+            )
+            if previous:
+                for metadata_key in (
+                    "quality_status",
+                    "quality_label",
+                    "height",
+                    "width",
+                    "fps",
+                    "tbr",
+                    "available_qualities",
+                    "has_multiple_qualities",
+                ):
+                    if metadata_key in previous:
+                        item[metadata_key] = previous[metadata_key]
+
             self._items = [
                 existing
                 for existing in self._items
@@ -131,6 +153,27 @@ class CaptureStore:
             self._items.insert(0, item)
             del self._items[self.limit :]
         return dict(item)
+
+    def update_metadata(self, capture_id: str, metadata: dict[str, Any]) -> dict[str, Any] | None:
+        capture_id = str(capture_id or "")
+        allowed = {
+            "quality_status",
+            "quality_label",
+            "height",
+            "width",
+            "fps",
+            "tbr",
+            "available_qualities",
+            "has_multiple_qualities",
+        }
+        clean = {key: value for key, value in dict(metadata or {}).items() if key in allowed}
+        with self._lock:
+            for item in self._items:
+                if item.get("id") != capture_id:
+                    continue
+                item.update(clean)
+                return dict(item)
+        return None
 
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
