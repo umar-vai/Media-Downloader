@@ -1810,7 +1810,7 @@ class DownloaderApp(ctk.CTk):
                     capture = dict(payload or {})
                     self._sync_browser_capture_button()
                     self._start_capture_quality_probe(capture)
-                    self._refresh_capture_panel()
+                    self._schedule_capture_panel_refresh(80)
                     if not self.is_busy:
                         host = capture_host(capture) or "browser"
                         self._set_status(
@@ -1826,7 +1826,7 @@ class DownloaderApp(ctk.CTk):
                     if capture_id:
                         self.capture_store.update_metadata(capture_id, metadata)
                     self._sync_browser_capture_button()
-                    self._refresh_capture_panel()
+                    self._schedule_capture_panel_refresh(80)
 
                 elif kind == "browser_capture_error":
                     self._sync_browser_capture_button()
@@ -2313,7 +2313,6 @@ class DownloaderApp(ctk.CTk):
             border_color=PURPLE if self.current_view == "capture" else (BORDER if running else "#5B4616"),
         )
         self._sync_nav_buttons()
-        self._refresh_capture_panel()
 
     def _regenerate_browser_capture_token(self) -> str:
         token = generate_capture_token()
