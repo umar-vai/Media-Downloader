@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -12,6 +13,7 @@ import customtkinter as ctk
 from tkinter import messagebox
 
 from browser_capture import BrowserCaptureBridge, CaptureStore
+from capture_quality import capture_rank
 from network_proxy import safe_proxy_label
 
 BG = "#060B14"
@@ -88,6 +90,9 @@ class BrowserCapturePanel(ctk.CTkFrame):
 
         self.search_var = ctk.StringVar()
         self.kind_var = ctk.StringVar(value="All")
+        self._network_label = ""
+        self._network_label_at = 0.0
+        self._recommended_ids: set[str] = set()
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
@@ -121,7 +126,7 @@ class BrowserCapturePanel(ctk.CTkFrame):
         ).grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
             header,
-            text="Play a video in Chrome or Edge. Detected media appears here automatically.",
+            text="Play a video in Chrome or Edge. Best detected quality is selected automatically.",
             text_color=MUTED,
             font=("Segoe UI", 12),
             anchor="w",
@@ -303,12 +308,18 @@ class BrowserCapturePanel(ctk.CTkFrame):
             fg_color="#0E3025" if running else "#351722",
             text_color=SUCCESS if running else DANGER,
         )
+        now = time.monotonic()
+        if not self._network_label or (now - self._network_label_at) >= 2.0:
+            self._network_label = safe_proxy_label()
+            self._network_label_at = now
         if running:
             self.connection_text.configure(
-                text=f"Browser bridge ready on port {bridge.port}. {safe_proxy_label()}."
+                text=f"Browser bridge ready on port {bridge.port}. {self._network_label}."
             )
         else:
-            self.connection_text.configure(text=f"Browser Capture bridge is offline. {safe_proxy_label()}.")
+            self.connection_text.configure(
+                text=f"Browser Capture bridge is offline. {self._network_label}."
+            )
 
         queued, active = self.get_queue_summary()
         if active:
@@ -322,7 +333,88 @@ class BrowserCapturePanel(ctk.CTkFrame):
             queue_color = MUTED
         self.queue_label.configure(text=queue_text, text_color=queue_color)
 
-        items = [item for item in self.store.list() if self._matches(item)]
+        raw_items = [item for item in self.store.list() if self._matches(item)]
+        self._recommended_ids = set()
+        grouped: dict[tuple[str, str, int, str, str], list[dict[str, Any]]] = {}
+        singles: list[dict[str, Any]] = []
+
+        for item in raw_items:
+            kind = str(item.get("kind") or "").lower()
+            if kind not in {"hls", "dash"}:
+                singles.append(item)
+                continue
+            key = (
+                str(item.get("page_url") or ""),
+                str(item.get("title") or ""),
+                int(item.get("tab_id") or 0),
+                kind,
+                _host(str(item.get("url") or "")),
+            )
+            grouped.setdefault(key, []).append(item)
+
+        items: list[dict[str, Any]] = list(singles)
+        for group in grouped.values():
+            active_candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            terminal_candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            known: list[dict[str, Any]] = []
+            for item in group:
+                state = self.get_job_state(str(item.get("id") or "")) or {}
+                status = str(state.get("status") or "")
+                if status in {"queued", "running"}:
+                    active_candidates.append((item, state))
+                elif status in {"completed", "failed", "cancelled"}:
+                    terminal_candidates.append((item, state))
+                if str(item.get("quality_status") or "") == "ready" and int(item.get("height") or 0) > 0:
+                    known.append(item)
+
+            if active_candidates:
+                representative = max(
+                    active_candidates,
+                    key=lambda pair: float(pair[1].get("created_at") or 0),
+                )[0]
+            elif terminal_candidates:
+                representative = max(
+                    terminal_candidates,
+                    key=lambda pair: float(pair[1].get("created_at") or 0),
+                )[0]
+            elif known:
+                representative = max(known, key=capture_rank)
+            else:
+                representative = group[0]
+
+            display_item = dict(representative)
+            quality_values: set[str] = set()
+            for member in group:
+                member_qualities = member.get("available_qualities")
+                if isinstance(member_qualities, list):
+                    quality_values.update(str(value) for value in member_qualities if value)
+                height = int(member.get("height") or 0)
+                if height > 0:
+                    quality_values.add(f"{height}p")
+
+            def quality_number(label: str) -> int:
+                try:
+                    return int(str(label).lower().replace("p", "").split("60", 1)[0])
+                except (TypeError, ValueError):
+                    return 0
+
+            display_item["available_qualities"] = sorted(
+                quality_values,
+                key=quality_number,
+                reverse=True,
+            )
+            display_item["stream_count"] = len(group)
+            if known:
+                best = max(known, key=capture_rank)
+                best_id = str(best.get("id") or "")
+                if best_id:
+                    self._recommended_ids.add(best_id)
+                if str(display_item.get("id") or "") == best_id:
+                    self._recommended_ids.add(str(display_item.get("id") or ""))
+            items.append(display_item)
+
+        items.sort(key=lambda item: float(item.get("captured_at") or 0), reverse=True)
+
         for child in self.list_frame.winfo_children():
             child.destroy()
 
@@ -352,6 +444,10 @@ class BrowserCapturePanel(ctk.CTkFrame):
         host = _host(str(item.get("url") or "")) or "Media host"
         page_host = _host(str(item.get("page_url") or ""))
         captured = _time_label(item.get("captured_at"))
+        quality_status = str(item.get("quality_status") or "")
+        quality_label = str(item.get("quality_label") or ("Checking…" if quality_status == "checking" else "Auto"))
+        qualities = item.get("available_qualities")
+        available_qualities = [str(value) for value in qualities] if isinstance(qualities, list) else []
         job = self.get_job_state(capture_id) or {}
         job_status = str(job.get("status") or "")
         progress = max(0.0, min(1.0, float(job.get("progress") or 0.0)))
@@ -380,13 +476,38 @@ class BrowserCapturePanel(ctk.CTkFrame):
         detail_parts = [source]
         if captured:
             detail_parts.append(captured)
+        stream_count = int(item.get("stream_count") or 1)
+        if available_qualities:
+            detail_parts.append("Available: " + " / ".join(available_qualities[:6]))
+        if stream_count > 1:
+            detail_parts.append(f"{stream_count} related streams grouped")
+        elif quality_status == "checking":
+            detail_parts.append("Checking available quality…")
         ctk.CTkLabel(
             card,
             text=" • ".join(detail_parts),
             text_color=MUTED,
             font=("Segoe UI", 9),
             anchor="w",
-        ).grid(row=1, column=0, sticky="w", padx=14)
+            justify="left",
+            wraplength=760,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=14)
+
+        quality_good = quality_status == "ready" and quality_label not in {"Unknown", "Auto"}
+        is_recommended = capture_id in self._recommended_ids
+        badge_text = quality_label
+        if is_recommended and quality_good:
+            badge_text = "BEST • " + quality_label.replace("Best ", "")
+        ctk.CTkLabel(
+            card,
+            text=badge_text,
+            width=84,
+            height=26,
+            corner_radius=8,
+            fg_color="#241C52" if quality_good else SURFACE_3,
+            text_color=TEXT if quality_good else MUTED,
+            font=("Segoe UI Semibold", 8),
+        ).grid(row=0, column=1, padx=(6, 4), pady=(10, 0))
 
         ctk.CTkLabel(
             card,
@@ -397,7 +518,7 @@ class BrowserCapturePanel(ctk.CTkFrame):
             fg_color="#0E3025" if kind != "PAGE" else "#2D2514",
             text_color=SUCCESS if kind != "PAGE" else WARNING,
             font=("Segoe UI Semibold", 8),
-        ).grid(row=0, column=1, padx=(6, 14), pady=(10, 0))
+        ).grid(row=0, column=2, padx=(4, 14), pady=(10, 0))
 
         action_row = 2
         if job_status:
@@ -421,11 +542,11 @@ class BrowserCapturePanel(ctk.CTkFrame):
                 text_color=state_color,
                 font=("Segoe UI Semibold", 9),
                 anchor="w",
-            ).grid(row=2, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 2))
+            ).grid(row=2, column=0, columnspan=3, sticky="w", padx=14, pady=(8, 2))
             action_row = 3
             if job_status == "running":
                 progress_bar = ctk.CTkProgressBar(card, height=6, progress_color=PURPLE)
-                progress_bar.grid(row=3, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 4))
+                progress_bar.grid(row=3, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 4))
                 progress_bar.set(progress)
                 action_row = 4
                 detail = str(job.get("detail") or "")
@@ -436,11 +557,11 @@ class BrowserCapturePanel(ctk.CTkFrame):
                         text_color=MUTED,
                         font=("Segoe UI", 8),
                         anchor="w",
-                    ).grid(row=4, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 2))
+                    ).grid(row=4, column=0, columnspan=3, sticky="w", padx=14, pady=(0, 2))
                     action_row = 5
 
         actions = ctk.CTkFrame(card, fg_color="transparent")
-        actions.grid(row=action_row, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 12))
+        actions.grid(row=action_row, column=0, columnspan=3, sticky="w", padx=12, pady=(8, 12))
 
         if job_status in {"queued", "running"}:
             ctk.CTkButton(
@@ -458,8 +579,8 @@ class BrowserCapturePanel(ctk.CTkFrame):
         else:
             ctk.CTkButton(
                 actions,
-                text="Download",
-                width=90,
+                text="Download best",
+                width=108,
                 height=31,
                 fg_color=PURPLE,
                 hover_color=PURPLE_HOVER,

@@ -27,6 +27,7 @@ from app_logging import get_logger, log_path
 from browser_capture import BrowserCaptureBridge, CaptureStore, DEFAULT_CAPTURE_PORT, generate_capture_token
 from browser_capture_panel import BrowserCapturePanel
 from captured_media_engine import CaptureDownloadCancelled, capture_host, capture_media_mode, download_captured_media
+from capture_quality import inspect_capture_quality, select_best_capture
 from diagnostics_window import DiagnosticsWindow
 from download_queue import DownloadQueue, DownloadRequest
 from history_store import HistoryStore, make_history_entry
@@ -263,6 +264,10 @@ class DownloaderApp(ctk.CTk):
         self._job_counter = 0
         self.active_job_id: int | None = None
         self.active_job_cancel: threading.Event | None = None
+        self._progress_event_lock = threading.Lock()
+        self._latest_progress_by_job: dict[int, Any] = {}
+        self._capture_quality_inflight: set[str] = set()
+        self._capture_panel_refresh_after_id: str | None = None
 
         self.settings = load_settings()
         if not str(self.settings.get("browser_capture_token") or "").strip():
@@ -1237,12 +1242,21 @@ class DownloaderApp(ctk.CTk):
         return self.active_job_id == job_id
 
     def _put_job_event(self, kind: str, job_id: int, data: Any = None) -> None:
+        if kind == "progress":
+            # yt-dlp can emit dozens or hundreds of progress callbacks per
+            # second, especially with parallel HLS fragments. Keep only the
+            # newest sample so Tk never gets starved by an event backlog.
+            with self._progress_event_lock:
+                self._latest_progress_by_job[job_id] = data
+            return
         self.events.put((kind, {"job_id": job_id, "data": data}))
 
     def _finish_job(self, job_id: int) -> None:
         if self.active_job_id != job_id:
             return
         LOGGER.info("Job %s finished state=%s", job_id, self.task_state.value)
+        with self._progress_event_lock:
+            self._latest_progress_by_job.pop(job_id, None)
         self.active_job_id = None
         self.active_job_cancel = None
         self.active_download_request_id = None
@@ -1631,7 +1645,32 @@ class DownloaderApp(ctk.CTk):
             self.thumbnail_image = None
             self.thumbnail_label.configure(image=None, text="VIDEO\nPREVIEW")
 
+    def _apply_progress_event(self, job_id: int, data: Any) -> None:
+        if not self._is_current_job(job_id):
+            return
+        detail = dict(data or {})
+        percent = max(0.0, min(100.0, float(detail.get("percent") or 0)))
+        self.progress.set(percent / 100.0)
+        self.progress_label.configure(text=f"{percent:.0f}%")
+        progress_detail = str(detail.get("detail") or "Downloading…")
+        self.speed_label.configure(text=progress_detail)
+        if self.active_download_request_id:
+            self.download_queue.update_progress(
+                self.active_download_request_id,
+                percent / 100.0,
+                progress_detail,
+            )
+            self._schedule_capture_panel_refresh(220)
+        self._set_status(f"Downloading… {percent:.1f}%", "working")
+
     def _drain_events(self) -> None:
+        active_job_id = self.active_job_id
+        if active_job_id is not None:
+            with self._progress_event_lock:
+                latest_progress = self._latest_progress_by_job.pop(active_job_id, None)
+            if latest_progress is not None:
+                self._apply_progress_event(active_job_id, latest_progress)
+
         job_kinds = {
             "info",
             "progress",
@@ -1642,9 +1681,12 @@ class DownloaderApp(ctk.CTk):
             "analysis_finished",
             "download_finished",
         }
+        processed = 0
+        started = time.monotonic()
         try:
-            while True:
+            while processed < 80 and (time.monotonic() - started) < 0.012:
                 kind, payload = self.events.get_nowait()
+                processed += 1
                 data = payload
 
                 if kind in job_kinds:
@@ -1683,20 +1725,7 @@ class DownloaderApp(ctk.CTk):
                     self._finish_job(job_id)
 
                 elif kind == "progress":
-                    detail = dict(data or {})
-                    percent = max(0.0, min(100.0, float(detail.get("percent") or 0)))
-                    self.progress.set(percent / 100.0)
-                    self.progress_label.configure(text=f"{percent:.0f}%")
-                    progress_detail = str(detail.get("detail") or "Downloading…")
-                    self.speed_label.configure(text=progress_detail)
-                    if self.active_download_request_id:
-                        self.download_queue.update_progress(
-                            self.active_download_request_id,
-                            percent / 100.0,
-                            progress_detail,
-                        )
-                        self._refresh_capture_panel()
-                    self._set_status(f"Downloading… {percent:.1f}%", "working")
+                    self._apply_progress_event(job_id, data)
 
                 elif kind == "status":
                     self._set_status(str(data or ""), "working")
@@ -1778,15 +1807,26 @@ class DownloaderApp(ctk.CTk):
                     self._finish_job(job_id)
 
                 elif kind == "browser_capture":
+                    capture = dict(payload or {})
                     self._sync_browser_capture_button()
-                    self._refresh_capture_panel()
+                    self._start_capture_quality_probe(capture)
+                    self._schedule_capture_panel_refresh(80)
                     if not self.is_busy:
-                        capture = dict(payload or {})
                         host = capture_host(capture) or "browser"
                         self._set_status(
                             f"Browser media captured • {str(capture.get('kind') or 'media').upper()} • {host}",
                             "ready",
                         )
+
+                elif kind == "capture_quality":
+                    result = dict(payload or {})
+                    capture_id = str(result.get("capture_id") or "")
+                    metadata = dict(result.get("metadata") or {})
+                    self._capture_quality_inflight.discard(capture_id)
+                    if capture_id:
+                        self.capture_store.update_metadata(capture_id, metadata)
+                    self._sync_browser_capture_button()
+                    self._schedule_capture_panel_refresh(80)
 
                 elif kind == "browser_capture_error":
                     self._sync_browser_capture_button()
@@ -1812,7 +1852,7 @@ class DownloaderApp(ctk.CTk):
         except Exception:
             LOGGER.exception("UI event pump error")
         finally:
-            self.after(120, self._drain_events)
+            self.after(40, self._drain_events)
 
     def choose_download_folder(self) -> None:
         selected = filedialog.askdirectory(
@@ -2273,7 +2313,6 @@ class DownloaderApp(ctk.CTk):
             border_color=PURPLE if self.current_view == "capture" else (BORDER if running else "#5B4616"),
         )
         self._sync_nav_buttons()
-        self._refresh_capture_panel()
 
     def _regenerate_browser_capture_token(self) -> str:
         token = generate_capture_token()
@@ -2358,6 +2397,13 @@ class DownloaderApp(ctk.CTk):
         return self.download_queue.queued_count(), self.download_queue.running_count()
 
     def _refresh_capture_panel(self) -> None:
+        if self._capture_panel_refresh_after_id is not None:
+            try:
+                self.after_cancel(self._capture_panel_refresh_after_id)
+            except Exception:
+                pass
+            self._capture_panel_refresh_after_id = None
+
         panel = self.browser_capture_panel
         if panel is None:
             return
@@ -2366,6 +2412,46 @@ class DownloaderApp(ctk.CTk):
                 panel.refresh()
         except Exception:
             LOGGER.exception("Could not refresh Browser Capture panel")
+
+    def _schedule_capture_panel_refresh(self, delay_ms: int = 220) -> None:
+        if self._capture_panel_refresh_after_id is not None:
+            return
+
+        def run() -> None:
+            self._capture_panel_refresh_after_id = None
+            self._refresh_capture_panel()
+
+        self._capture_panel_refresh_after_id = self.after(max(40, int(delay_ms)), run)
+
+    def _start_capture_quality_probe(self, capture: dict[str, Any]) -> None:
+        capture_id = str(capture.get("id") or "")
+        kind = str(capture.get("kind") or "").lower()
+        if not capture_id or kind == "page" or capture_id in self._capture_quality_inflight:
+            return
+        existing = self.capture_store.get(capture_id) or capture
+        if str(existing.get("quality_status") or "") == "ready":
+            return
+
+        self._capture_quality_inflight.add(capture_id)
+        self.capture_store.update_metadata(
+            capture_id,
+            {"quality_status": "checking", "quality_label": "Checking…"},
+        )
+        threading.Thread(
+            target=self._capture_quality_worker,
+            args=(capture_id, dict(existing)),
+            daemon=True,
+            name=f"capture-quality-{capture_id[:8]}",
+        ).start()
+
+    def _capture_quality_worker(self, capture_id: str, capture: dict[str, Any]) -> None:
+        metadata = inspect_capture_quality(capture)
+        self.events.put(
+            (
+                "capture_quality",
+                {"capture_id": capture_id, "metadata": metadata},
+            )
+        )
 
     def _remove_browser_capture(self, capture_id: str) -> None:
         state = self._capture_job_state(capture_id) or {}
@@ -2465,9 +2551,17 @@ class DownloaderApp(ctk.CTk):
         ).start()
 
     def start_captured_download(self, capture: dict[str, Any], edit_after_download: bool = False) -> None:
-        item = dict(capture or {})
-        capture_id = str(item.get("id") or "")
-        title = str(item.get("title") or "Captured media")
+        clicked_item = dict(capture or {})
+        item = select_best_capture(self.capture_store.list(), clicked_item)
+        capture_id = str(item.get("id") or clicked_item.get("id") or "")
+        title = str(clicked_item.get("title") or item.get("title") or "Captured media")
+        if str(item.get("id") or "") != str(clicked_item.get("id") or ""):
+            LOGGER.info(
+                "Auto-selected higher quality capture clicked=%s selected=%s quality=%s",
+                clicked_item.get("id"),
+                item.get("id"),
+                item.get("quality_label") or item.get("height") or "auto",
+            )
         request = self.download_queue.enqueue(
             "capture",
             {"capture": item, "title": title},
@@ -2520,7 +2614,7 @@ class DownloaderApp(ctk.CTk):
                     "platform": capture_host(capture, prefer_page=True) or capture_host(capture) or "browser",
                     "creator": "",
                     "mode": capture_media_mode(capture),
-                    "quality": str(capture.get("kind") or "captured").upper(),
+                    "quality": str(capture.get("quality_label") or capture.get("kind") or "captured"),
                     "duration_seconds": int(capture.get("duration_seconds") or 0),
                 },
             )

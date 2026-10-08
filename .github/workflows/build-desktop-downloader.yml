@@ -45,6 +45,7 @@ jobs:
           python -m py_compile desktop_downloader/app.py
           python -m py_compile desktop_downloader/app_logging.py
           python -m py_compile desktop_downloader/browser_capture.py
+          python -m py_compile desktop_downloader/capture_quality.py
           python -m py_compile desktop_downloader/browser_capture_panel.py
           python -m py_compile desktop_downloader/browser_capture_window.py
           python -m py_compile desktop_downloader/captured_media_engine.py
