@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 from yt_dlp import YoutubeDL
 
@@ -132,44 +133,120 @@ def capture_rank(capture: dict[str, Any]) -> tuple[int, int, int, float]:
     return (height, multi, width, captured_at)
 
 
+def _host(url: str) -> str:
+    try:
+        return (urlparse(str(url or "")).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def related_capture_candidates(
+    captures: list[dict[str, Any]],
+    selected: dict[str, Any],
+) -> list[dict[str, Any]]:
+    selected_item = dict(selected or {})
+    group_id = str(selected_item.get("capture_group_id") or "")
+    page_url = str(selected_item.get("page_url") or "")
+    title = str(selected_item.get("title") or "")
+    tab_id = _as_int(selected_item.get("tab_id"))
+    selected_kind = str(selected_item.get("kind") or "").lower()
+    selected_host = _host(str(selected_item.get("url") or ""))
+    selected_at = _as_float(selected_item.get("captured_at"))
+
+    candidates: list[dict[str, Any]] = []
+    page_fallbacks: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+
+    for raw in captures:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        url = str(item.get("url") or "")
+        if not url or url in seen_urls:
+            continue
+
+        item_group = str(item.get("capture_group_id") or "")
+        kind = str(item.get("kind") or "").lower()
+
+        if group_id:
+            same_group = item_group == group_id
+        else:
+            same_page = bool(page_url and str(item.get("page_url") or "") == page_url)
+            same_tab_title = bool(
+                tab_id
+                and _as_int(item.get("tab_id")) == tab_id
+                and title
+                and str(item.get("title") or "") == title
+            )
+            same_stream_family = (
+                kind == selected_kind
+                and _host(url) == selected_host
+            )
+            close_in_time = (
+                not selected_at
+                or not _as_float(item.get("captured_at"))
+                or abs(_as_float(item.get("captured_at")) - selected_at) <= 180
+            )
+            same_group = (same_page or same_tab_title) and same_stream_family and close_in_time
+
+        if same_group and kind in {"hls", "dash", "direct"}:
+            candidates.append(item)
+            seen_urls.add(url)
+            continue
+
+        # Keep a page-level fallback last. It is useful for MSE/blob players
+        # and for sites where an individual signed variant expires early.
+        same_page_fallback = (
+            kind == "page"
+            and (
+                (group_id and item_group == group_id)
+                or (page_url and str(item.get("page_url") or item.get("url") or "") == page_url)
+                or (
+                    tab_id
+                    and _as_int(item.get("tab_id")) == tab_id
+                    and title
+                    and str(item.get("title") or "") == title
+                )
+            )
+        )
+        if same_page_fallback:
+            page_fallbacks.append(item)
+
+    if not candidates:
+        candidates = [selected_item]
+
+    candidates.sort(key=capture_rank, reverse=True)
+
+    # If the selected item is fresh but quality metadata is still incomplete,
+    # make sure it remains a retry candidate instead of being lost.
+    selected_url = str(selected_item.get("url") or "")
+    if selected_url and all(str(item.get("url") or "") != selected_url for item in candidates):
+        candidates.append(selected_item)
+
+    page_fallbacks.sort(
+        key=lambda item: _as_float(item.get("captured_at")),
+        reverse=True,
+    )
+    for fallback in page_fallbacks:
+        url = str(fallback.get("url") or "")
+        if url and all(str(item.get("url") or "") != url for item in candidates):
+            candidates.append(fallback)
+
+    return candidates
+
+
 def select_best_capture(
     captures: list[dict[str, Any]],
     selected: dict[str, Any],
 ) -> dict[str, Any]:
-    selected_item = dict(selected or {})
-    page_url = str(selected_item.get("page_url") or "")
-    title = str(selected_item.get("title") or "")
-    tab_id = _as_int(selected_item.get("tab_id"))
-
-    candidates: list[dict[str, Any]] = []
-    for item in captures:
-        if not isinstance(item, dict):
-            continue
-        kind = str(item.get("kind") or "").lower()
-        if kind not in {"hls", "dash", "direct"}:
-            continue
-        same_page = bool(page_url and str(item.get("page_url") or "") == page_url)
-        same_tab_title = bool(
-            tab_id
-            and _as_int(item.get("tab_id")) == tab_id
-            and title
-            and str(item.get("title") or "") == title
-        )
-        if same_page or same_tab_title:
-            candidates.append(dict(item))
-
-    if not candidates:
-        return selected_item
-
-    best = max(candidates, key=capture_rank)
-    if capture_rank(best) > capture_rank(selected_item):
-        return best
-    return selected_item
+    candidates = related_capture_candidates(captures, selected)
+    return dict(candidates[0]) if candidates else dict(selected or {})
 
 
 __all__ = [
     "capture_rank",
     "inspect_capture_quality",
     "quality_summary_from_info",
+    "related_capture_candidates",
     "select_best_capture",
 ]
