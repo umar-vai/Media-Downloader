@@ -2552,8 +2552,8 @@ class DownloaderApp(ctk.CTk):
 
     def start_captured_download(self, capture: dict[str, Any], edit_after_download: bool = False) -> None:
         clicked_item = dict(capture or {})
-        capture_id = str(clicked_item.get("id") or "")
         item = select_best_capture(self.capture_store.list(), clicked_item)
+        capture_id = str(item.get("id") or clicked_item.get("id") or "")
         title = str(clicked_item.get("title") or item.get("title") or "Captured media")
         if str(item.get("id") or "") != str(clicked_item.get("id") or ""):
             LOGGER.info(
