@@ -117,6 +117,25 @@ def _candidate_paths(output_dir: Path, base_name: str, started_at: float) -> lis
     return candidates
 
 
+def cleanup_failed_capture_parts(output_dir: Path, base_name: str, started_at: float) -> None:
+    prefix = safe_capture_name(base_name)
+    try:
+        for path in Path(output_dir).iterdir():
+            if not path.is_file():
+                continue
+            if not path.name.startswith(prefix):
+                continue
+            if not path.name.endswith((".part", ".ytdl", ".temp", ".tmp")):
+                continue
+            try:
+                if path.stat().st_mtime >= started_at - 2:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                continue
+    except OSError:
+        return
+
+
 def download_captured_media(
     capture: dict[str, Any],
     output_dir: Path,
@@ -194,3 +213,13 @@ def download_captured_media(
         return max(candidates, key=lambda path: path.stat().st_mtime)
 
     raise RuntimeError("The captured stream finished without producing a media file.")
+
+
+__all__ = [
+    "CaptureDownloadCancelled",
+    "capture_host",
+    "capture_media_mode",
+    "cleanup_failed_capture_parts",
+    "download_captured_media",
+    "safe_capture_name",
+]
