@@ -29,11 +29,39 @@ def safe_capture_name(value: str, fallback: str = "captured_media") -> str:
     return name[:160]
 
 
-def capture_host(capture: dict[str, Any]) -> str:
+def capture_host(capture: dict[str, Any], *, prefer_page: bool = False) -> str:
+    key = "page_url" if prefer_page and capture.get("page_url") else "url"
     try:
-        return (urlparse(str(capture.get("url") or "")).hostname or "").lower()
+        return (urlparse(str(capture.get(key) or "")).hostname or "").lower()
     except Exception:
         return ""
+
+
+def capture_media_mode(capture: dict[str, Any]) -> str:
+    content = str(capture.get("content_type") or "").lower()
+    if content.startswith("audio/"):
+        return "Audio"
+    try:
+        path = urlparse(str(capture.get("url") or "")).path.lower()
+    except Exception:
+        path = ""
+    if path.endswith((".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac")):
+        return "Audio"
+    return "Video"
+
+
+def _safe_download_error(exc: BaseException, capture: dict[str, Any]) -> str:
+    host = capture_host(capture) or "media host"
+    raw = str(exc) or exc.__class__.__name__
+    url = str(capture.get("url") or "")
+    page_url = str(capture.get("page_url") or "")
+    if url:
+        raw = raw.replace(url, f"https://{host}/…")
+    if page_url:
+        page_host = capture_host(capture, prefer_page=True) or "page"
+        raw = raw.replace(page_url, f"https://{page_host}/…")
+    raw = re.sub(r"https?://[^\s\]\)>'\"]+", lambda match: match.group(0).split("?", 1)[0], raw)
+    return raw[-600:]
 
 
 def capture_download_options(
@@ -131,11 +159,11 @@ def download_captured_media(
     except CaptureDownloadCancelled:
         raise
     except DownloadError as exc:
-        raise RuntimeError(str(exc)) from exc
+        raise RuntimeError(_safe_download_error(exc, item)) from exc
     except Exception as exc:
         if cancel_event is not None and cancel_event.is_set():
             raise CaptureDownloadCancelled("Captured media download cancelled.") from exc
-        raise RuntimeError(str(exc) or exc.__class__.__name__) from exc
+        raise RuntimeError(_safe_download_error(exc, item)) from exc
 
     if cancel_event is not None and cancel_event.is_set():
         raise CaptureDownloadCancelled("Captured media download cancelled.")
