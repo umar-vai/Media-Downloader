@@ -2264,6 +2264,7 @@ class DownloaderApp(ctk.CTk):
                 on_download=self.start_captured_download,
                 on_regenerate_token=self._regenerate_browser_capture_token,
                 on_open_release=self.open_release_page,
+                on_change=self._sync_browser_capture_button,
             )
             self.browser_capture_window.bind(
                 "<Destroy>",
