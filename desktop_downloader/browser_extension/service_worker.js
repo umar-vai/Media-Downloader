@@ -92,6 +92,19 @@ function pickHeaders(headers) {
 async function storeCapture(item) {
   const state = await chrome.storage.session.get({captures: []});
   const captures = Array.isArray(state.captures) ? state.captures : [];
+  const existing = captures.find((entry) => entry.tab_id === item.tab_id && entry.url === item.url);
+
+  // A DOM/performance probe can report the same URL after webRequest. Do not
+  // overwrite richer network-captured headers with an empty probe capture.
+  if (existing) {
+    const newHeaders = item.headers && Object.keys(item.headers).length ? item.headers : null;
+    item.headers = newHeaders || existing.headers || {};
+    item.content_type = item.content_type || existing.content_type || "";
+    item.kind = item.kind && item.kind !== "unknown" ? item.kind : (existing.kind || "unknown");
+    item.page_url = item.page_url || existing.page_url || "";
+    item.title = item.title || existing.title || "Captured media";
+  }
+
   const filtered = captures.filter((entry) => !(entry.tab_id === item.tab_id && entry.url === item.url));
   filtered.unshift(item);
   await chrome.storage.session.set({captures: filtered.slice(0, MAX_CAPTURES)});
