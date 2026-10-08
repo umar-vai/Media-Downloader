@@ -45,6 +45,18 @@ class BrowserCaptureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sanitize_capture({"url": "file:///C:/video.mp4"})
 
+    def test_accepts_page_fallback_capture(self) -> None:
+        item = sanitize_capture(
+            {
+                "url": "https://example.com/watch/episode-1",
+                "page_url": "https://example.com/watch/episode-1",
+                "title": "Episode 1",
+                "tab_id": 11,
+                "kind": "page",
+            }
+        )
+        self.assertEqual(item["kind"], "page")
+
     def test_store_collapses_duplicate_tab_and_url(self) -> None:
         store = CaptureStore(limit=10)
         first = store.add(
