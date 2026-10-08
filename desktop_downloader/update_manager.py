@@ -247,7 +247,8 @@ def _curl_download(url: str, destination: Path, timeout: int) -> None:
 def _powershell_read(url: str, timeout: int) -> bytes:
     executable = _powershell_executable()
     proxy = active_proxy_url()
-    proxy_arg = f" -Proxy '{proxy.replace("'", "''")}'" if proxy else ""
+    escaped_proxy = proxy.replace("'", "''") if proxy else ""
+    proxy_arg = f" -Proxy '{escaped_proxy}'" if escaped_proxy else ""
     script = (
         "$ProgressPreference='SilentlyContinue'; "
         "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; "
@@ -333,7 +334,8 @@ def _powershell_download(url: str, destination: Path, timeout: int) -> None:
     escaped_url = url.replace("'", "''")
     escaped_destination = str(destination).replace("'", "''")
     proxy = active_proxy_url()
-    proxy_arg = f" -Proxy '{proxy.replace("'", "''")}'" if proxy else ""
+    escaped_proxy = proxy.replace("'", "''") if proxy else ""
+    proxy_arg = f" -Proxy '{escaped_proxy}'" if escaped_proxy else ""
     script = (
         "$ProgressPreference='SilentlyContinue'; "
         "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; "
