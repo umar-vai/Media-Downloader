@@ -25,9 +25,10 @@ from tkinter import filedialog, messagebox
 
 from app_logging import get_logger, log_path
 from browser_capture import BrowserCaptureBridge, CaptureStore, DEFAULT_CAPTURE_PORT, generate_capture_token
-from browser_capture_window import BrowserCaptureWindow
+from browser_capture_panel import BrowserCapturePanel
 from captured_media_engine import CaptureDownloadCancelled, capture_host, capture_media_mode, download_captured_media
 from diagnostics_window import DiagnosticsWindow
+from download_queue import DownloadQueue, DownloadRequest
 from history_store import HistoryStore, make_history_entry
 from history_window import HistoryWindow
 from install_mode import is_installed_mode
@@ -254,7 +255,10 @@ class DownloaderApp(ctk.CTk):
         self.diagnostics_window: DiagnosticsWindow | None = None
         self.settings_window: SettingsWindow | None = None
         self.history_window: HistoryWindow | None = None
-        self.browser_capture_window: BrowserCaptureWindow | None = None
+        self.browser_capture_panel: BrowserCapturePanel | None = None
+        self.current_view = "downloader"
+        self.download_queue = DownloadQueue()
+        self.active_download_request_id: str | None = None
         self.task_state = TaskState.IDLE
         self._job_counter = 0
         self.active_job_id: int | None = None
@@ -292,6 +296,8 @@ class DownloaderApp(ctk.CTk):
         self._build_ui()
         self._sync_recent_file()
         self._start_browser_capture_bridge()
+        self._build_browser_capture_panel()
+        self._sync_nav_buttons()
         LOGGER.info("App started version=%s executable=%s", APP_VERSION, sys.executable)
         self.after(120, self._drain_events)
         self.after(700, lambda: self._show_update_result(attempt=0))
@@ -299,7 +305,7 @@ class DownloaderApp(ctk.CTk):
             self.after(1500, lambda: self.check_for_updates(manual=False))
 
     def _close_app(self) -> None:
-        active = self.is_busy or self.update_downloading
+        active = self.is_busy or self.update_downloading or self.download_queue.queued_count() > 0
         if active:
             should_confirm = bool(self.settings.get("confirm_before_exit", True))
             if should_confirm and not messagebox.askyesno(
@@ -389,6 +395,22 @@ class DownloaderApp(ctk.CTk):
         self.top_update_button.grid(row=0, column=2, padx=(12, 0))
         self.top_update_button.grid_remove()
 
+        self.downloader_nav_button = ctk.CTkButton(
+            top,
+            text="Downloader",
+            width=92,
+            height=30,
+            corner_radius=9,
+            fg_color=SURFACE_2,
+            hover_color=SURFACE_3,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 9),
+            command=self.show_downloader_view,
+        )
+        self.downloader_nav_button.grid(row=0, column=3, padx=(12, 0))
+
         self.browser_capture_button = ctk.CTkButton(
             top,
             text="Capture",
@@ -403,7 +425,7 @@ class DownloaderApp(ctk.CTk):
             font=("Segoe UI Semibold", 9),
             command=self.open_browser_capture,
         )
-        self.browser_capture_button.grid(row=0, column=3, padx=(12, 0))
+        self.browser_capture_button.grid(row=0, column=4, padx=(8, 0))
 
         ctk.CTkButton(
             top,
@@ -418,7 +440,7 @@ class DownloaderApp(ctk.CTk):
             text_color=TEXT,
             font=("Segoe UI Semibold", 9),
             command=self.open_history,
-        ).grid(row=0, column=4, padx=(8, 0))
+        ).grid(row=0, column=5, padx=(8, 0))
 
         ctk.CTkButton(
             top,
@@ -433,7 +455,7 @@ class DownloaderApp(ctk.CTk):
             text_color=TEXT,
             font=("Segoe UI Semibold", 9),
             command=self.open_settings,
-        ).grid(row=0, column=5, padx=(8, 0))
+        ).grid(row=0, column=6, padx=(8, 0))
 
         ctk.CTkLabel(
             top,
@@ -443,7 +465,7 @@ class DownloaderApp(ctk.CTk):
             fg_color=SURFACE_2,
             text_color=CYAN,
             font=("Segoe UI Semibold", 10),
-        ).grid(row=0, column=6, padx=(12, 24))
+        ).grid(row=0, column=7, padx=(12, 24))
 
     def _build_hero(self) -> None:
         hero = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -1223,7 +1245,10 @@ class DownloaderApp(ctk.CTk):
         LOGGER.info("Job %s finished state=%s", job_id, self.task_state.value)
         self.active_job_id = None
         self.active_job_cancel = None
+        self.active_download_request_id = None
         self._set_busy(False)
+        self._refresh_capture_panel()
+        self.after(40, self._start_next_queued_download)
 
     def cancel_current_job(self) -> None:
         event = self.active_job_cancel
@@ -1431,22 +1456,18 @@ class DownloaderApp(ctk.CTk):
             ),
             "source_url": url,
         }
-        job_id, cancel_event = self._begin_job(TaskState.DOWNLOADING)
-        self.edit_after_download = bool(edit_after_download)
-        self.progress.set(0)
-        self.progress_label.configure(text="0%")
-        self.speed_label.configure(text="Preparing editor…" if edit_after_download else "Starting…")
-        self._set_status(
-            f"Downloading from {platform_name(platform)} for editing…" if edit_after_download
-            else f"Connecting to {platform_name(platform)}…",
-            "working",
+        request = self.download_queue.enqueue(
+            "link",
+            {
+                "url": url,
+                "name": name,
+                "download_dir": str(self.download_dir),
+                "request_settings": request_settings,
+            },
+            edit_after_download=bool(edit_after_download),
         )
-        self._set_busy(True)
-        threading.Thread(
-            target=self._download_worker,
-            args=(job_id, cancel_event, url, name, self.download_dir, request_settings),
-            daemon=True,
-        ).start()
+        LOGGER.info("Queued link download request=%s", request.id)
+        self._start_next_queued_download()
 
     def _download_worker(
         self,
@@ -1666,7 +1687,15 @@ class DownloaderApp(ctk.CTk):
                     percent = max(0.0, min(100.0, float(detail.get("percent") or 0)))
                     self.progress.set(percent / 100.0)
                     self.progress_label.configure(text=f"{percent:.0f}%")
-                    self.speed_label.configure(text=str(detail.get("detail") or "Downloading…"))
+                    progress_detail = str(detail.get("detail") or "Downloading…")
+                    self.speed_label.configure(text=progress_detail)
+                    if self.active_download_request_id:
+                        self.download_queue.update_progress(
+                            self.active_download_request_id,
+                            percent / 100.0,
+                            progress_detail,
+                        )
+                        self._refresh_capture_panel()
                     self._set_status(f"Downloading… {percent:.1f}%", "working")
 
                 elif kind == "status":
@@ -1708,6 +1737,12 @@ class DownloaderApp(ctk.CTk):
 
                     should_edit = self.edit_after_download
                     self.edit_after_download = False
+                    if self.active_download_request_id:
+                        self.download_queue.complete(
+                            self.active_download_request_id,
+                            detail=completed_path.name,
+                        )
+                    self._refresh_capture_panel()
                     self._finish_job(job_id)
                     if should_edit:
                         self.after(200, lambda path=completed_path: self.open_editor(path))
@@ -1718,14 +1753,23 @@ class DownloaderApp(ctk.CTk):
                     self.speed_label.configure(text="")
                     self.edit_after_download = False
                     LOGGER.error("Job %s failed: %s", job_id, data)
+                    active_request = self.download_queue.active()
+                    is_capture_error = bool(active_request and active_request.source_type == "capture")
+                    if self.active_download_request_id:
+                        self.download_queue.fail(self.active_download_request_id, str(data or "Download failed"))
+                    self._refresh_capture_panel()
                     self._finish_job(job_id)
-                    messagebox.showerror(APP_NAME, str(data))
+                    if not is_capture_error:
+                        messagebox.showerror(APP_NAME, str(data))
 
                 elif kind == "cancelled":
                     self.task_state = TaskState.CANCELLED
                     self.edit_after_download = False
                     self.speed_label.configure(text="Cancelled")
                     self._set_status(str(data or "Task cancelled"), "cancelled")
+                    if self.active_download_request_id:
+                        self.download_queue.cancel(self.active_download_request_id)
+                    self._refresh_capture_panel()
                     self._finish_job(job_id)
 
                 elif kind in {"analysis_finished", "download_finished"}:
@@ -1735,13 +1779,7 @@ class DownloaderApp(ctk.CTk):
 
                 elif kind == "browser_capture":
                     self._sync_browser_capture_button()
-                    window = self.browser_capture_window
-                    if window is not None:
-                        try:
-                            if window.winfo_exists():
-                                window.refresh()
-                        except Exception:
-                            self.browser_capture_window = None
+                    self._refresh_capture_panel()
                     if not self.is_busy:
                         capture = dict(payload or {})
                         host = capture_host(capture) or "browser"
@@ -1873,6 +1911,9 @@ class DownloaderApp(ctk.CTk):
             self.open_history()
 
     def clear_form(self) -> None:
+        if self.is_busy:
+            self._set_status("Finish or cancel the active task before clearing the form.", "working")
+            return
         self._cancel_auto_analyze()
         self.last_analyzed_url = ""
         self.open_editor_after_var.set(bool(self.settings.get("open_editor_after_download", False)))
@@ -2229,8 +2270,10 @@ class DownloaderApp(ctk.CTk):
         self.browser_capture_button.configure(
             text=label,
             text_color=TEXT if running else WARNING,
-            border_color=BORDER if running else "#5B4616",
+            border_color=PURPLE if self.current_view == "capture" else (BORDER if running else "#5B4616"),
         )
+        self._sync_nav_buttons()
+        self._refresh_capture_panel()
 
     def _regenerate_browser_capture_token(self) -> str:
         token = generate_capture_token()
@@ -2241,76 +2284,202 @@ class DownloaderApp(ctk.CTk):
         LOGGER.info("Browser capture pairing token regenerated")
         return token
 
-    def open_browser_capture(self) -> None:
-        existing = self.browser_capture_window
-        if existing is not None:
-            try:
-                if existing.winfo_exists():
-                    existing.deiconify()
-                    existing.lift()
-                    existing.focus_force()
-                    existing.refresh()
-                    return
-            except Exception:
-                self.browser_capture_window = None
-
-        try:
-            self.browser_capture_window = BrowserCaptureWindow(
-                self,
-                store=self.capture_store,
-                bridge=self.capture_bridge,
-                token=str(self.settings.get("browser_capture_token") or ""),
-                extension_dir=self._browser_extension_dir(),
-                on_download=self.start_captured_download,
-                on_regenerate_token=self._regenerate_browser_capture_token,
-                on_open_release=self.open_release_page,
-                on_change=self._sync_browser_capture_button,
-            )
-            self.browser_capture_window.bind(
-                "<Destroy>",
-                lambda event: self._browser_capture_destroyed(event),
-                add="+",
-            )
-            self.browser_capture_window.focus()
-            LOGGER.info("Browser Capture window opened")
-        except Exception as exc:
-            LOGGER.exception("Could not open Browser Capture window")
-            self.browser_capture_window = None
-            messagebox.showerror(APP_NAME, f"Could not open Browser Capture.\n\n{exc}")
-
-    def _browser_capture_destroyed(self, event: Any) -> None:
-        window = self.browser_capture_window
-        if window is not None and event.widget is window:
-            self.browser_capture_window = None
-            LOGGER.info("Browser Capture window closed")
-
-    def start_captured_download(self, capture: dict[str, Any], edit_after_download: bool = False) -> None:
-        if self.is_busy:
-            messagebox.showinfo(
-                APP_NAME,
-                "Another task is already running. Finish or cancel it before downloading a captured stream.",
-                parent=self,
-            )
+    def _build_browser_capture_panel(self) -> None:
+        if self.browser_capture_panel is not None:
             return
+        self.browser_capture_panel = BrowserCapturePanel(
+            self,
+            store=self.capture_store,
+            get_bridge=lambda: self.capture_bridge,
+            get_pairing=self._browser_capture_pairing,
+            extension_dir=self._browser_extension_dir(),
+            on_download=self.start_captured_download,
+            on_cancel=self.cancel_capture_download,
+            on_remove=self._remove_browser_capture,
+            on_clear=self._clear_browser_captures,
+            get_job_state=self._capture_job_state,
+            get_queue_summary=self._queue_summary,
+            on_regenerate_token=self._regenerate_browser_capture_token,
+            on_open_release=self.open_release_page,
+        )
+        self.browser_capture_panel.grid(row=1, column=0, sticky="nsew")
+        self.browser_capture_panel.grid_remove()
+        self.browser_capture_panel.refresh()
 
-        item = dict(capture or {})
-        title = str(item.get("title") or "Captured media")
+    def _browser_capture_pairing(self) -> str:
+        bridge = self.capture_bridge
+        if bridge is None or not bridge.running:
+            return ""
+        token = str(self.settings.get("browser_capture_token") or "")
+        return f"{bridge.port}|{token}" if token else ""
+
+    def show_downloader_view(self) -> None:
+        self.current_view = "downloader"
+        if self.browser_capture_panel is not None:
+            self.browser_capture_panel.grid_remove()
+        self.content.grid()
+        self._sync_nav_buttons()
+        try:
+            self.url_entry.focus_set()
+        except Exception:
+            pass
+
+    def show_browser_capture_view(self) -> None:
+        self.current_view = "capture"
+        self.content.grid_remove()
+        if self.browser_capture_panel is not None:
+            self.browser_capture_panel.grid()
+            self.browser_capture_panel.refresh()
+        self._sync_nav_buttons()
+
+    def _sync_nav_buttons(self) -> None:
+        selected_bg = PURPLE
+        normal_bg = SURFACE_2
+        if hasattr(self, "downloader_nav_button"):
+            active = self.current_view == "downloader"
+            self.downloader_nav_button.configure(
+                fg_color=selected_bg if active else normal_bg,
+                border_color=PURPLE if active else BORDER,
+            )
+        if hasattr(self, "browser_capture_button"):
+            active = self.current_view == "capture"
+            self.browser_capture_button.configure(
+                fg_color=selected_bg if active else normal_bg,
+                border_color=PURPLE if active else BORDER,
+            )
+
+    def open_browser_capture(self) -> None:
+        self.show_browser_capture_view()
+
+    def _capture_job_state(self, capture_id: str) -> dict[str, Any] | None:
+        return self.download_queue.latest_for_capture(capture_id)
+
+    def _queue_summary(self) -> tuple[int, int]:
+        return self.download_queue.queued_count(), self.download_queue.running_count()
+
+    def _refresh_capture_panel(self) -> None:
+        panel = self.browser_capture_panel
+        if panel is None:
+            return
+        try:
+            if panel.winfo_exists():
+                panel.refresh()
+        except Exception:
+            LOGGER.exception("Could not refresh Browser Capture panel")
+
+    def _remove_browser_capture(self, capture_id: str) -> None:
+        state = self._capture_job_state(capture_id) or {}
+        if state.get("status") in {"queued", "running"}:
+            return
+        self.capture_store.remove(capture_id)
+        self._sync_browser_capture_button()
+        self._refresh_capture_panel()
+
+    def _clear_browser_captures(self) -> None:
+        active_capture_ids = {
+            str(item.get("capture_id") or "")
+            for item in self.download_queue.snapshot()
+            if item.get("status") in {"queued", "running"} and item.get("capture_id")
+        }
+        for item in self.capture_store.list():
+            capture_id = str(item.get("id") or "")
+            if capture_id and capture_id not in active_capture_ids:
+                self.capture_store.remove(capture_id)
+        self._sync_browser_capture_button()
+        self._refresh_capture_panel()
+
+    def cancel_capture_download(self, capture_id: str) -> None:
+        state = self._capture_job_state(capture_id) or {}
+        request_id = str(state.get("id") or "")
+        if not request_id:
+            return
+        if state.get("status") == "running" and request_id == self.active_download_request_id:
+            self.cancel_current_job()
+            return
+        if state.get("status") == "queued":
+            self.download_queue.cancel(request_id)
+            self._refresh_capture_panel()
+            self._set_status("Queued captured download cancelled", "cancelled")
+
+    def _start_next_queued_download(self) -> None:
+        if self.is_busy or self.active_job_id is not None:
+            return
+        request = self.download_queue.start_next()
+        if request is None:
+            self._refresh_capture_panel()
+            return
+        self.active_download_request_id = request.id
+        if request.source_type == "capture":
+            self._start_captured_request(request)
+        else:
+            self._start_link_request(request)
+        self._refresh_capture_panel()
+
+    def _start_link_request(self, request: DownloadRequest) -> None:
+        payload = dict(request.payload or {})
+        url = str(payload.get("url") or "")
+        name = str(payload.get("name") or "media_download")
+        download_dir = Path(str(payload.get("download_dir") or self.download_dir))
+        request_settings = dict(payload.get("request_settings") or {})
+        edit_after_download = bool(request.edit_after_download)
+        platform = detect_platform(url)
+
+        job_id, cancel_event = self._begin_job(TaskState.DOWNLOADING)
+        self.active_download_request_id = request.id
+        self.edit_after_download = edit_after_download
+        self.progress.set(0)
+        self.progress_label.configure(text="0%")
+        self.speed_label.configure(text="Preparing editor…" if edit_after_download else "Starting…")
+        self._set_status(
+            f"Downloading from {platform_name(platform)} for editing…" if edit_after_download
+            else f"Connecting to {platform_name(platform)}…",
+            "working",
+        )
+        self._set_busy(True)
+        threading.Thread(
+            target=self._download_worker,
+            args=(job_id, cancel_event, url, name, download_dir, request_settings),
+            daemon=True,
+            name=f"link-download-{job_id}",
+        ).start()
+
+    def _start_captured_request(self, request: DownloadRequest) -> None:
+        payload = dict(request.payload or {})
+        item = dict(payload.get("capture") or {})
+        title = str(payload.get("title") or item.get("title") or "Captured media")
         host = capture_host(item) or "media host"
 
         job_id, cancel_event = self._begin_job(TaskState.DOWNLOADING)
-        self.edit_after_download = bool(edit_after_download)
+        self.active_download_request_id = request.id
+        self.edit_after_download = bool(request.edit_after_download)
         self.progress.set(0)
         self.progress_label.configure(text="0%")
         self.speed_label.configure(text=f"{str(item.get('kind') or 'media').upper()} • {host}")
         self._set_status(f"Downloading captured media from {host}…", "working")
         self._set_busy(True)
-
         threading.Thread(
             target=self._captured_download_worker,
             args=(job_id, cancel_event, item, title),
             daemon=True,
             name=f"captured-download-{job_id}",
         ).start()
+
+    def start_captured_download(self, capture: dict[str, Any], edit_after_download: bool = False) -> None:
+        item = dict(capture or {})
+        capture_id = str(item.get("id") or "")
+        title = str(item.get("title") or "Captured media")
+        request = self.download_queue.enqueue(
+            "capture",
+            {"capture": item, "title": title},
+            edit_after_download=bool(edit_after_download),
+            capture_id=capture_id,
+        )
+        LOGGER.info("Queued captured download request=%s capture=%s", request.id, capture_id)
+        self._refresh_capture_panel()
+        if self.is_busy:
+            position = self.download_queue.position(request.id)
+            self._set_status(f"Captured video queued • position {position}", "ready")
+        self._start_next_queued_download()
 
     def _captured_download_worker(
         self,
