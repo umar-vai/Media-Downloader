@@ -124,6 +124,13 @@ async function storeCapture(item) {
   const filtered = captures.filter((entry) => !(entry.tab_id === item.tab_id && entry.url === item.url));
   filtered.unshift(item);
   await chrome.storage.session.set({captures: filtered.slice(0, MAX_CAPTURES)});
+
+  // The quality menu is intentionally cached, but any fresh network/DOM
+  // metadata can change resolution, bitrate, or deduplication. Invalidate the
+  // affected tab immediately so reopening the menu reflects the latest data.
+  for (const key of [...OVERLAY_OPTION_CACHE.keys()]) {
+    if (key.startsWith(`${item.tab_id}:`)) OVERLAY_OPTION_CACHE.delete(key);
+  }
 }
 
 async function extensionSettings() {
