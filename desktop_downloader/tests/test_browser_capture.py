@@ -74,6 +74,9 @@ class BrowserCaptureTests(unittest.TestCase):
                 "quality_status": "ready",
                 "quality_label": "1080p60",
                 "available_qualities": ["1080p", "720p", "360p"],
+                "total_bytes": 524288000,
+                "media_type": "video",
+                "itag": "137",
             }
         )
         self.assertEqual(item["frame_id"], 4)
@@ -81,6 +84,9 @@ class BrowserCaptureTests(unittest.TestCase):
         self.assertEqual(item["width"], 1920)
         self.assertEqual(item["quality_label"], "1080p60")
         self.assertEqual(item["available_qualities"], ["1080p", "720p", "360p"])
+        self.assertEqual(item["total_bytes"], 524288000)
+        self.assertEqual(item["media_type"], "video")
+        self.assertEqual(item["itag"], "137")
 
     def test_accepts_page_fallback_capture(self) -> None:
         item = sanitize_capture(
@@ -127,6 +133,34 @@ class BrowserCaptureTests(unittest.TestCase):
         )
         self.assertEqual(second["quality_label"], "Best 1080p")
         self.assertEqual(second["height"], 1080)
+
+    def test_store_preserves_direct_metadata_on_duplicate(self) -> None:
+        store = CaptureStore()
+        first = store.add(
+            {
+                "url": "https://cdn.example.com/videoplayback?itag=137",
+                "tab_id": 5,
+                "title": "Video",
+                "kind": "direct",
+                "height": 1080,
+                "media_type": "video",
+                "itag": "137",
+                "total_bytes": 1000000,
+            }
+        )
+        second = store.add(
+            {
+                "url": "https://cdn.example.com/videoplayback?itag=137",
+                "tab_id": 5,
+                "title": "Video",
+                "kind": "direct",
+            }
+        )
+        self.assertEqual(first["height"], 1080)
+        self.assertEqual(second["height"], 1080)
+        self.assertEqual(second["media_type"], "video")
+        self.assertEqual(second["itag"], "137")
+        self.assertEqual(second["total_bytes"], 1000000)
 
     def test_store_collapses_duplicate_tab_and_url(self) -> None:
         store = CaptureStore(limit=10)
