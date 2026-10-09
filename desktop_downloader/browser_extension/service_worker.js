@@ -184,9 +184,40 @@ function parsePositiveNumber(value) {
   return Number.isFinite(number) && number > 0 ? number : 0;
 }
 
+function parseContentRange(value) {
+  const match = String(value || "").match(/bytes\s+(\d+)-(\d+)\/(\d+|\*)/i);
+  if (!match) return {start: 0, end: 0, total: 0};
+  return {
+    start: parsePositiveNumber(match[1]),
+    end: parsePositiveNumber(match[2]),
+    total: match[3] === "*" ? 0 : parsePositiveNumber(match[3])
+  };
+}
+
 function parseContentRangeTotal(value) {
-  const match = String(value || "").match(/\/(\d+)\s*$/);
-  return match ? parsePositiveNumber(match[1]) : 0;
+  return parseContentRange(value).total;
+}
+
+const DIRECT_VOLATILE_QUERY_KEYS = new Set([
+  "range", "ranges", "start", "end", "offset", "byte", "bytes",
+  "chunk", "chunk_id", "chunkid", "part", "part_id", "partid",
+  "segment", "segment_id", "segmentid", "frag", "fragment",
+  "sq", "rn", "rbuf", "cpn", "cver", "ump", "umpid"
+]);
+
+function normalizedDirectBaseUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (DIRECT_VOLATILE_QUERY_KEYS.has(String(key).toLowerCase())) {
+        parsed.searchParams.delete(key);
+      }
+    }
+    parsed.hash = "";
+    return parsed.href;
+  } catch (_) {
+    return String(url || "");
+  }
 }
 
 function decodeMime(value) {
@@ -202,6 +233,9 @@ function inferDirectMetadata(capture) {
     fps: parsePositiveNumber(capture.fps),
     bitrate: parsePositiveNumber(capture.tbr),
     totalBytes: parsePositiveNumber(capture.total_bytes),
+    responseBytes: parsePositiveNumber(capture.response_bytes),
+    rangeTotalBytes: parsePositiveNumber(capture.range_total_bytes),
+    partialResponse: Boolean(capture.partial_response),
     durationSeconds: parsePositiveNumber(capture.duration_seconds),
     itag: String(capture.itag || "")
   };
@@ -267,6 +301,14 @@ function inferDirectMetadata(capture) {
     }
   } catch (_) {}
 
+  if (result.partialResponse && result.rangeTotalBytes) {
+    result.totalBytes = result.rangeTotalBytes;
+  } else if (result.partialResponse && !result.rangeTotalBytes) {
+    // Content-Length on a 206/range response is just this chunk, not the
+    // actual video size. Do not display it as the file size.
+    result.totalBytes = 0;
+  }
+
   if (!result.bitrate && result.totalBytes && result.durationSeconds) {
     result.bitrate = (result.totalBytes * 8) / result.durationSeconds / 1000;
   }
@@ -283,10 +325,9 @@ function canonicalDirectKey(capture) {
       meta.itag || "",
       meta.height || 0,
       String(parsed.searchParams.get("mime") || ""),
-      String(parsed.searchParams.get("quality") || parsed.searchParams.get("quality_label") || ""),
-      meta.itag || meta.height ? "" : Math.round(meta.totalBytes || 0)
+      String(parsed.searchParams.get("quality") || parsed.searchParams.get("quality_label") || "")
     ].join("|");
-    return `${parsed.origin}${parsed.pathname}|${variant}`;
+    return `${normalizedDirectBaseUrl(capture.url)}|${variant}`;
   } catch (_) {
     return String(capture.url || "");
   }
@@ -314,6 +355,9 @@ function enrichDirectCapture(capture) {
     fps: meta.fps,
     tbr: meta.bitrate,
     total_bytes: meta.totalBytes,
+    response_bytes: meta.responseBytes,
+    range_total_bytes: meta.rangeTotalBytes,
+    partial_response: meta.partialResponse,
     duration_seconds: meta.durationSeconds,
     itag: meta.itag,
     quality_status: meta.height ? "ready" : String(capture.quality_status || "unknown"),
@@ -491,6 +535,43 @@ function compareOptions(a, b) {
   return 0;
 }
 
+function activePlaybackMetadata(tabId, frameId, pageUrl) {
+  const playback = PLAYBACK_STATE.get(tabId);
+  if (!playback) return null;
+  const recent = (Date.now() - Number(playback.lastPlayAt || playback.lastHlsAt || 0)) < 2 * 60 * 1000;
+  if (!recent) return null;
+  if (Number.isInteger(playback.frameId) && Number(playback.frameId) !== Number(frameId)) return null;
+  if (playback.pageUrl && pageUrl && String(playback.pageUrl) !== String(pageUrl)) return null;
+  return playback;
+}
+
+function applyPlaybackMetadata(capture, playback) {
+  if (!playback || String(capture.kind || "").toLowerCase() !== "direct") return capture;
+  const meta = inferDirectMetadata(capture);
+  if (meta.height || !parsePositiveNumber(playback.height)) return capture;
+  return {
+    ...capture,
+    width: parsePositiveNumber(playback.width),
+    height: parsePositiveNumber(playback.height),
+    duration_seconds: parsePositiveNumber(capture.duration_seconds) || parsePositiveNumber(playback.durationSeconds),
+    media_type: capture.media_type || "video",
+    quality_status: "ready",
+    quality_label: `${parsePositiveNumber(playback.height)}p`
+  };
+}
+
+function isUselessPartialChunk(capture) {
+  const meta = inferDirectMetadata(capture);
+  return Boolean(
+    meta.partialResponse &&
+    !meta.rangeTotalBytes &&
+    !meta.height &&
+    !meta.itag &&
+    meta.responseBytes > 0 &&
+    meta.responseBytes < 2 * 1024 * 1024
+  );
+}
+
 async function capturedCandidatesForOverlay(tabId, frameId, pageUrl) {
   const state = await chrome.storage.session.get({captures: []});
   const captures = Array.isArray(state.captures) ? state.captures : [];
@@ -514,9 +595,11 @@ async function capturedCandidatesForOverlay(tabId, frameId, pageUrl) {
 
 async function buildOverlayOptions(tabId, frameId, pageUrl) {
   const candidates = await capturedCandidatesForOverlay(tabId, frameId, pageUrl);
+  const playback = activePlaybackMetadata(tabId, frameId, pageUrl);
   const resolved = [];
   const seen = new Set();
   const directGroups = new Map();
+  let suppressedPartialChunks = 0;
 
   for (const capture of candidates) {
     const kind = String(capture.kind || "").toLowerCase();
@@ -537,8 +620,24 @@ async function buildOverlayOptions(tabId, frameId, pageUrl) {
     }
 
     if (kind === "direct") {
-      const enriched = enrichDirectCapture(capture);
-      const key = canonicalDirectKey(enriched);
+      let candidate = applyPlaybackMetadata(capture, playback);
+      const enriched = enrichDirectCapture(candidate);
+      if (isUselessPartialChunk(enriched) && !playback) {
+        suppressedPartialChunks += 1;
+        continue;
+      }
+
+      let key = canonicalDirectKey(enriched);
+      if (
+        playback &&
+        !Number(enriched.height || 0) &&
+        Boolean(enriched.partial_response) &&
+        !Number(enriched.range_total_bytes || 0)
+      ) {
+        // Unknown byte-range chunks from the same active player are not
+        // separate qualities. Collapse them to one current-playback stream.
+        key = `playback:${tabId}:${frameId}:${String(enriched.media_type || "video")}`;
+      }
       const previous = directGroups.get(key);
       if (!previous || directCaptureScore(enriched) > directCaptureScore(previous)) {
         directGroups.set(key, enriched);
@@ -560,13 +659,25 @@ async function buildOverlayOptions(tabId, frameId, pageUrl) {
   }
 
   const videoOptions = resolved.filter((item) => item.mediaType !== "audio");
-  const displayResolved = videoOptions.length ? videoOptions : resolved;
+  let displayResolved = videoOptions.length ? videoOptions : resolved;
+
+  // If all we saw were many tiny anonymous 206/range chunks, do not spam the
+  // quality menu with fake "Video 0.0 MB" entries. Prefer one representative
+  // current playback item when available.
+  if (displayResolved.length > 1) {
+    const known = displayResolved.filter((item) => Number(item.height || 0) > 0 || item.capture.kind !== "direct");
+    const unknownDirect = displayResolved.filter((item) => Number(item.height || 0) <= 0 && item.capture.kind === "direct");
+    if (known.length && unknownDirect.length) {
+      displayResolved = known;
+    } else if (!known.length && unknownDirect.length > 1) {
+      displayResolved = [unknownDirect.sort(compareOptions)[0]];
+    }
+  }
   displayResolved.sort(compareOptions);
   const available = [...new Set(displayResolved.map((item) => Number(item.height || 0)).filter(Boolean))]
     .sort((a, b) => b - a)
     .map((height) => `${height}p`);
 
-  const playback = PLAYBACK_STATE.get(tabId);
   const batchId = (
     playback &&
     playback.sessionId &&
@@ -883,6 +994,11 @@ async function markPlaybackStarted(message, sender) {
       };
 
   playback.mediaUrl = mediaUrl || playback.mediaUrl || "";
+  playback.frameId = Number(sender && Number.isInteger(sender.frameId) ? sender.frameId : 0);
+  playback.width = parsePositiveNumber(message.width) || parsePositiveNumber(playback.width);
+  playback.height = parsePositiveNumber(message.height) || parsePositiveNumber(playback.height);
+  playback.durationSeconds = parsePositiveNumber(message.durationSeconds) || parsePositiveNumber(playback.durationSeconds);
+  playback.mediaType = String(message.mediaType || playback.mediaType || "");
   playback.lastPlayAt = now;
   playback.passiveHls = false;
   playback.retryCount = 0;
@@ -906,12 +1022,17 @@ async function saveCapture(details, kind, contentType) {
   } catch (_) {}
 
   const contentLength = parsePositiveNumber(headerValue(details.responseHeaders, "content-length"));
-  const contentRangeTotal = parseContentRangeTotal(headerValue(details.responseHeaders, "content-range"));
+  const contentRangeHeader = headerValue(details.responseHeaders, "content-range");
+  const contentRange = parseContentRange(contentRangeHeader);
+  const partialResponse = Number(details.statusCode || 0) === 206 || Boolean(contentRangeHeader);
   const directMeta = kind === "direct"
     ? inferDirectMetadata({
         url: details.url,
         content_type: contentType || "",
-        total_bytes: contentRangeTotal || contentLength
+        total_bytes: partialResponse ? contentRange.total : contentLength,
+        response_bytes: contentLength,
+        range_total_bytes: contentRange.total,
+        partial_response: partialResponse
       })
     : null;
 
@@ -926,7 +1047,13 @@ async function saveCapture(details, kind, contentType) {
     content_type: contentType || "",
     headers: capturedHeaders,
     frame_id: Number(details.frameId ?? -1),
-    total_bytes: contentRangeTotal || contentLength || 0,
+    total_bytes: directMeta ? directMeta.totalBytes : 0,
+    response_bytes: contentLength || 0,
+    range_total_bytes: contentRange.total || 0,
+    partial_response: partialResponse,
+    range_start: contentRange.start || 0,
+    range_end: contentRange.end || 0,
+    status_code: Number(details.statusCode || 0),
     media_type: directMeta ? directMeta.mediaType : "",
     height: directMeta ? directMeta.height : 0,
     fps: directMeta ? directMeta.fps : 0,
