@@ -3,7 +3,21 @@
   let fallbackSent = false;
   const overlayByMedia = new WeakMap();
   const overlayHosts = new Set();
+  const mediaState = new WeakMap();
   let overlayScanTimer = null;
+
+  function stateForMedia(media) {
+    let state = mediaState.get(media);
+    if (!state) {
+      state = {
+        key: crypto.randomUUID(),
+        startedAt: 0,
+        lastPlayAt: 0
+      };
+      mediaState.set(media, state);
+    }
+    return state;
+  }
 
   function isHttp(url) {
     return /^https?:\/\//i.test(String(url || ""));
@@ -100,6 +114,13 @@
     const current = target.currentSrc || target.src || "";
 
     const metadata = mediaMetadata(target);
+    const playerState = stateForMedia(target);
+    const now = Date.now();
+    if (!playerState.startedAt || (now - playerState.lastPlayAt) > 15000) {
+      playerState.startedAt = now;
+    }
+    playerState.lastPlayAt = now;
+
     chrome.runtime.sendMessage({
       type: "media-play-started",
       pageUrl: location.href,
@@ -107,7 +128,9 @@
       mediaType: target.tagName.toLowerCase(),
       width: metadata.width || 0,
       height: metadata.height || 0,
-      durationSeconds: metadata.durationSeconds || 0
+      durationSeconds: metadata.durationSeconds || 0,
+      mediaKey: playerState.key,
+      playbackStartedAt: playerState.startedAt
     }).catch(() => {});
 
     if (isHttp(current)) {
@@ -220,9 +243,17 @@
       status("Detecting available streams…");
       let response;
       try {
+        const metadata = mediaMetadata(media);
+        const playerState = stateForMedia(media);
         response = await chrome.runtime.sendMessage({
           type: "overlay-get-options",
-          pageUrl: location.href
+          pageUrl: location.href,
+          mediaKey: playerState.key,
+          mediaUrl: media.currentSrc || media.src || "",
+          width: metadata.width || 0,
+          height: metadata.height || 0,
+          durationSeconds: metadata.durationSeconds || 0,
+          playbackStartedAt: playerState.startedAt || 0
         });
       } catch (_) {
         status("Extension service is unavailable. Reload the extension.", "error");
@@ -270,9 +301,17 @@
           event.stopPropagation();
           status(`Sending ${option.label || "video"} to Media Downloader…`);
           try {
+            const metadata = mediaMetadata(media);
+            const playerState = stateForMedia(media);
             const result = await chrome.runtime.sendMessage({
               type: "overlay-download-option",
               pageUrl: location.href,
+              mediaKey: playerState.key,
+              mediaUrl: media.currentSrc || media.src || "",
+              width: metadata.width || 0,
+              height: metadata.height || 0,
+              durationSeconds: metadata.durationSeconds || 0,
+              playbackStartedAt: playerState.startedAt || 0,
               optionId: option.id
             });
             if (result && result.ok) {
