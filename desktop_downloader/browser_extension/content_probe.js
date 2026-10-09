@@ -3,7 +3,22 @@
   let fallbackSent = false;
   const overlayByMedia = new WeakMap();
   const overlayHosts = new Set();
+  const mediaState = new WeakMap();
   let overlayScanTimer = null;
+
+  function stateForMedia(media) {
+    let state = mediaState.get(media);
+    if (!state) {
+      const activeNow = media instanceof HTMLMediaElement && !media.paused && media.readyState >= 2;
+      state = {
+        key: crypto.randomUUID(),
+        startedAt: activeNow ? Date.now() - 3000 : 0,
+        lastPlayAt: activeNow ? Date.now() : 0
+      };
+      mediaState.set(media, state);
+    }
+    return state;
+  }
 
   function isHttp(url) {
     return /^https?:\/\//i.test(String(url || ""));
@@ -100,6 +115,13 @@
     const current = target.currentSrc || target.src || "";
 
     const metadata = mediaMetadata(target);
+    const playerState = stateForMedia(target);
+    const now = Date.now();
+    if (!playerState.startedAt || (now - playerState.lastPlayAt) > 15000) {
+      playerState.startedAt = now;
+    }
+    playerState.lastPlayAt = now;
+
     chrome.runtime.sendMessage({
       type: "media-play-started",
       pageUrl: location.href,
@@ -107,7 +129,9 @@
       mediaType: target.tagName.toLowerCase(),
       width: metadata.width || 0,
       height: metadata.height || 0,
-      durationSeconds: metadata.durationSeconds || 0
+      durationSeconds: metadata.durationSeconds || 0,
+      mediaKey: playerState.key,
+      playbackStartedAt: playerState.startedAt
     }).catch(() => {});
 
     if (isHttp(current)) {
@@ -128,6 +152,29 @@
     }
   }, true);
 
+
+  function mediaPageUrl(media) {
+    const selectors = [
+      'a[href*="/reel/"]',
+      'a[href*="/reels/"]',
+      'a[href*="/p/"]',
+      'a[href*="/tv/"]',
+      'a[href*="/video/"]',
+      'a[href*="/videos/"]',
+      'a[href*="/watch/"]'
+    ];
+    let node = media;
+    for (let depth = 0; depth < 8 && node; depth += 1) {
+      if (node.querySelector) {
+        for (const selector of selectors) {
+          const anchor = node.querySelector(selector);
+          if (anchor && anchor.href && isHttp(anchor.href)) return anchor.href;
+        }
+      }
+      node = node.parentElement;
+    }
+    return "";
+  }
 
   function isVisibleMedia(media) {
     if (!(media instanceof HTMLMediaElement)) return false;
@@ -198,7 +245,7 @@
       <div class="wrap">
         <button class="trigger" type="button">Download video ▾</button>
         <div class="menu">
-          <div class="head">Available video qualities</div>
+          <div class="head">Click a quality to download</div>
           <div class="body"><div class="status">Play the video, then choose a quality.</div></div>
         </div>
       </div>
@@ -220,9 +267,18 @@
       status("Detecting available streams…");
       let response;
       try {
+        const metadata = mediaMetadata(media);
+        const playerState = stateForMedia(media);
         response = await chrome.runtime.sendMessage({
           type: "overlay-get-options",
-          pageUrl: location.href
+          pageUrl: location.href,
+          mediaKey: playerState.key,
+          mediaUrl: media.currentSrc || media.src || "",
+          width: metadata.width || 0,
+          height: metadata.height || 0,
+          durationSeconds: metadata.durationSeconds || 0,
+          playbackStartedAt: playerState.startedAt || 0,
+          mediaPageUrl: mediaPageUrl(media)
         });
       } catch (_) {
         status("Extension service is unavailable. Reload the extension.", "error");
@@ -270,9 +326,18 @@
           event.stopPropagation();
           status(`Sending ${option.label || "video"} to Media Downloader…`);
           try {
+            const metadata = mediaMetadata(media);
+            const playerState = stateForMedia(media);
             const result = await chrome.runtime.sendMessage({
               type: "overlay-download-option",
               pageUrl: location.href,
+              mediaKey: playerState.key,
+              mediaUrl: media.currentSrc || media.src || "",
+              width: metadata.width || 0,
+              height: metadata.height || 0,
+              durationSeconds: metadata.durationSeconds || 0,
+              playbackStartedAt: playerState.startedAt || 0,
+              mediaPageUrl: mediaPageUrl(media),
               optionId: option.id
             });
             if (result && result.ok) {
