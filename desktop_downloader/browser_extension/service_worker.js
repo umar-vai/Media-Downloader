@@ -261,12 +261,20 @@ async function markPlaybackStarted(message, sender) {
   }
 
   const pageUrl = String((tab && tab.url) || message.pageUrl || "");
+  const mediaUrl = String(message.mediaUrl || "");
   const now = Date.now();
   const existing = PLAYBACK_STATE.get(tabId);
+  const sameMedia = Boolean(
+    !mediaUrl ||
+    !existing ||
+    !existing.mediaUrl ||
+    existing.mediaUrl === mediaUrl
+  );
   const samePlayback = Boolean(
     existing &&
     existing.pageUrl === pageUrl &&
-    (now - Number(existing.lastPlayAt || 0)) < 10 * 60 * 1000
+    sameMedia &&
+    (now - Number(existing.lastPlayAt || 0)) < 2 * 60 * 1000
   );
 
   const playback = samePlayback
@@ -274,12 +282,14 @@ async function markPlaybackStarted(message, sender) {
     : {
         sessionId: crypto.randomUUID(),
         pageUrl,
+        mediaUrl,
         startedAt: now,
         lastSentFingerprint: "",
         lastSentAt: 0,
         retryCount: 0
       };
 
+  playback.mediaUrl = mediaUrl || playback.mediaUrl || "";
   playback.lastPlayAt = now;
   playback.retryCount = 0;
   PLAYBACK_STATE.set(tabId, playback);
