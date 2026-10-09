@@ -8,6 +8,9 @@ const capturesRoot = document.getElementById("captures");
 const countLabel = document.getElementById("count");
 const autoSendBestHls = document.getElementById("autoSendBestHls");
 const autoSendText = document.getElementById("autoSendText");
+const EXTENSION_VERSION = chrome.runtime.getManifest().version;
+const extensionVersionLabel = document.getElementById("extensionVersion");
+if (extensionVersionLabel) extensionVersionLabel.textContent = `v${EXTENSION_VERSION}`;
 
 async function settings() {
   return chrome.storage.local.get({
@@ -74,12 +77,12 @@ async function testConnection(showText = true) {
     if (!response.ok || !data.ok) throw new Error("Offline");
     statusBadge.textContent = "Connected";
     statusBadge.classList.add("ok");
-    if (showText) connectionText.textContent = `Desktop app on port ${cfg.port}`;
+    if (showText) connectionText.textContent = `Extension v${EXTENSION_VERSION} • Desktop app on port ${cfg.port}`;
     return true;
   } catch (_) {
     statusBadge.textContent = "Offline";
     statusBadge.classList.remove("ok");
-    if (showText) connectionText.textContent = "Open Media Downloader and check the pairing code.";
+    if (showText) connectionText.textContent = `Extension v${EXTENSION_VERSION} • Open Media Downloader and check the pairing code.`;
     return false;
   }
 }

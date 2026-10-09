@@ -185,6 +185,44 @@ function clearAutoSendTimer(tabId) {
   AUTO_SEND_TIMERS.delete(tabId);
 }
 
+async function ensurePassiveHlsPlayback(tabId, item) {
+  if (typeof tabId !== "number" || tabId < 0) return null;
+
+  const pageUrl = String(item && item.page_url ? item.page_url : "");
+  const now = Date.now();
+  const existing = PLAYBACK_STATE.get(tabId);
+
+  // Some players (especially iframe/MSE players) never bubble an HTMLMediaElement
+  // play event to our content script. Treat a fresh HLS manifest request itself
+  // as sufficient evidence of active playback so auto-send still works.
+  const recentHlsBurst = Boolean(
+    existing &&
+    existing.pageUrl === pageUrl &&
+    (now - Number(existing.lastHlsAt || existing.lastPlayAt || 0)) < 8000
+  );
+  if (recentHlsBurst) {
+    existing.lastPlayAt = now;
+    existing.lastHlsAt = now;
+    PLAYBACK_STATE.set(tabId, existing);
+    return existing;
+  }
+
+  const playback = {
+    sessionId: crypto.randomUUID(),
+    pageUrl,
+    mediaUrl: "",
+    startedAt: now,
+    lastPlayAt: now,
+    lastHlsAt: now,
+    lastSentFingerprint: "",
+    lastSentAt: 0,
+    retryCount: 0,
+    passiveHls: true
+  };
+  PLAYBACK_STATE.set(tabId, playback);
+  return playback;
+}
+
 function scheduleBestHlsAutoSend(tabId, delay = AUTO_SEND_DEBOUNCE_MS) {
   const playback = PLAYBACK_STATE.get(tabId);
   if (!playback) return;
@@ -296,6 +334,7 @@ async function markPlaybackStarted(message, sender) {
 
   playback.mediaUrl = mediaUrl || playback.mediaUrl || "";
   playback.lastPlayAt = now;
+  playback.passiveHls = false;
   playback.retryCount = 0;
   PLAYBACK_STATE.set(tabId, playback);
 
@@ -328,7 +367,8 @@ async function saveCapture(details, kind, contentType) {
     headers: capturedHeaders
   };
   await storeCapture(item);
-  if (kind === "hls" && PLAYBACK_STATE.has(details.tabId)) {
+  if (kind === "hls") {
+    await ensurePassiveHlsPlayback(details.tabId, item);
     scheduleBestHlsAutoSend(details.tabId);
   }
 }
@@ -360,7 +400,8 @@ async function saveProbeCandidate(message, sender) {
     headers: {}
   };
   await storeCapture(item);
-  if (kind === "hls" && PLAYBACK_STATE.has(tabId)) {
+  if (kind === "hls") {
+    await ensurePassiveHlsPlayback(tabId, item);
     scheduleBestHlsAutoSend(tabId);
   }
 }
