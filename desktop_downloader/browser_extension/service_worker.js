@@ -197,17 +197,24 @@ function safeManifestHeaders(capture) {
 }
 
 async function fetchManifestText(capture) {
-  const response = await fetch(String(capture.url || ""), {
-    method: "GET",
-    headers: safeManifestHeaders(capture),
-    credentials: "include",
-    cache: "no-store",
-    redirect: "follow"
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const text = await response.text();
-  if (!text.includes("#EXTM3U")) throw new Error("Not an HLS manifest");
-  return text;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4500);
+  try {
+    const response = await fetch(String(capture.url || ""), {
+      method: "GET",
+      headers: safeManifestHeaders(capture),
+      credentials: "include",
+      cache: "no-store",
+      redirect: "follow",
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const text = await response.text();
+    if (!text.includes("#EXTM3U")) throw new Error("Not an HLS manifest");
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function hlsVariantsFromText(text, capture) {
