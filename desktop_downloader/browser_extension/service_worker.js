@@ -5,6 +5,12 @@ const IGNORE_AS_FINAL = [
   ".css", ".js", ".woff", ".woff2"
 ];
 const SEGMENT_EXTENSIONS = [".ts", ".m4s", ".cmfv", ".cmfa"];
+const PLAYBACK_STATE = new Map();
+const AUTO_SEND_TIMERS = new Map();
+const AUTO_SEND_DEBOUNCE_MS = 1200;
+const AUTO_SEND_RETRY_MS = 2500;
+const AUTO_SEND_MAX_RETRIES = 3;
+const PLAYBACK_CAPTURE_LOOKBACK_SECONDS = 15;
 
 function headerValue(headers, name) {
   const lower = name.toLowerCase();
@@ -110,6 +116,196 @@ async function storeCapture(item) {
   await chrome.storage.session.set({captures: filtered.slice(0, MAX_CAPTURES)});
 }
 
+async function extensionSettings() {
+  return chrome.storage.local.get({
+    port: 38471,
+    token: "",
+    autoSendBestHls: true
+  });
+}
+
+function captureFingerprint(items) {
+  return items
+    .map((item) => String(item.url || ""))
+    .filter(Boolean)
+    .sort()
+    .join("\n");
+}
+
+async function postCaptureToDesktop(item, cfg) {
+  const response = await fetch(`http://127.0.0.1:${cfg.port}/capture`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Media-Downloader-Token": cfg.token
+    },
+    body: JSON.stringify(item)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.ok) {
+    throw new Error(data.error || "Could not send capture to Media Downloader.");
+  }
+  return data;
+}
+
+async function hlsCandidatesForPlayback(tabId, playback) {
+  const state = await chrome.storage.session.get({captures: []});
+  const captures = Array.isArray(state.captures) ? state.captures : [];
+  const started = playback.startedAt / 1000;
+  const tightCutoff = started - 4;
+  const wideCutoff = started - PLAYBACK_CAPTURE_LOOKBACK_SECONDS;
+
+  const eligible = captures.filter((item) => {
+    return item.tab_id === tabId &&
+      item.kind === "hls" &&
+      Number(item.captured_at || 0) >= wideCutoff &&
+      String(item.url || "").startsWith("http");
+  });
+
+  let candidates = eligible.filter((item) => Number(item.captured_at || 0) >= tightCutoff);
+  if (!candidates.length) candidates = eligible;
+
+  const samePage = candidates.filter((item) => String(item.page_url || "") === playback.pageUrl);
+  if (samePage.length) candidates = samePage;
+
+  const seen = new Set();
+  const unique = [];
+  for (const item of candidates) {
+    const url = String(item.url || "");
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    unique.push(item);
+  }
+  return unique.slice(0, 16);
+}
+
+function clearAutoSendTimer(tabId) {
+  const timer = AUTO_SEND_TIMERS.get(tabId);
+  if (timer) clearTimeout(timer);
+  AUTO_SEND_TIMERS.delete(tabId);
+}
+
+function scheduleBestHlsAutoSend(tabId, delay = AUTO_SEND_DEBOUNCE_MS) {
+  const playback = PLAYBACK_STATE.get(tabId);
+  if (!playback) return;
+  clearAutoSendTimer(tabId);
+  const timer = setTimeout(() => {
+    AUTO_SEND_TIMERS.delete(tabId);
+    autoSendBestHls(tabId).catch(() => {});
+  }, Math.max(250, Number(delay) || AUTO_SEND_DEBOUNCE_MS));
+  AUTO_SEND_TIMERS.set(tabId, timer);
+}
+
+async function autoSendBestHls(tabId) {
+  const playback = PLAYBACK_STATE.get(tabId);
+  if (!playback) return;
+
+  const cfg = await extensionSettings();
+  if (!cfg.autoSendBestHls || !cfg.token) return;
+
+  const candidates = await hlsCandidatesForPlayback(tabId, playback);
+  if (!candidates.length) {
+    if (playback.retryCount < AUTO_SEND_MAX_RETRIES) {
+      playback.retryCount += 1;
+      PLAYBACK_STATE.set(tabId, playback);
+      scheduleBestHlsAutoSend(tabId, AUTO_SEND_RETRY_MS);
+    }
+    return;
+  }
+
+  const fingerprint = captureFingerprint(candidates);
+  if (fingerprint && fingerprint === playback.lastSentFingerprint) return;
+
+  try {
+    for (const candidate of candidates) {
+      await postCaptureToDesktop(
+        {
+          ...candidate,
+          capture_group_id: playback.sessionId
+        },
+        cfg
+      );
+    }
+
+    playback.lastSentFingerprint = fingerprint;
+    playback.retryCount = 0;
+    playback.lastSentAt = Date.now();
+    PLAYBACK_STATE.set(tabId, playback);
+    await chrome.storage.local.set({
+      lastAutoSendStatus: {
+        ok: true,
+        tabId,
+        count: candidates.length,
+        at: Date.now()
+      }
+    });
+  } catch (error) {
+    await chrome.storage.local.set({
+      lastAutoSendStatus: {
+        ok: false,
+        tabId,
+        message: String(error && error.message ? error.message : "Auto-send failed"),
+        at: Date.now()
+      }
+    });
+    if (playback.retryCount < AUTO_SEND_MAX_RETRIES) {
+      playback.retryCount += 1;
+      PLAYBACK_STATE.set(tabId, playback);
+      scheduleBestHlsAutoSend(tabId, AUTO_SEND_RETRY_MS);
+    }
+  }
+}
+
+async function markPlaybackStarted(message, sender) {
+  const tabId = sender && sender.tab ? sender.tab.id : -1;
+  if (typeof tabId !== "number" || tabId < 0) return;
+
+  let tab = sender.tab || null;
+  if (!tab || !tab.url) {
+    try { tab = await chrome.tabs.get(tabId); } catch (_) {}
+  }
+
+  const pageUrl = String((tab && tab.url) || message.pageUrl || "");
+  const mediaUrl = String(message.mediaUrl || "");
+  const now = Date.now();
+  const existing = PLAYBACK_STATE.get(tabId);
+  const sameMedia = Boolean(
+    !mediaUrl ||
+    !existing ||
+    !existing.mediaUrl ||
+    existing.mediaUrl === mediaUrl
+  );
+  const samePlayback = Boolean(
+    existing &&
+    existing.pageUrl === pageUrl &&
+    sameMedia &&
+    (now - Number(existing.lastPlayAt || 0)) < 2 * 60 * 1000
+  );
+
+  const playback = samePlayback
+    ? existing
+    : {
+        sessionId: crypto.randomUUID(),
+        pageUrl,
+        mediaUrl,
+        startedAt: now,
+        lastSentFingerprint: "",
+        lastSentAt: 0,
+        retryCount: 0
+      };
+
+  playback.mediaUrl = mediaUrl || playback.mediaUrl || "";
+  playback.lastPlayAt = now;
+  playback.retryCount = 0;
+  PLAYBACK_STATE.set(tabId, playback);
+
+  // The HLS manifest is often requested before the actual play event.
+  // Give webRequest/performance probes a short moment to settle, then send
+  // all current HLS candidates under one batch ID. The desktop app resolves
+  // the best available quality and keeps lower variants as fallbacks.
+  scheduleBestHlsAutoSend(tabId, 700);
+}
+
 async function saveCapture(details, kind, contentType) {
   if (details.tabId < 0 || !String(details.url || "").startsWith("http")) return;
 
@@ -132,6 +328,9 @@ async function saveCapture(details, kind, contentType) {
     headers: capturedHeaders
   };
   await storeCapture(item);
+  if (kind === "hls" && PLAYBACK_STATE.has(details.tabId)) {
+    scheduleBestHlsAutoSend(details.tabId);
+  }
 }
 
 async function saveProbeCandidate(message, sender) {
@@ -161,6 +360,9 @@ async function saveProbeCandidate(message, sender) {
     headers: {}
   };
   await storeCapture(item);
+  if (kind === "hls" && PLAYBACK_STATE.has(tabId)) {
+    scheduleBestHlsAutoSend(tabId);
+  }
 }
 
 async function savePageFallback(message, sender) {
@@ -226,10 +428,20 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     saveProbeCandidate(message, sender).catch(() => {});
   } else if (message.type === "media-page-fallback") {
     savePageFallback(message, sender).catch(() => {});
+  } else if (message.type === "media-play-started") {
+    markPlaybackStarted(message, sender).catch(() => {});
   }
 });
 
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (!changeInfo.url) return;
+  PLAYBACK_STATE.delete(tabId);
+  clearAutoSendTimer(tabId);
+});
+
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  PLAYBACK_STATE.delete(tabId);
+  clearAutoSendTimer(tabId);
   const state = await chrome.storage.session.get({captures: []});
   const captures = Array.isArray(state.captures) ? state.captures : [];
   const filtered = captures.filter((entry) => entry.tab_id !== tabId);
