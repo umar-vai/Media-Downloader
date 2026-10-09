@@ -1808,10 +1808,20 @@ class DownloaderApp(ctk.CTk):
 
                 elif kind == "browser_capture":
                     capture = dict(payload or {})
+                    browser_action = str(capture.pop("_browser_action", "") or "")
                     self._sync_browser_capture_button()
                     self._start_capture_quality_probe(capture)
                     self._schedule_capture_panel_refresh(80)
-                    if not self.is_busy:
+
+                    if browser_action == "download":
+                        host = capture_host(capture) or "browser"
+                        self.show_browser_capture_view()
+                        self.start_captured_download(capture)
+                        self._set_status(
+                            f"Browser download queued • {str(capture.get('quality_label') or capture.get('kind') or 'media')} • {host}",
+                            "working" if self.is_busy else "ready",
+                        )
+                    elif not self.is_busy:
                         host = capture_host(capture) or "browser"
                         self._set_status(
                             f"Browser media captured • {str(capture.get('kind') or 'media').upper()} • {host}",
