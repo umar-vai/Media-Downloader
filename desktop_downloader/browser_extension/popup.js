@@ -9,6 +9,8 @@ const countLabel = document.getElementById("count");
 const autoSendBestHls = document.getElementById("autoSendBestHls");
 const autoSendText = document.getElementById("autoSendText");
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
+const extensionVersionLabel = document.getElementById("extensionVersion");
+if (extensionVersionLabel) extensionVersionLabel.textContent = `v${EXTENSION_VERSION}`;
 
 async function settings() {
   return chrome.storage.local.get({
