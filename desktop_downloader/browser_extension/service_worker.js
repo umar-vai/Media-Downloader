@@ -223,6 +223,8 @@ function parseContentRangeTotal(value) {
 
 const DIRECT_VOLATILE_QUERY_KEYS = new Set([
   "range", "ranges", "start", "end", "offset", "byte", "bytes",
+  "bytestart", "byteend", "byte_start", "byte_end", "range_start", "range_end",
+  "start_offset", "end_offset",
   "chunk", "chunk_id", "chunkid", "part", "part_id", "partid",
   "segment", "segment_id", "segmentid", "frag", "fragment",
   "sq", "rn", "rbuf", "cpn", "cver", "ump", "umpid"
@@ -824,6 +826,15 @@ async function getOverlayOptions(message, sender) {
   };
 }
 
+function isSpecificMediaPageUrl(url) {
+  try {
+    const path = new URL(String(url || "")).pathname.toLowerCase();
+    return /\/(reel|reels|p|tv|video|videos|watch)\//.test(path);
+  } catch (_) {
+    return false;
+  }
+}
+
 async function downloadOverlayOption(message, sender) {
   const tabId = sender && sender.tab ? sender.tab.id : -1;
   const frameId = Number(sender && Number.isInteger(sender.frameId) ? sender.frameId : 0);
@@ -854,6 +865,31 @@ async function downloadOverlayOption(message, sender) {
     for (const option of cached.items) {
       await postCaptureToDesktop(option.capture, cfg, "/capture");
     }
+
+    // Feed/reel sites often expose only short direct/range objects to the
+    // browser. When a concrete permalink is available, register it as the
+    // final fallback so yt-dlp can recover the complete post/video if the
+    // captured direct object is only a transport chunk.
+    if (isSpecificMediaPageUrl(player.mediaPageUrl)) {
+      await postCaptureToDesktop(
+        {
+          id: crypto.randomUUID(),
+          captured_at: Date.now() / 1000,
+          url: player.mediaPageUrl,
+          page_url: player.mediaPageUrl,
+          title: String(selected.capture.title || "Browser video"),
+          tab_id: tabId,
+          frame_id: frameId,
+          kind: "page",
+          content_type: "text/html",
+          headers: {},
+          capture_group_id: String(selected.capture.capture_group_id || "")
+        },
+        cfg,
+        "/capture"
+      );
+    }
+
     const result = await postCaptureToDesktop(selected.capture, cfg, "/capture-download");
     return {
       ok: true,
