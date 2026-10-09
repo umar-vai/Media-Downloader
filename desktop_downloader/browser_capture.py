@@ -194,6 +194,10 @@ class CaptureStore:
                     "width",
                     "fps",
                     "tbr",
+                    "total_bytes",
+                    "media_type",
+                    "itag",
+                    "duration_seconds",
                     "available_qualities",
                     "has_multiple_qualities",
                 ):
@@ -218,6 +222,10 @@ class CaptureStore:
             "width",
             "fps",
             "tbr",
+            "total_bytes",
+            "media_type",
+            "itag",
+            "duration_seconds",
             "available_qualities",
             "has_multiple_qualities",
         }
