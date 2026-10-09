@@ -6,9 +6,43 @@ const statusBadge = document.getElementById("status");
 const connectionText = document.getElementById("connectionText");
 const capturesRoot = document.getElementById("captures");
 const countLabel = document.getElementById("count");
+const autoSendBestHls = document.getElementById("autoSendBestHls");
+const autoSendText = document.getElementById("autoSendText");
 
 async function settings() {
-  return chrome.storage.local.get({port: 38471, token: ""});
+  return chrome.storage.local.get({
+    port: 38471,
+    token: "",
+    autoSendBestHls: true,
+    lastAutoSendStatus: null
+  });
+}
+
+function renderAutoSendStatus(cfg) {
+  const enabled = Boolean(cfg.autoSendBestHls);
+  autoSendBestHls.checked = enabled;
+  autoSendText.classList.remove("off", "error");
+
+  if (!enabled) {
+    autoSendText.textContent = "Disabled — use Send best to app manually.";
+    autoSendText.classList.add("off");
+    return;
+  }
+
+  const status = cfg.lastAutoSendStatus;
+  if (status && status.ok === false) {
+    autoSendText.textContent = "Enabled — last auto-send could not reach the desktop app.";
+    autoSendText.classList.add("error");
+    return;
+  }
+  if (status && status.ok === true) {
+    const count = Number(status.count || 0);
+    autoSendText.textContent = count > 1
+      ? `Enabled — last playback auto-sent ${count} HLS candidates.`
+      : "Enabled — last playback auto-sent HLS to the app.";
+    return;
+  }
+  autoSendText.textContent = "Enabled — play a video and HLS will be sent automatically.";
 }
 
 async function currentTab() {
@@ -189,6 +223,13 @@ async function render() {
   }
 }
 
+autoSendBestHls.addEventListener("change", async () => {
+  const enabled = Boolean(autoSendBestHls.checked);
+  await chrome.storage.local.set({autoSendBestHls: enabled});
+  const cfg = await settings();
+  renderAutoSendStatus(cfg);
+});
+
 saveButton.addEventListener("click", async () => {
   const parsed = parsePairing(pairingInput.value);
   if (!parsed) {
@@ -212,10 +253,16 @@ clearButton.addEventListener("click", async () => {
 });
 
 chrome.storage.onChanged.addListener((_changes, areaName) => {
-  if (areaName === "session") render().catch(() => {});
+  if (areaName === "session") {
+    render().catch(() => {});
+  } else if (areaName === "local") {
+    settings().then(renderAutoSendStatus).catch(() => {});
+  }
 });
 
 document.addEventListener("DOMContentLoaded", async () => {
+  const cfg = await settings();
+  renderAutoSendStatus(cfg);
   await testConnection(false);
   await render();
   setInterval(() => render().catch(() => {}), 1500);
