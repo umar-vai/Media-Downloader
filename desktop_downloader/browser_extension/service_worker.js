@@ -372,7 +372,13 @@ async function buildOverlayOptions(tabId, frameId, pageUrl) {
     .sort((a, b) => b - a)
     .map((height) => `${height}p`);
 
-  const batchId = crypto.randomUUID();
+  const playback = PLAYBACK_STATE.get(tabId);
+  const batchId = (
+    playback &&
+    playback.sessionId &&
+    (Date.now() - Number(playback.lastPlayAt || playback.lastHlsAt || 0)) < 2 * 60 * 1000
+  ) ? playback.sessionId : crypto.randomUUID();
+
   const items = resolved.slice(0, 18).map((option, index) => {
     const id = crypto.randomUUID();
     const height = Number(option.height || 0);
