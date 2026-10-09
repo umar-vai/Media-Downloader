@@ -101,6 +101,37 @@ def sanitize_capture(payload: Any) -> dict[str, Any]:
 
     capture_group_id = str(payload.get("capture_group_id") or "").strip()[:120]
 
+    try:
+        frame_id = int(payload.get("frame_id") if payload.get("frame_id") is not None else -1)
+    except (TypeError, ValueError):
+        frame_id = -1
+    try:
+        width = max(0, int(float(payload.get("width") or 0)))
+    except (TypeError, ValueError):
+        width = 0
+    try:
+        height = max(0, int(float(payload.get("height") or 0)))
+    except (TypeError, ValueError):
+        height = 0
+    try:
+        fps = max(0.0, float(payload.get("fps") or 0))
+    except (TypeError, ValueError):
+        fps = 0.0
+    try:
+        tbr = max(0.0, float(payload.get("tbr") or 0))
+    except (TypeError, ValueError):
+        tbr = 0.0
+
+    qualities = payload.get("available_qualities")
+    available_qualities = [
+        str(value)[:32]
+        for value in qualities
+        if str(value or "").strip()
+    ][:20] if isinstance(qualities, list) else []
+
+    quality_status = str(payload.get("quality_status") or "").strip().lower()[:32]
+    quality_label = str(payload.get("quality_label") or "").strip()[:80]
+
     return {
         "id": str(payload.get("id") or uuid.uuid4().hex),
         "captured_at": float(payload.get("captured_at") or time.time()),
@@ -108,11 +139,20 @@ def sanitize_capture(payload: Any) -> dict[str, Any]:
         "page_url": page_url,
         "title": title or parsed.hostname or "Captured media",
         "tab_id": tab_id,
+        "frame_id": frame_id,
         "kind": kind,
         "content_type": content_type,
         "headers": sanitize_headers(payload.get("headers")),
         "duration_seconds": duration,
         "capture_group_id": capture_group_id,
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "tbr": tbr,
+        "quality_status": quality_status,
+        "quality_label": quality_label,
+        "available_qualities": available_qualities,
+        "has_multiple_qualities": bool(payload.get("has_multiple_qualities") or len(available_qualities) > 1),
     }
 
 
@@ -239,7 +279,8 @@ class _CaptureHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         bridge: BrowserCaptureBridge = self.server.bridge  # type: ignore[attr-defined]
-        if self.path.rstrip("/") != "/capture":
+        route = self.path.rstrip("/")
+        if route not in {"/capture", "/capture-download"}:
             self._send_json(404, {"ok": False, "error": "Not found."})
             return
 
@@ -268,10 +309,20 @@ class _CaptureHandler(BaseHTTPRequestHandler):
 
         if bridge.on_capture is not None:
             try:
-                bridge.on_capture(dict(item))
+                outgoing = dict(item)
+                if route == "/capture-download":
+                    outgoing["_browser_action"] = "download"
+                bridge.on_capture(outgoing)
             except Exception:
                 pass
-        self._send_json(200, {"ok": True, "capture_id": item["id"]})
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "capture_id": item["id"],
+                "action": "download" if route == "/capture-download" else "capture",
+            },
+        )
 
     def log_message(self, _format: str, *_args: Any) -> None:
         # Do not log signed URLs, cookies, Authorization headers, or query strings.
