@@ -126,7 +126,7 @@ class BrowserCapturePanel(ctk.CTkFrame):
         ).grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
             header,
-            text="Play a video in Chrome or Edge. Best detected quality is selected automatically.",
+            text="Play a video in Chrome or Edge. HLS is sent automatically and best quality is selected.",
             text_color=MUTED,
             font=("Segoe UI", 12),
             anchor="w",
@@ -314,7 +314,7 @@ class BrowserCapturePanel(ctk.CTkFrame):
             self._network_label_at = now
         if running:
             self.connection_text.configure(
-                text=f"Browser bridge ready on port {bridge.port}. {self._network_label}."
+                text=f"Bridge ready on port {bridge.port}. {self._network_label}. Auto-send requires extension v1.2.1+; reload it after app updates."
             )
         else:
             self.connection_text.configure(
