@@ -58,6 +58,30 @@ class BrowserCaptureTests(unittest.TestCase):
         )
         self.assertEqual(item["capture_group_id"], "batch-123")
 
+    def test_quality_metadata_from_extension_is_preserved(self) -> None:
+        item = sanitize_capture(
+            {
+                "url": "https://cdn.example.com/1080/index.m3u8",
+                "page_url": "https://example.com/watch/1",
+                "title": "Episode",
+                "tab_id": 1,
+                "frame_id": 4,
+                "kind": "hls",
+                "height": 1080,
+                "width": 1920,
+                "fps": 60,
+                "tbr": 5371,
+                "quality_status": "ready",
+                "quality_label": "1080p60",
+                "available_qualities": ["1080p", "720p", "360p"],
+            }
+        )
+        self.assertEqual(item["frame_id"], 4)
+        self.assertEqual(item["height"], 1080)
+        self.assertEqual(item["width"], 1920)
+        self.assertEqual(item["quality_label"], "1080p60")
+        self.assertEqual(item["available_qualities"], ["1080p", "720p", "360p"])
+
     def test_accepts_page_fallback_capture(self) -> None:
         item = sanitize_capture(
             {
@@ -124,6 +148,43 @@ class BrowserCaptureTests(unittest.TestCase):
         items = store.list()
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["title"], "New")
+
+    def test_capture_download_route_marks_browser_action(self) -> None:
+        store = CaptureStore()
+        received = []
+        bridge = BrowserCaptureBridge(store, "correct-token", port=0, on_capture=received.append)
+        port = bridge.start()
+        self.addCleanup(bridge.stop)
+
+        payload = json.dumps(
+            {
+                "url": "https://cdn.example/1080/index.m3u8",
+                "page_url": "https://example.com/watch/1",
+                "title": "Episode 1",
+                "tab_id": 7,
+                "kind": "hls",
+                "height": 1080,
+                "quality_label": "1080p",
+            }
+        ).encode("utf-8")
+
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/capture-download",
+            data=payload,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Media-Downloader-Token": "correct-token",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action"], "download")
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0]["_browser_action"], "download")
+        self.assertEqual(received[0]["quality_label"], "1080p")
 
     def test_local_bridge_requires_token_and_accepts_capture(self) -> None:
         store = CaptureStore()
