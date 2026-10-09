@@ -9,11 +9,12 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from yt_dlp import YoutubeDL
+from yt_dlp.networking.impersonate import ImpersonateTarget
 from yt_dlp.utils import DownloadError
 
 from browser_capture import sanitize_capture, sanitize_headers
 from media_editor_engine import ffmpeg_exe
-from network_proxy import yt_dlp_proxy_options
+from network_proxy import active_proxy_url, yt_dlp_proxy_options
 
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 
@@ -65,11 +66,106 @@ def _safe_download_error(exc: BaseException, capture: dict[str, Any]) -> str:
     return raw[-600:]
 
 
+def capture_transport_profiles() -> list[tuple[str, dict[str, Any]]]:
+    """Ordered network fallbacks for captured media.
+
+    The user's explicit Windows proxy is preferred. Chrome/curl_cffi TLS is
+    tried first because some video CDNs/proxies terminate Python's standard
+    TLS connection early. If that still fails, use a low-concurrency
+    compatibility pass, then an explicit direct route. On systems using a TUN
+    engine, the direct socket is still captured by the TUN driver while
+    avoiding an incompatible WinINet proxy CONNECT path.
+    """
+    proxy = active_proxy_url()
+    profiles: list[tuple[str, dict[str, Any]]] = []
+    chrome = ImpersonateTarget("chrome")
+
+    if proxy:
+        profiles.extend(
+            [
+                (
+                    "Proxy • Chrome TLS",
+                    {
+                        "proxy": proxy,
+                        "impersonate": chrome,
+                        "concurrent_fragment_downloads": 4,
+                    },
+                ),
+                (
+                    "Proxy • compatibility",
+                    {
+                        "proxy": proxy,
+                        "concurrent_fragment_downloads": 1,
+                    },
+                ),
+                (
+                    "TUN/direct • Chrome TLS",
+                    {
+                        "proxy": "",
+                        "impersonate": chrome,
+                        "source_address": "0.0.0.0",
+                        "concurrent_fragment_downloads": 4,
+                    },
+                ),
+                (
+                    "TUN/direct • compatibility",
+                    {
+                        "proxy": "",
+                        "source_address": "0.0.0.0",
+                        "concurrent_fragment_downloads": 1,
+                    },
+                ),
+            ]
+        )
+    else:
+        profiles.extend(
+            [
+                (
+                    "Chrome TLS",
+                    {
+                        "proxy": "",
+                        "impersonate": chrome,
+                        "source_address": "0.0.0.0",
+                        "concurrent_fragment_downloads": 4,
+                    },
+                ),
+                (
+                    "Compatibility",
+                    {
+                        "proxy": "",
+                        "source_address": "0.0.0.0",
+                        "concurrent_fragment_downloads": 1,
+                    },
+                ),
+            ]
+        )
+    return profiles
+
+
+def _transport_error_hint(exc: BaseException) -> bool:
+    text = str(exc or "").lower()
+    markers = (
+        "unexpected_eof_while_reading",
+        "unexpected eof",
+        "ssl",
+        "tls",
+        "certificate",
+        "proxy",
+        "connection reset",
+        "connection aborted",
+        "remote end closed",
+        "handshake",
+        "eof occurred in violation of protocol",
+    )
+    return any(marker in text for marker in markers)
+
+
 def capture_download_options(
     capture: dict[str, Any],
     output_dir: Path,
     base_name: str,
     progress_hook: Callable[[dict[str, Any]], None] | None = None,
+    transport_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     item = sanitize_capture(capture)
     output_dir = Path(output_dir)
@@ -84,7 +180,7 @@ def capture_download_options(
         "overwrites": False,
         "retries": 5,
         "fragment_retries": 5,
-        "concurrent_fragment_downloads": 6,
+        "concurrent_fragment_downloads": 4,
         "socket_timeout": 30,
         "http_headers": headers,
         **yt_dlp_proxy_options(),
@@ -93,6 +189,8 @@ def capture_download_options(
         "merge_output_format": "mp4",
         "format": "bestvideo*+bestaudio/best",
     }
+    if transport_options:
+        options.update(dict(transport_options))
     if progress_hook is not None:
         options["progress_hooks"] = [progress_hook]
     return options
@@ -173,19 +271,52 @@ def download_captured_media(
         elif status == "finished":
             on_progress(1.0, "Finalizing media…")
 
-    options = capture_download_options(item, output_dir, name, progress_hook)
+    result: Any = None
+    last_error: BaseException | None = None
+    attempted_labels: list[str] = []
 
-    try:
-        with YoutubeDL(options) as ydl:
-            result = ydl.extract_info(item["url"], download=True)
-    except CaptureDownloadCancelled:
-        raise
-    except DownloadError as exc:
-        raise RuntimeError(_safe_download_error(exc, item)) from exc
-    except Exception as exc:
+    for attempt, (transport_label, transport_options) in enumerate(capture_transport_profiles(), start=1):
         if cancel_event is not None and cancel_event.is_set():
-            raise CaptureDownloadCancelled("Captured media download cancelled.") from exc
-        raise RuntimeError(_safe_download_error(exc, item)) from exc
+            raise CaptureDownloadCancelled("Captured media download cancelled.")
+
+        attempted_labels.append(transport_label)
+        if on_progress is not None:
+            on_progress(0.0, f"{transport_label} • connecting")
+
+        options = capture_download_options(
+            item,
+            output_dir,
+            name,
+            progress_hook,
+            transport_options=transport_options,
+        )
+
+        try:
+            with YoutubeDL(options) as ydl:
+                result = ydl.extract_info(item["url"], download=True)
+            last_error = None
+            break
+        except CaptureDownloadCancelled:
+            raise
+        except DownloadError as exc:
+            last_error = exc
+        except Exception as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                raise CaptureDownloadCancelled("Captured media download cancelled.") from exc
+            last_error = exc
+
+        cleanup_failed_capture_parts(output_dir, name, started_at)
+
+        # For normal HTTP authorization/not-found errors, do not burn through
+        # every network transport. Chrome impersonation has already had a
+        # chance; let the outer candidate fallback try the next fresh stream.
+        if last_error is not None and not _transport_error_hint(last_error):
+            break
+
+    if last_error is not None:
+        safe = _safe_download_error(last_error, item)
+        tried = " → ".join(attempted_labels)
+        raise RuntimeError(f"{safe} | Network attempts: {tried}") from last_error
 
     if cancel_event is not None and cancel_event.is_set():
         raise CaptureDownloadCancelled("Captured media download cancelled.")
@@ -219,6 +350,7 @@ __all__ = [
     "CaptureDownloadCancelled",
     "capture_host",
     "capture_media_mode",
+    "capture_transport_profiles",
     "cleanup_failed_capture_parts",
     "download_captured_media",
     "safe_capture_name",

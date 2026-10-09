@@ -4,15 +4,18 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 DESKTOP_DIR = Path(__file__).resolve().parents[1]
 if str(DESKTOP_DIR) not in sys.path:
     sys.path.insert(0, str(DESKTOP_DIR))
 
 from captured_media_engine import (
+    _transport_error_hint,
     capture_download_options,
     capture_host,
     capture_media_mode,
+    capture_transport_profiles,
     safe_capture_name,
 )
 
@@ -48,6 +51,43 @@ class CapturedMediaEngineTests(unittest.TestCase):
         }
         self.assertEqual(capture_host(capture), "cdn.example")
         self.assertEqual(capture_host(capture, prefer_page=True), "watch.example")
+
+    def test_transport_profiles_prefer_proxy_chrome_then_tun_fallback(self) -> None:
+        with patch("captured_media_engine.active_proxy_url", return_value="http://127.0.0.1:7890"):
+            profiles = capture_transport_profiles()
+        labels = [label for label, _options in profiles]
+        self.assertEqual(labels[0], "Proxy • Chrome TLS")
+        self.assertIn("TUN/direct • Chrome TLS", labels)
+        self.assertEqual(profiles[0][1]["proxy"], "http://127.0.0.1:7890")
+        direct = next(options for label, options in profiles if label == "TUN/direct • Chrome TLS")
+        self.assertEqual(direct["proxy"], "")
+
+    def test_tls_eof_is_classified_as_transport_error(self) -> None:
+        self.assertTrue(
+            _transport_error_hint(
+                RuntimeError("[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol")
+            )
+        )
+        self.assertFalse(_transport_error_hint(RuntimeError("HTTP Error 403: Forbidden")))
+
+    def test_options_can_override_transport_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            options = capture_download_options(
+                {
+                    "url": "https://cdn.example/master.m3u8",
+                    "title": "Episode",
+                },
+                Path(directory),
+                "Episode",
+                transport_options={
+                    "proxy": "",
+                    "source_address": "0.0.0.0",
+                    "concurrent_fragment_downloads": 1,
+                },
+            )
+        self.assertEqual(options["proxy"], "")
+        self.assertEqual(options["source_address"], "0.0.0.0")
+        self.assertEqual(options["concurrent_fragment_downloads"], 1)
 
     def test_options_include_capture_headers_and_ffmpeg(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
