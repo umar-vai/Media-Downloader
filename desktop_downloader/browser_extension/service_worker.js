@@ -227,11 +227,12 @@ function inferDirectMetadata(capture) {
 
     if (!result.fps) result.fps = parsePositiveNumber(parsed.searchParams.get("fps"));
     if (!result.bitrate) {
-      result.bitrate = parsePositiveNumber(
+      const rawBitrate = parsePositiveNumber(
         parsed.searchParams.get("bitrate") ||
         parsed.searchParams.get("br") ||
         parsed.searchParams.get("abr")
-      ) / 1000;
+      );
+      result.bitrate = rawBitrate > 10000 ? rawBitrate / 1000 : rawBitrate;
     }
     if (!result.totalBytes) {
       result.totalBytes = parsePositiveNumber(
@@ -275,7 +276,8 @@ function canonicalDirectKey(capture) {
       meta.itag || "",
       meta.height || 0,
       String(parsed.searchParams.get("mime") || ""),
-      String(parsed.searchParams.get("quality") || parsed.searchParams.get("quality_label") || "")
+      String(parsed.searchParams.get("quality") || parsed.searchParams.get("quality_label") || ""),
+      meta.itag || meta.height ? "" : Math.round(meta.totalBytes || 0)
     ].join("|");
     return `${parsed.origin}${parsed.pathname}|${variant}`;
   } catch (_) {
