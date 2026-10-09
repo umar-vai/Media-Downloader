@@ -121,6 +121,15 @@ def sanitize_capture(payload: Any) -> dict[str, Any]:
         tbr = max(0.0, float(payload.get("tbr") or 0))
     except (TypeError, ValueError):
         tbr = 0.0
+    try:
+        total_bytes = max(0, int(float(payload.get("total_bytes") or 0)))
+    except (TypeError, ValueError):
+        total_bytes = 0
+
+    media_type = str(payload.get("media_type") or "").strip().lower()[:24]
+    if media_type not in {"video", "audio", ""}:
+        media_type = ""
+    itag = str(payload.get("itag") or "").strip()[:32]
 
     qualities = payload.get("available_qualities")
     available_qualities = [
@@ -149,6 +158,9 @@ def sanitize_capture(payload: Any) -> dict[str, Any]:
         "height": height,
         "fps": fps,
         "tbr": tbr,
+        "total_bytes": total_bytes,
+        "media_type": media_type,
+        "itag": itag,
         "quality_status": quality_status,
         "quality_label": quality_label,
         "available_qualities": available_qualities,
@@ -182,6 +194,10 @@ class CaptureStore:
                     "width",
                     "fps",
                     "tbr",
+                    "total_bytes",
+                    "media_type",
+                    "itag",
+                    "duration_seconds",
                     "available_qualities",
                     "has_multiple_qualities",
                 ):
@@ -206,6 +222,10 @@ class CaptureStore:
             "width",
             "fps",
             "tbr",
+            "total_bytes",
+            "media_type",
+            "itag",
+            "duration_seconds",
             "available_qualities",
             "has_multiple_qualities",
         }
