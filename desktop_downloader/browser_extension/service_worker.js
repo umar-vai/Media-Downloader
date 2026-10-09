@@ -620,6 +620,7 @@ async function buildOverlayOptions(tabId, frameId, pageUrl) {
     }
 
     if (kind === "direct") {
+      const originalMeta = inferDirectMetadata(capture);
       let candidate = applyPlaybackMetadata(capture, playback);
       const enriched = enrichDirectCapture(candidate);
       if (isUselessPartialChunk(enriched) && !playback) {
@@ -630,12 +631,14 @@ async function buildOverlayOptions(tabId, frameId, pageUrl) {
       let key = canonicalDirectKey(enriched);
       if (
         playback &&
-        !Number(enriched.height || 0) &&
         Boolean(enriched.partial_response) &&
-        !Number(enriched.range_total_bytes || 0)
+        !Number(enriched.range_total_bytes || 0) &&
+        !originalMeta.height &&
+        !originalMeta.itag
       ) {
-        // Unknown byte-range chunks from the same active player are not
-        // separate qualities. Collapse them to one current-playback stream.
+        // Anonymous byte-range requests that only gained a resolution from
+        // the active player are chunks of the current stream, not separate
+        // qualities. Collapse all of them to one menu entry.
         key = `playback:${tabId}:${frameId}:${String(enriched.media_type || "video")}`;
       }
       const previous = directGroups.get(key);
