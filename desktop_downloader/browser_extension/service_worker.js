@@ -782,7 +782,7 @@ async function buildOverlayOptions(tabId, frameId, pageUrl, player = {}) {
     };
   });
 
-  const key = overlayCacheKey(tabId, frameId, pageUrl);
+  const key = overlayCacheKey(tabId, frameId, pageUrl, player.mediaKey);
   OVERLAY_OPTION_CACHE.set(key, {at: Date.now(), items});
   return items;
 }
@@ -809,13 +809,14 @@ async function getOverlayOptions(message, sender) {
   }
 
   const pageUrl = String(message.pageUrl || "");
-  const key = overlayCacheKey(tabId, frameId, pageUrl);
+  const player = playerContextFromMessage(message);
+  const key = overlayCacheKey(tabId, frameId, pageUrl, player.mediaKey);
   const cached = OVERLAY_OPTION_CACHE.get(key);
   if (cached && (Date.now() - Number(cached.at || 0)) < OVERLAY_CACHE_TTL_MS) {
     return {ok: true, options: publicOverlayOptions(cached.items)};
   }
 
-  const items = await buildOverlayOptions(tabId, frameId, pageUrl);
+  const items = await buildOverlayOptions(tabId, frameId, pageUrl, player);
   return {
     ok: true,
     options: publicOverlayOptions(items),
@@ -827,15 +828,16 @@ async function downloadOverlayOption(message, sender) {
   const tabId = sender && sender.tab ? sender.tab.id : -1;
   const frameId = Number(sender && Number.isInteger(sender.frameId) ? sender.frameId : 0);
   const pageUrl = String(message.pageUrl || "");
+  const player = playerContextFromMessage(message);
   const optionId = String(message.optionId || "");
   if (typeof tabId !== "number" || tabId < 0 || !optionId) {
     return {ok: false, error: "Invalid download request."};
   }
 
-  const key = overlayCacheKey(tabId, frameId, pageUrl);
+  const key = overlayCacheKey(tabId, frameId, pageUrl, player.mediaKey);
   let cached = OVERLAY_OPTION_CACHE.get(key);
   if (!cached || (Date.now() - Number(cached.at || 0)) >= OVERLAY_CACHE_TTL_MS) {
-    const items = await buildOverlayOptions(tabId, frameId, pageUrl);
+    const items = await buildOverlayOptions(tabId, frameId, pageUrl, player);
     cached = {at: Date.now(), items};
     OVERLAY_OPTION_CACHE.set(key, cached);
   }
