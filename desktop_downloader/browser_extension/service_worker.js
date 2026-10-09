@@ -11,6 +11,9 @@ const AUTO_SEND_DEBOUNCE_MS = 1200;
 const AUTO_SEND_RETRY_MS = 2500;
 const AUTO_SEND_MAX_RETRIES = 3;
 const PLAYBACK_CAPTURE_LOOKBACK_SECONDS = 15;
+const OVERLAY_OPTION_CACHE = new Map();
+const OVERLAY_CAPTURE_LOOKBACK_SECONDS = 180;
+const OVERLAY_CACHE_TTL_MS = 2 * 60 * 1000;
 
 function headerValue(headers, name) {
   const lower = name.toLowerCase();
@@ -132,8 +135,8 @@ function captureFingerprint(items) {
     .join("\n");
 }
 
-async function postCaptureToDesktop(item, cfg) {
-  const response = await fetch(`http://127.0.0.1:${cfg.port}/capture`, {
+async function postCaptureToDesktop(item, cfg, endpoint = "/capture") {
+  const response = await fetch(`http://127.0.0.1:${cfg.port}${endpoint}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -146,6 +149,352 @@ async function postCaptureToDesktop(item, cfg) {
     throw new Error(data.error || "Could not send capture to Media Downloader.");
   }
   return data;
+}
+
+
+function overlayCacheKey(tabId, frameId, pageUrl) {
+  return `${tabId}:${frameId}:${String(pageUrl || "")}`;
+}
+
+function inferResolutionFromUrl(url) {
+  const value = String(url || "").toLowerCase();
+  const p = value.match(/(?:^|[^0-9])(2160|1440|1080|900|720|540|480|360|240)p(?:[^0-9]|$)/);
+  if (p) return Number(p[1]);
+  const dimensions = value.match(/(?:^|[^0-9])(\d{3,4})x(\d{3,4})(?:[^0-9]|$)/);
+  if (dimensions) return Number(dimensions[2]) || 0;
+  try {
+    const parsed = new URL(url);
+    for (const key of ["height", "h", "quality", "res", "resolution"]) {
+      const raw = String(parsed.searchParams.get(key) || "");
+      const match = raw.match(/(2160|1440|1080|900|720|540|480|360|240)/);
+      if (match) return Number(match[1]);
+    }
+  } catch (_) {}
+  return 0;
+}
+
+function parseAttributeList(value) {
+  const attrs = {};
+  const regex = /([A-Z0-9-]+)=((?:"[^"]*")|[^,]*)/gi;
+  let match;
+  while ((match = regex.exec(String(value || "")))) {
+    let raw = String(match[2] || "").trim();
+    if (raw.startsWith('"') && raw.endsWith('"')) raw = raw.slice(1, -1);
+    attrs[String(match[1] || "").toUpperCase()] = raw;
+  }
+  return attrs;
+}
+
+function safeManifestHeaders(capture) {
+  const source = capture && capture.headers && typeof capture.headers === "object"
+    ? capture.headers
+    : {};
+  const result = {};
+  for (const name of ["Authorization", "Accept-Language"]) {
+    if (source[name]) result[name] = String(source[name]);
+  }
+  return result;
+}
+
+async function fetchManifestText(capture) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4500);
+  try {
+    const response = await fetch(String(capture.url || ""), {
+      method: "GET",
+      headers: safeManifestHeaders(capture),
+      credentials: "include",
+      cache: "no-store",
+      redirect: "follow",
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const text = await response.text();
+    if (!text.includes("#EXTM3U")) throw new Error("Not an HLS manifest");
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function hlsVariantsFromText(text, capture) {
+  const lines = String(text || "").split(/\r?\n/);
+  const variants = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (!line.startsWith("#EXT-X-STREAM-INF:")) continue;
+    const attrs = parseAttributeList(line.slice("#EXT-X-STREAM-INF:".length));
+    let uri = "";
+    for (let next = index + 1; next < lines.length; next += 1) {
+      const candidate = lines[next].trim();
+      if (!candidate) continue;
+      if (candidate.startsWith("#")) continue;
+      uri = candidate;
+      break;
+    }
+    if (!uri) continue;
+
+    let resolved = "";
+    try { resolved = new URL(uri, capture.url).href; } catch (_) {}
+    if (!resolved) continue;
+
+    let width = 0;
+    let height = 0;
+    if (attrs.RESOLUTION) {
+      const parts = String(attrs.RESOLUTION).toLowerCase().split("x");
+      width = Number(parts[0] || 0) || 0;
+      height = Number(parts[1] || 0) || 0;
+    }
+    const bandwidth = Number(attrs["AVERAGE-BANDWIDTH"] || attrs.BANDWIDTH || 0) || 0;
+    const fps = Number(attrs["FRAME-RATE"] || 0) || 0;
+
+    variants.push({
+      url: resolved,
+      width,
+      height,
+      fps,
+      bitrate: Math.round(bandwidth / 1000),
+      codecs: String(attrs.CODECS || ""),
+      capture: {
+        ...capture,
+        id: crypto.randomUUID(),
+        captured_at: Date.now() / 1000,
+        url: resolved,
+        kind: "hls",
+        width,
+        height,
+        fps,
+        tbr: bandwidth ? bandwidth / 1000 : 0,
+        quality_status: height ? "ready" : "unknown",
+        quality_label: height ? `${height}p` : "HLS"
+      }
+    });
+  }
+  return variants;
+}
+
+function optionFromCapture(capture) {
+  const height = Number(capture.height || inferResolutionFromUrl(capture.url) || 0) || 0;
+  const width = Number(capture.width || 0) || 0;
+  const fps = Number(capture.fps || 0) || 0;
+  const bitrate = Math.round(Number(capture.tbr || 0) || 0);
+  const kind = String(capture.kind || "media").toLowerCase();
+  return {
+    url: String(capture.url || ""),
+    width,
+    height,
+    fps,
+    bitrate,
+    codecs: "",
+    capture: {
+      ...capture,
+      height,
+      width,
+      fps,
+      tbr: bitrate,
+      quality_status: height ? "ready" : String(capture.quality_status || "unknown"),
+      quality_label: height ? `${height}p` : String(capture.quality_label || kind.toUpperCase())
+    }
+  };
+}
+
+function optionSortValue(option) {
+  const kindScore = option.capture.kind === "hls" ? 3 : option.capture.kind === "dash" ? 2 : 1;
+  return [
+    Number(option.height || 0),
+    Number(option.bitrate || 0),
+    Number(option.fps || 0),
+    kindScore
+  ];
+}
+
+function compareOptions(a, b) {
+  const left = optionSortValue(a);
+  const right = optionSortValue(b);
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) return right[i] - left[i];
+  }
+  return 0;
+}
+
+async function capturedCandidatesForOverlay(tabId, frameId, pageUrl) {
+  const state = await chrome.storage.session.get({captures: []});
+  const captures = Array.isArray(state.captures) ? state.captures : [];
+  const cutoff = (Date.now() / 1000) - OVERLAY_CAPTURE_LOOKBACK_SECONDS;
+
+  let candidates = captures.filter((item) => {
+    return item.tab_id === tabId &&
+      ["hls", "dash", "direct"].includes(String(item.kind || "").toLowerCase()) &&
+      Number(item.captured_at || 0) >= cutoff &&
+      String(item.url || "").startsWith("http");
+  });
+
+  const frameMatches = candidates.filter((item) => Number(item.frame_id ?? -99) === Number(frameId));
+  if (frameMatches.length) candidates = frameMatches;
+
+  const pageMatches = candidates.filter((item) => String(item.page_url || "") === String(pageUrl || ""));
+  if (pageMatches.length) candidates = pageMatches;
+
+  return candidates.slice(0, 24);
+}
+
+async function buildOverlayOptions(tabId, frameId, pageUrl) {
+  const candidates = await capturedCandidatesForOverlay(tabId, frameId, pageUrl);
+  const resolved = [];
+  const seen = new Set();
+
+  for (const capture of candidates) {
+    const kind = String(capture.kind || "").toLowerCase();
+    if (kind === "hls") {
+      let variants = [];
+      try {
+        const text = await fetchManifestText(capture);
+        variants = hlsVariantsFromText(text, capture);
+      } catch (_) {}
+      if (variants.length) {
+        for (const variant of variants) {
+          if (seen.has(variant.url)) continue;
+          seen.add(variant.url);
+          resolved.push(variant);
+        }
+        continue;
+      }
+    }
+
+    const option = optionFromCapture(capture);
+    if (!option.url || seen.has(option.url)) continue;
+    seen.add(option.url);
+    resolved.push(option);
+  }
+
+  resolved.sort(compareOptions);
+  const available = [...new Set(resolved.map((item) => Number(item.height || 0)).filter(Boolean))]
+    .sort((a, b) => b - a)
+    .map((height) => `${height}p`);
+
+  const playback = PLAYBACK_STATE.get(tabId);
+  const batchId = (
+    playback &&
+    playback.sessionId &&
+    (Date.now() - Number(playback.lastPlayAt || playback.lastHlsAt || 0)) < 2 * 60 * 1000
+  ) ? playback.sessionId : crypto.randomUUID();
+
+  const items = resolved.slice(0, 18).map((option, index) => {
+    const id = crypto.randomUUID();
+    const height = Number(option.height || 0);
+    const fps = Number(option.fps || 0);
+    const bitrate = Number(option.bitrate || 0);
+    const quality = height ? `${height}p${fps >= 50 ? "60" : ""}` : String(option.capture.kind || "Media").toUpperCase();
+    const detail = [
+      bitrate ? `${bitrate} kbps` : "",
+      option.capture.kind ? String(option.capture.kind).toUpperCase() : ""
+    ].filter(Boolean).join(" • ");
+
+    option.capture = {
+      ...option.capture,
+      capture_group_id: batchId,
+      available_qualities: available,
+      has_multiple_qualities: available.length > 1,
+      quality_status: height ? "ready" : String(option.capture.quality_status || "unknown"),
+      quality_label: height ? quality : String(option.capture.quality_label || quality)
+    };
+
+    return {
+      id,
+      label: quality,
+      detail,
+      best: index === 0,
+      height,
+      width: Number(option.width || 0),
+      fps,
+      bitrate,
+      kind: String(option.capture.kind || "media"),
+      capture: option.capture
+    };
+  });
+
+  const key = overlayCacheKey(tabId, frameId, pageUrl);
+  OVERLAY_OPTION_CACHE.set(key, {at: Date.now(), items});
+  return items;
+}
+
+function publicOverlayOptions(items) {
+  return items.map((item) => ({
+    id: item.id,
+    label: item.label,
+    detail: item.detail,
+    best: item.best,
+    height: item.height,
+    width: item.width,
+    fps: item.fps,
+    bitrate: item.bitrate,
+    kind: item.kind
+  }));
+}
+
+async function getOverlayOptions(message, sender) {
+  const tabId = sender && sender.tab ? sender.tab.id : -1;
+  const frameId = Number(sender && Number.isInteger(sender.frameId) ? sender.frameId : 0);
+  if (typeof tabId !== "number" || tabId < 0) {
+    return {ok: false, error: "This page is not attached to a browser tab."};
+  }
+
+  const pageUrl = String(message.pageUrl || "");
+  const key = overlayCacheKey(tabId, frameId, pageUrl);
+  const cached = OVERLAY_OPTION_CACHE.get(key);
+  if (cached && (Date.now() - Number(cached.at || 0)) < OVERLAY_CACHE_TTL_MS) {
+    return {ok: true, options: publicOverlayOptions(cached.items)};
+  }
+
+  const items = await buildOverlayOptions(tabId, frameId, pageUrl);
+  return {
+    ok: true,
+    options: publicOverlayOptions(items),
+    message: items.length ? "" : "Play the video for a moment so its media stream can be detected."
+  };
+}
+
+async function downloadOverlayOption(message, sender) {
+  const tabId = sender && sender.tab ? sender.tab.id : -1;
+  const frameId = Number(sender && Number.isInteger(sender.frameId) ? sender.frameId : 0);
+  const pageUrl = String(message.pageUrl || "");
+  const optionId = String(message.optionId || "");
+  if (typeof tabId !== "number" || tabId < 0 || !optionId) {
+    return {ok: false, error: "Invalid download request."};
+  }
+
+  const key = overlayCacheKey(tabId, frameId, pageUrl);
+  let cached = OVERLAY_OPTION_CACHE.get(key);
+  if (!cached || (Date.now() - Number(cached.at || 0)) >= OVERLAY_CACHE_TTL_MS) {
+    const items = await buildOverlayOptions(tabId, frameId, pageUrl);
+    cached = {at: Date.now(), items};
+    OVERLAY_OPTION_CACHE.set(key, cached);
+  }
+
+  const selected = cached.items.find((item) => item.id === optionId);
+  if (!selected) return {ok: false, error: "That stream expired. Open the menu again to refresh qualities."};
+
+  const cfg = await extensionSettings();
+  if (!cfg.token) return {ok: false, error: "Pair the extension with Media Downloader first."};
+
+  try {
+    // Seed all detected qualities first so the desktop engine has lower-quality
+    // fallbacks if the chosen signed stream expires during download.
+    for (const option of cached.items) {
+      await postCaptureToDesktop(option.capture, cfg, "/capture");
+    }
+    const result = await postCaptureToDesktop(selected.capture, cfg, "/capture-download");
+    return {
+      ok: true,
+      captureId: result.capture_id || "",
+      label: selected.label
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: String(error && error.message ? error.message : "Open Media Downloader and try again.")
+    };
+  }
 }
 
 async function hlsCandidatesForPlayback(tabId, playback) {
@@ -364,7 +713,8 @@ async function saveCapture(details, kind, contentType) {
     tab_id: details.tabId,
     kind,
     content_type: contentType || "",
-    headers: capturedHeaders
+    headers: capturedHeaders,
+    frame_id: Number(details.frameId ?? -1)
   };
   await storeCapture(item);
   if (kind === "hls") {
@@ -397,7 +747,8 @@ async function saveProbeCandidate(message, sender) {
     tab_id: tabId,
     kind,
     content_type: String(message.contentType || ""),
-    headers: {}
+    headers: {},
+    frame_id: Number(sender && Number.isInteger(sender.frameId) ? sender.frameId : -1)
   };
   await storeCapture(item);
   if (kind === "hls") {
@@ -463,7 +814,7 @@ chrome.webRequest.onErrorOccurred.addListener(
   {urls: ["<all_urls>"]}
 );
 
-chrome.runtime.onMessage.addListener((message, sender) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message !== "object") return;
   if (message.type === "media-probe-candidate") {
     saveProbeCandidate(message, sender).catch(() => {});
@@ -471,6 +822,16 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     savePageFallback(message, sender).catch(() => {});
   } else if (message.type === "media-play-started") {
     markPlaybackStarted(message, sender).catch(() => {});
+  } else if (message.type === "overlay-get-options") {
+    getOverlayOptions(message, sender)
+      .then(sendResponse)
+      .catch((error) => sendResponse({ok: false, error: String(error && error.message ? error.message : error)}));
+    return true;
+  } else if (message.type === "overlay-download-option") {
+    downloadOverlayOption(message, sender)
+      .then(sendResponse)
+      .catch((error) => sendResponse({ok: false, error: String(error && error.message ? error.message : error)}));
+    return true;
   }
 });
 
@@ -478,11 +839,17 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (!changeInfo.url) return;
   PLAYBACK_STATE.delete(tabId);
   clearAutoSendTimer(tabId);
+  for (const key of [...OVERLAY_OPTION_CACHE.keys()]) {
+    if (key.startsWith(`${tabId}:`)) OVERLAY_OPTION_CACHE.delete(key);
+  }
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   PLAYBACK_STATE.delete(tabId);
   clearAutoSendTimer(tabId);
+  for (const key of [...OVERLAY_OPTION_CACHE.keys()]) {
+    if (key.startsWith(`${tabId}:`)) OVERLAY_OPTION_CACHE.delete(key);
+  }
   const state = await chrome.storage.session.get({captures: []});
   const captures = Array.isArray(state.captures) ? state.captures : [];
   const filtered = captures.filter((entry) => entry.tab_id !== tabId);
