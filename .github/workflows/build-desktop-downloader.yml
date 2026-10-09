@@ -201,6 +201,37 @@ jobs:
             throw "Onedir runtime self-test failed with exit code $($process.ExitCode)."
           }
 
+      - name: Package extraction-safe portable ZIP
+        shell: pwsh
+        run: |
+          $portableRoot = "dist\installed\MediaDownloader"
+          $portableZip = "dist\MediaDownloaderPortable.zip"
+          if (-not (Test-Path $portableRoot)) {
+            throw "Installed onedir package is missing."
+          }
+          if (Test-Path $portableZip) {
+            Remove-Item $portableZip -Force
+          }
+          Compress-Archive -Path "$portableRoot\*" -DestinationPath $portableZip -CompressionLevel Optimal
+          if (-not (Test-Path $portableZip)) {
+            throw "Portable ZIP was not created."
+          }
+          $extractRoot = Join-Path $env:RUNNER_TEMP "MediaDownloaderPortableSmoke"
+          if (Test-Path $extractRoot) {
+            Remove-Item $extractRoot -Recurse -Force
+          }
+          Expand-Archive -Path $portableZip -DestinationPath $extractRoot -Force
+          $portableExe = Join-Path $extractRoot "MediaDownloader.exe"
+          if (-not (Test-Path $portableExe)) {
+            throw "Portable ZIP does not contain MediaDownloader.exe."
+          }
+          $report = Join-Path $env:RUNNER_TEMP "portable-zip-self-test.json"
+          $test = Start-Process -FilePath $portableExe -ArgumentList @("--self-test", "--report", $report) -Wait -PassThru
+          if ($test.ExitCode -ne 0 -or -not (Test-Path $report)) {
+            throw "Portable ZIP runtime self-test failed."
+          }
+          Get-Content $report
+
       - name: Build Windows installer
         shell: pwsh
         run: |
@@ -281,6 +312,9 @@ jobs:
           $setupHash = (Get-FileHash "dist/MediaDownloaderSetup.exe" -Algorithm SHA256).Hash.ToLower()
           "$setupHash  MediaDownloaderSetup.exe" | Out-File "dist/MediaDownloaderSetup.exe.sha256" -Encoding ascii
 
+          $portableZipHash = (Get-FileHash "dist/MediaDownloaderPortable.zip" -Algorithm SHA256).Hash.ToLower()
+          "$portableZipHash  MediaDownloaderPortable.zip" | Out-File "dist/MediaDownloaderPortable.zip.sha256" -Encoding ascii
+
       - name: Upload Windows build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -290,6 +324,8 @@ jobs:
             dist/MediaDownloader.exe.sha256
             dist/MediaDownloaderSetup.exe
             dist/MediaDownloaderSetup.exe.sha256
+            dist/MediaDownloaderPortable.zip
+            dist/MediaDownloaderPortable.zip.sha256
             dist/MediaDownloaderBrowserCaptureExtension.zip
             dist/TeamFahadYouTubeDownloader.exe
             dist/TeamFahadYouTubeDownloader.exe.sha256
@@ -331,6 +367,8 @@ jobs:
             "dist/MediaDownloader.exe.sha256" `
             "dist/MediaDownloaderSetup.exe" `
             "dist/MediaDownloaderSetup.exe.sha256" `
+            "dist/MediaDownloaderPortable.zip" `
+            "dist/MediaDownloaderPortable.zip.sha256" `
             "dist/MediaDownloaderBrowserCaptureExtension.zip" `
             "dist/TeamFahadYouTubeDownloader.exe" `
             "dist/TeamFahadYouTubeDownloader.exe.sha256" `
@@ -346,6 +384,8 @@ jobs:
             dist/MediaDownloader.exe.sha256
             dist/MediaDownloaderSetup.exe
             dist/MediaDownloaderSetup.exe.sha256
+            dist/MediaDownloaderPortable.zip
+            dist/MediaDownloaderPortable.zip.sha256
             dist/MediaDownloaderBrowserCaptureExtension.zip
             dist/TeamFahadYouTubeDownloader.exe
             dist/TeamFahadYouTubeDownloader.exe.sha256

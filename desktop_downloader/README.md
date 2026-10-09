@@ -169,3 +169,12 @@ Facebook and Instagram downloads prefer the selected quality, but if that exact 
 ### Facebook connection fallback
 
 Facebook public videos/Reels automatically retry through the mobile watch endpoint, IPv4, standard yt-dlp TLS, and Chrome/curl_cffi transport when a network terminates one Facebook TLS path early. Instagram keeps the standard transport that is more reliable on the tested Windows network.
+
+
+## Windows download recommendation
+
+For normal Windows use, prefer `MediaDownloaderSetup.exe`. For a no-install build, use
+`MediaDownloaderPortable.zip` and run `MediaDownloader.exe` from the extracted folder.
+The standalone one-file `MediaDownloader.exe` remains available for compatibility, but
+some antivirus/proxy/download environments can corrupt or interfere with PyInstaller's
+temporary extraction of embedded native modules.
