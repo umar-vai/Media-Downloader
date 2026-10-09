@@ -195,8 +195,14 @@ async function ensurePassiveHlsPlayback(tabId, item) {
   // Some players (especially iframe/MSE players) never bubble an HTMLMediaElement
   // play event to our content script. Treat a fresh HLS manifest request itself
   // as sufficient evidence of active playback so auto-send still works.
-  if (existing && existing.pageUrl === pageUrl && (now - Number(existing.lastPlayAt || 0)) < 2 * 60 * 1000) {
+  const recentHlsBurst = Boolean(
+    existing &&
+    existing.pageUrl === pageUrl &&
+    (now - Number(existing.lastHlsAt || existing.lastPlayAt || 0)) < 8000
+  );
+  if (recentHlsBurst) {
     existing.lastPlayAt = now;
+    existing.lastHlsAt = now;
     PLAYBACK_STATE.set(tabId, existing);
     return existing;
   }
@@ -207,6 +213,7 @@ async function ensurePassiveHlsPlayback(tabId, item) {
     mediaUrl: "",
     startedAt: now,
     lastPlayAt: now,
+    lastHlsAt: now,
     lastSentFingerprint: "",
     lastSentAt: 0,
     retryCount: 0,
@@ -327,6 +334,7 @@ async function markPlaybackStarted(message, sender) {
 
   playback.mediaUrl = mediaUrl || playback.mediaUrl || "";
   playback.lastPlayAt = now;
+  playback.passiveHls = false;
   playback.retryCount = 0;
   PLAYBACK_STATE.set(tabId, playback);
 
