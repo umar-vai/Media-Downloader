@@ -151,14 +151,19 @@ async function postCaptureToDesktop(item, cfg) {
 async function hlsCandidatesForPlayback(tabId, playback) {
   const state = await chrome.storage.session.get({captures: []});
   const captures = Array.isArray(state.captures) ? state.captures : [];
-  const cutoff = (playback.startedAt / 1000) - PLAYBACK_CAPTURE_LOOKBACK_SECONDS;
+  const started = playback.startedAt / 1000;
+  const tightCutoff = started - 4;
+  const wideCutoff = started - PLAYBACK_CAPTURE_LOOKBACK_SECONDS;
 
-  let candidates = captures.filter((item) => {
+  const eligible = captures.filter((item) => {
     return item.tab_id === tabId &&
       item.kind === "hls" &&
-      Number(item.captured_at || 0) >= cutoff &&
+      Number(item.captured_at || 0) >= wideCutoff &&
       String(item.url || "").startsWith("http");
   });
+
+  let candidates = eligible.filter((item) => Number(item.captured_at || 0) >= tightCutoff);
+  if (!candidates.length) candidates = eligible;
 
   const samePage = candidates.filter((item) => String(item.page_url || "") === playback.pageUrl);
   if (samePage.length) candidates = samePage;
