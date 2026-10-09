@@ -9,10 +9,11 @@
   function stateForMedia(media) {
     let state = mediaState.get(media);
     if (!state) {
+      const activeNow = media instanceof HTMLMediaElement && !media.paused && media.readyState >= 2;
       state = {
         key: crypto.randomUUID(),
-        startedAt: 0,
-        lastPlayAt: 0
+        startedAt: activeNow ? Date.now() - 3000 : 0,
+        lastPlayAt: activeNow ? Date.now() : 0
       };
       mediaState.set(media, state);
     }
@@ -152,6 +153,29 @@
   }, true);
 
 
+  function mediaPageUrl(media) {
+    const selectors = [
+      'a[href*="/reel/"]',
+      'a[href*="/reels/"]',
+      'a[href*="/p/"]',
+      'a[href*="/tv/"]',
+      'a[href*="/video/"]',
+      'a[href*="/videos/"]',
+      'a[href*="/watch/"]'
+    ];
+    let node = media;
+    for (let depth = 0; depth < 8 && node; depth += 1) {
+      if (node.querySelector) {
+        for (const selector of selectors) {
+          const anchor = node.querySelector(selector);
+          if (anchor && anchor.href && isHttp(anchor.href)) return anchor.href;
+        }
+      }
+      node = node.parentElement;
+    }
+    return "";
+  }
+
   function isVisibleMedia(media) {
     if (!(media instanceof HTMLMediaElement)) return false;
     const rect = media.getBoundingClientRect();
@@ -221,7 +245,7 @@
       <div class="wrap">
         <button class="trigger" type="button">Download video ▾</button>
         <div class="menu">
-          <div class="head">Available video qualities</div>
+          <div class="head">Click a quality to download</div>
           <div class="body"><div class="status">Play the video, then choose a quality.</div></div>
         </div>
       </div>
@@ -253,7 +277,8 @@
           width: metadata.width || 0,
           height: metadata.height || 0,
           durationSeconds: metadata.durationSeconds || 0,
-          playbackStartedAt: playerState.startedAt || 0
+          playbackStartedAt: playerState.startedAt || 0,
+          mediaPageUrl: mediaPageUrl(media)
         });
       } catch (_) {
         status("Extension service is unavailable. Reload the extension.", "error");
@@ -312,6 +337,7 @@
               height: metadata.height || 0,
               durationSeconds: metadata.durationSeconds || 0,
               playbackStartedAt: playerState.startedAt || 0,
+              mediaPageUrl: mediaPageUrl(media),
               optionId: option.id
             });
             if (result && result.ok) {
