@@ -24,10 +24,26 @@
     return type === "video" || type === "audio";
   }
 
-  function report(url, initiatorType = "", contentType = "") {
+  function mediaMetadata(node) {
+    if (!(node instanceof HTMLMediaElement)) return {};
+    const width = node instanceof HTMLVideoElement ? Number(node.videoWidth || 0) : 0;
+    const height = node instanceof HTMLVideoElement ? Number(node.videoHeight || 0) : 0;
+    const duration = Number.isFinite(node.duration) ? Number(node.duration || 0) : 0;
+    return {
+      width,
+      height,
+      durationSeconds: duration,
+      readyState: Number(node.readyState || 0)
+    };
+  }
+
+  function report(url, initiatorType = "", contentType = "", metadata = {}) {
     const value = String(url || "").trim();
     if (!mediaHint(value, initiatorType)) return;
-    const key = value + "|" + initiatorType;
+    const width = Number(metadata.width || 0) || 0;
+    const height = Number(metadata.height || 0) || 0;
+    const durationSeconds = Number(metadata.durationSeconds || 0) || 0;
+    const key = value + "|" + initiatorType + "|" + width + "x" + height;
     if (seen.has(key)) return;
     seen.add(key);
     chrome.runtime.sendMessage({
@@ -35,7 +51,11 @@
       url: value,
       pageUrl: location.href,
       initiatorType,
-      contentType
+      contentType,
+      width,
+      height,
+      durationSeconds,
+      readyState: Number(metadata.readyState || 0) || 0
     }).catch(() => {});
   }
 
@@ -52,7 +72,7 @@
     const nodes = document.querySelectorAll("video, audio, source");
     for (const node of nodes) {
       const current = node.currentSrc || node.src || node.getAttribute("src") || "";
-      if (isHttp(current)) report(current, node.tagName.toLowerCase());
+      if (isHttp(current)) report(current, node.tagName.toLowerCase(), "", mediaMetadata(node));
       if (String(current).startsWith("blob:")) reportPageFallback();
     }
   }
@@ -79,15 +99,19 @@
     if (!(target instanceof HTMLMediaElement)) return;
     const current = target.currentSrc || target.src || "";
 
+    const metadata = mediaMetadata(target);
     chrome.runtime.sendMessage({
       type: "media-play-started",
       pageUrl: location.href,
       mediaUrl: current,
-      mediaType: target.tagName.toLowerCase()
+      mediaType: target.tagName.toLowerCase(),
+      width: metadata.width || 0,
+      height: metadata.height || 0,
+      durationSeconds: metadata.durationSeconds || 0
     }).catch(() => {});
 
     if (isHttp(current)) {
-      report(current, target.tagName.toLowerCase());
+      report(current, target.tagName.toLowerCase(), "", metadata);
     } else {
       // blob:/MediaSource and source-less players need a page/iframe fallback.
       reportPageFallback();
@@ -100,7 +124,7 @@
     const target = event.target;
     if (target instanceof HTMLMediaElement) {
       const current = target.currentSrc || target.src || "";
-      if (isHttp(current)) report(current, target.tagName.toLowerCase());
+      if (isHttp(current)) report(current, target.tagName.toLowerCase(), "", mediaMetadata(target));
     }
   }, true);
 
