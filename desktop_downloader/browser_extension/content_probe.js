@@ -75,6 +75,14 @@
     const target = event.target;
     if (!(target instanceof HTMLMediaElement)) return;
     const current = target.currentSrc || target.src || "";
+
+    chrome.runtime.sendMessage({
+      type: "media-play-started",
+      pageUrl: location.href,
+      mediaUrl: current,
+      mediaType: target.tagName.toLowerCase()
+    }).catch(() => {});
+
     if (isHttp(current)) {
       report(current, target.tagName.toLowerCase());
     } else {
