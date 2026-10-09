@@ -585,10 +585,15 @@ async function capturedCandidatesForOverlay(tabId, frameId, pageUrl) {
   });
 
   const frameMatches = candidates.filter((item) => Number(item.frame_id ?? -99) === Number(frameId));
-  if (frameMatches.length) candidates = frameMatches;
-
-  const pageMatches = candidates.filter((item) => String(item.page_url || "") === String(pageUrl || ""));
-  if (pageMatches.length) candidates = pageMatches;
+  if (frameMatches.length) {
+    // frame_id is the strongest signal for iframe/custom players. Keep both
+    // webRequest captures (which know headers/ranges) and DOM probes (which
+    // know videoWidth/videoHeight) from the same frame.
+    candidates = frameMatches;
+  } else {
+    const pageMatches = candidates.filter((item) => String(item.page_url || "") === String(pageUrl || ""));
+    if (pageMatches.length) candidates = pageMatches;
+  }
 
   return candidates.slice(0, 24);
 }
@@ -967,7 +972,7 @@ async function markPlaybackStarted(message, sender) {
     try { tab = await chrome.tabs.get(tabId); } catch (_) {}
   }
 
-  const pageUrl = String((tab && tab.url) || message.pageUrl || "");
+  const pageUrl = String(message.pageUrl || (tab && tab.url) || "");
   const mediaUrl = String(message.mediaUrl || "");
   const now = Date.now();
   const existing = PLAYBACK_STATE.get(tabId);
