@@ -166,8 +166,31 @@ async function postCaptureToDesktop(item, cfg, endpoint = "/capture") {
 }
 
 
-function overlayCacheKey(tabId, frameId, pageUrl) {
-  return `${tabId}:${frameId}:${String(pageUrl || "")}`;
+function overlayCacheKey(tabId, frameId, pageUrl, mediaKey = "") {
+  return `${tabId}:${frameId}:${String(pageUrl || "")}:${String(mediaKey || "")}`;
+}
+
+function snapVideoHeight(value) {
+  const height = parsePositiveNumber(value);
+  if (!height) return 0;
+  const standards = [4320, 2160, 1440, 1080, 900, 720, 540, 480, 360, 240, 144];
+  for (const standard of standards) {
+    const tolerance = Math.max(4, standard * 0.012);
+    if (Math.abs(height - standard) <= tolerance) return standard;
+  }
+  return Math.round(height);
+}
+
+function playerContextFromMessage(message) {
+  return {
+    mediaKey: String(message && message.mediaKey || ""),
+    mediaUrl: String(message && message.mediaUrl || ""),
+    width: parsePositiveNumber(message && message.width),
+    height: snapVideoHeight(message && message.height),
+    durationSeconds: parsePositiveNumber(message && message.durationSeconds),
+    playbackStartedAt: parsePositiveNumber(message && message.playbackStartedAt),
+    mediaPageUrl: String(message && message.mediaPageUrl || "")
+  };
 }
 
 const YOUTUBE_ITAG_HEIGHT = new Map([
@@ -228,7 +251,7 @@ function decodeMime(value) {
 function inferDirectMetadata(capture) {
   const result = {
     mediaType: String(capture.media_type || ""),
-    height: parsePositiveNumber(capture.height),
+    height: snapVideoHeight(capture.height),
     width: parsePositiveNumber(capture.width),
     fps: parsePositiveNumber(capture.fps),
     bitrate: parsePositiveNumber(capture.tbr),
@@ -263,7 +286,7 @@ function inferDirectMetadata(capture) {
     }
 
     if (!result.height) {
-      result.height = inferResolutionFromUrl(capture.url);
+      result.height = snapVideoHeight(inferResolutionFromUrl(capture.url));
     }
 
     if (!result.fps) result.fps = parsePositiveNumber(parsed.searchParams.get("fps"));
@@ -297,7 +320,7 @@ function inferDirectMetadata(capture) {
     ).toLowerCase();
     if (!result.height && quality) {
       const match = quality.match(/(2160|1440|1080|900|720|540|480|360|240|144)/);
-      if (match) result.height = Number(match[1]);
+      if (match) result.height = snapVideoHeight(Number(match[1]));
     }
   } catch (_) {}
 
@@ -335,11 +358,19 @@ function canonicalDirectKey(capture) {
 
 function directCaptureScore(capture) {
   const meta = inferDirectMetadata(capture);
-  const headerScore = capture.headers && Object.keys(capture.headers).length ? 5 : 0;
+  const headerScore = capture.headers && Object.keys(capture.headers).length ? 5000 : 0;
+  const wholeResponseScore = capture.partial_response ? 0 : 400000;
+  const startsAtZeroScore = Number(capture.range_start || 0) === 0 ? 120000 : 0;
+  const payloadScore = Math.min(
+    150000,
+    Math.round((meta.responseBytes || meta.totalBytes || 0) / 1024)
+  );
   return (
     (meta.height ? 1000000 + meta.height * 1000 : 0) +
+    wholeResponseScore +
+    startsAtZeroScore +
+    payloadScore +
     (meta.bitrate || 0) +
-    (meta.totalBytes ? 10 : 0) +
     headerScore +
     Number(capture.captured_at || 0) / 1000000000
   );
@@ -548,15 +579,16 @@ function activePlaybackMetadata(tabId, frameId, pageUrl) {
 function applyPlaybackMetadata(capture, playback) {
   if (!playback || String(capture.kind || "").toLowerCase() !== "direct") return capture;
   const meta = inferDirectMetadata(capture);
-  if (meta.height || !parsePositiveNumber(playback.height)) return capture;
+  const playbackHeight = snapVideoHeight(playback.height);
+  if (meta.height || !playbackHeight) return capture;
   return {
     ...capture,
     width: parsePositiveNumber(playback.width),
-    height: parsePositiveNumber(playback.height),
+    height: playbackHeight,
     duration_seconds: parsePositiveNumber(capture.duration_seconds) || parsePositiveNumber(playback.durationSeconds),
     media_type: capture.media_type || "video",
     quality_status: "ready",
-    quality_label: `${parsePositiveNumber(playback.height)}p`
+    quality_label: `${playbackHeight}p`
   };
 }
 
@@ -572,7 +604,7 @@ function isUselessPartialChunk(capture) {
   );
 }
 
-async function capturedCandidatesForOverlay(tabId, frameId, pageUrl) {
+async function capturedCandidatesForOverlay(tabId, frameId, pageUrl, player = {}) {
   const state = await chrome.storage.session.get({captures: []});
   const captures = Array.isArray(state.captures) ? state.captures : [];
   const cutoff = (Date.now() / 1000) - OVERLAY_CAPTURE_LOOKBACK_SECONDS;
@@ -586,21 +618,39 @@ async function capturedCandidatesForOverlay(tabId, frameId, pageUrl) {
 
   const frameMatches = candidates.filter((item) => Number(item.frame_id ?? -99) === Number(frameId));
   if (frameMatches.length) {
-    // frame_id is the strongest signal for iframe/custom players. Keep both
-    // webRequest captures (which know headers/ranges) and DOM probes (which
-    // know videoWidth/videoHeight) from the same frame.
     candidates = frameMatches;
   } else {
     const pageMatches = candidates.filter((item) => String(item.page_url || "") === String(pageUrl || ""));
     if (pageMatches.length) candidates = pageMatches;
   }
 
-  return candidates.slice(0, 24);
+  if (String(player.mediaUrl || "").startsWith("http")) {
+    const mediaBase = normalizedDirectBaseUrl(player.mediaUrl);
+    const urlMatches = candidates.filter((item) => {
+      const url = String(item.url || "");
+      return url === player.mediaUrl || normalizedDirectBaseUrl(url) === mediaBase;
+    });
+    if (urlMatches.length) candidates = urlMatches;
+  }
+
+  const startedMs = parsePositiveNumber(player.playbackStartedAt);
+  if (startedMs) {
+    const started = (startedMs / 1000) - 2;
+    const timed = candidates.filter((item) => Number(item.captured_at || 0) >= started);
+    if (timed.length) candidates = timed;
+  }
+
+  return candidates.slice(0, 40);
 }
 
-async function buildOverlayOptions(tabId, frameId, pageUrl) {
-  const candidates = await capturedCandidatesForOverlay(tabId, frameId, pageUrl);
-  const playback = activePlaybackMetadata(tabId, frameId, pageUrl);
+async function buildOverlayOptions(tabId, frameId, pageUrl, player = {}) {
+  const candidates = await capturedCandidatesForOverlay(tabId, frameId, pageUrl, player);
+  const sharedPlayback = activePlaybackMetadata(tabId, frameId, pageUrl) || {};
+  const playback = {
+    ...sharedPlayback,
+    ...player,
+    height: snapVideoHeight(player.height || sharedPlayback.height)
+  };
   const resolved = [];
   const seen = new Set();
   const directGroups = new Map();
@@ -634,16 +684,15 @@ async function buildOverlayOptions(tabId, frameId, pageUrl) {
       }
 
       let key = canonicalDirectKey(enriched);
-      if (
+      if (player.mediaKey && !originalMeta.itag) {
+        const resolvedHeight = snapVideoHeight(enriched.height || playback.height);
+        key = `player:${player.mediaKey}:${String(enriched.media_type || "video")}:${resolvedHeight || "current"}`;
+      } else if (
         playback &&
         Boolean(enriched.partial_response) &&
-        !Number(enriched.range_total_bytes || 0) &&
         !originalMeta.height &&
         !originalMeta.itag
       ) {
-        // Anonymous byte-range requests that only gained a resolution from
-        // the active player are chunks of the current stream, not separate
-        // qualities. Collapse all of them to one menu entry.
         key = `playback:${tabId}:${frameId}:${String(enriched.media_type || "video")}`;
       }
       const previous = directGroups.get(key);
