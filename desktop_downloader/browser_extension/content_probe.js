@@ -344,6 +344,11 @@
               status(`${result.label || option.label || "Video"} queued in Media Downloader.`, "ok");
               trigger.textContent = "Sent to app ✓";
               setTimeout(() => { trigger.textContent = "Download video ▾"; menu.classList.remove("open"); }, 1600);
+            } else if (result && result.needsPairing) {
+              status(
+                result.error || "Pairing required. Use Copy pairing in Media Downloader, then pair the extension.",
+                "error"
+              );
             } else {
               status((result && result.error) || "Open Media Downloader and try again.", "error");
             }

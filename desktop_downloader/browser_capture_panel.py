@@ -304,7 +304,7 @@ class BrowserCapturePanel(ctk.CTkFrame):
         bridge = self.get_bridge()
         running = bool(bridge and bridge.running)
         self.status_badge.configure(
-            text="EXTENSION READY" if running else "EXTENSION OFFLINE",
+            text="BRIDGE READY" if running else "BRIDGE OFFLINE",
             fg_color="#0E3025" if running else "#351722",
             text_color=SUCCESS if running else DANGER,
         )

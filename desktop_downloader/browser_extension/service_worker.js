@@ -14,6 +14,9 @@ const PLAYBACK_CAPTURE_LOOKBACK_SECONDS = 15;
 const OVERLAY_OPTION_CACHE = new Map();
 const OVERLAY_CAPTURE_LOOKBACK_SECONDS = 180;
 const OVERLAY_CACHE_TTL_MS = 2 * 60 * 1000;
+const BRIDGE_PORT_START = 38471;
+const BRIDGE_PORT_SCAN_COUNT = 10;
+const BRIDGE_FETCH_TIMEOUT_MS = 2200;
 
 function headerValue(headers, name) {
   const lower = name.toLowerCase();
@@ -149,8 +152,53 @@ function captureFingerprint(items) {
     .join("\n");
 }
 
-async function postCaptureToDesktop(item, cfg, endpoint = "/capture") {
-  const response = await fetch(`http://127.0.0.1:${cfg.port}${endpoint}`, {
+async function loopbackFetch(url, options = {}, timeoutMs = BRIDGE_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(500, Number(timeoutMs) || BRIDGE_FETCH_TIMEOUT_MS));
+  const request = {
+    ...options,
+    cache: options.cache || "no-store",
+    signal: controller.signal,
+    targetAddressSpace: "local"
+  };
+  try {
+    return await fetch(url, request);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function bridgeHealth(port) {
+  const numericPort = Number(port || 0);
+  if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) return false;
+  try {
+    const response = await loopbackFetch(`http://127.0.0.1:${numericPort}/health`, {method: "GET"}, 900);
+    if (!response.ok) return false;
+    const data = await response.json().catch(() => ({}));
+    return Boolean(data.ok && data.service === "Media Downloader Browser Capture");
+  } catch (_) {
+    return false;
+  }
+}
+
+async function discoverBridgePort(preferredPort) {
+  const ordered = [];
+  const add = (value) => {
+    const port = Number(value || 0);
+    if (Number.isInteger(port) && port > 0 && port <= 65535 && !ordered.includes(port)) ordered.push(port);
+  };
+  add(preferredPort);
+  for (let offset = 0; offset < BRIDGE_PORT_SCAN_COUNT; offset += 1) {
+    add(BRIDGE_PORT_START + offset);
+  }
+  for (const port of ordered) {
+    if (await bridgeHealth(port)) return port;
+  }
+  return 0;
+}
+
+async function sendCaptureToPort(item, cfg, endpoint, port) {
+  const response = await loopbackFetch(`http://127.0.0.1:${port}${endpoint}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -160,9 +208,32 @@ async function postCaptureToDesktop(item, cfg, endpoint = "/capture") {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.ok) {
-    throw new Error(data.error || "Could not send capture to Media Downloader.");
+    const error = new Error(data.error || `Media Downloader bridge returned HTTP ${response.status}.`);
+    error.status = response.status;
+    throw error;
   }
   return data;
+}
+
+async function postCaptureToDesktop(item, cfg, endpoint = "/capture") {
+  let port = Number(cfg.port || BRIDGE_PORT_START);
+  try {
+    return await sendCaptureToPort(item, cfg, endpoint, port);
+  } catch (error) {
+    if (Number(error && error.status || 0) === 401) {
+      const pairingError = new Error("Pairing expired. Copy the pairing code from Media Downloader and pair the browser extension again.");
+      pairingError.status = 401;
+      throw pairingError;
+    }
+
+    const discoveredPort = await discoverBridgePort(port);
+    if (discoveredPort && discoveredPort !== port) {
+      port = discoveredPort;
+      await chrome.storage.local.set({port});
+      return await sendCaptureToPort(item, {...cfg, port}, endpoint, port);
+    }
+    throw error;
+  }
 }
 
 
@@ -857,49 +928,71 @@ async function downloadOverlayOption(message, sender) {
   if (!selected) return {ok: false, error: "That stream expired. Open the menu again to refresh qualities."};
 
   const cfg = await extensionSettings();
-  if (!cfg.token) return {ok: false, error: "Pair the extension with Media Downloader first."};
+  if (!cfg.token) {
+    try { await chrome.action.openPopup(); } catch (_) {}
+    return {
+      ok: false,
+      needsPairing: true,
+      error: "Pairing required. Copy the pairing code from Media Downloader and paste it into the extension popup."
+    };
+  }
 
   try {
-    // Seed all detected qualities first so the desktop engine has lower-quality
-    // fallbacks if the chosen signed stream expires during download.
+    // Queue the user's selected stream FIRST. Previously, one stale fallback
+    // capture could fail before /capture-download was reached, making the
+    // overlay look clickable while nothing appeared in the desktop app.
+    const result = await postCaptureToDesktop(selected.capture, cfg, "/capture-download");
+
+    // Seed lower-quality streams and the concrete post permalink only after
+    // the requested download is already in the desktop queue. These are
+    // best-effort fallbacks and must never block the primary handoff.
+    const fallbackTasks = [];
     for (const option of cached.items) {
-      await postCaptureToDesktop(option.capture, cfg, "/capture");
+      if (option.id === selected.id) continue;
+      fallbackTasks.push(postCaptureToDesktop(option.capture, cfg, "/capture"));
     }
 
-    // Feed/reel sites often expose only short direct/range objects to the
-    // browser. When a concrete permalink is available, register it as the
-    // final fallback so yt-dlp can recover the complete post/video if the
-    // captured direct object is only a transport chunk.
     if (isSpecificMediaPageUrl(player.mediaPageUrl)) {
-      await postCaptureToDesktop(
-        {
-          id: crypto.randomUUID(),
-          captured_at: Date.now() / 1000,
-          url: player.mediaPageUrl,
-          page_url: player.mediaPageUrl,
-          title: String(selected.capture.title || "Browser video"),
-          tab_id: tabId,
-          frame_id: frameId,
-          kind: "page",
-          content_type: "text/html",
-          headers: {},
-          capture_group_id: String(selected.capture.capture_group_id || "")
-        },
-        cfg,
-        "/capture"
+      fallbackTasks.push(
+        postCaptureToDesktop(
+          {
+            id: crypto.randomUUID(),
+            captured_at: Date.now() / 1000,
+            url: player.mediaPageUrl,
+            page_url: player.mediaPageUrl,
+            title: String(selected.capture.title || "Browser video"),
+            tab_id: tabId,
+            frame_id: frameId,
+            kind: "page",
+            content_type: "text/html",
+            headers: {},
+            capture_group_id: String(selected.capture.capture_group_id || "")
+          },
+          cfg,
+          "/capture"
+        )
       );
     }
 
-    const result = await postCaptureToDesktop(selected.capture, cfg, "/capture-download");
+    if (fallbackTasks.length) {
+      await Promise.allSettled(fallbackTasks);
+    }
+
     return {
       ok: true,
       captureId: result.capture_id || "",
       label: selected.label
     };
   } catch (error) {
+    const messageText = String(error && error.message ? error.message : "Open Media Downloader and try again.");
+    const needsPairing = Number(error && error.status || 0) === 401 || /pairing/i.test(messageText);
+    if (needsPairing) {
+      try { await chrome.action.openPopup(); } catch (_) {}
+    }
     return {
       ok: false,
-      error: String(error && error.message ? error.message : "Open Media Downloader and try again.")
+      needsPairing,
+      error: messageText
     };
   }
 }

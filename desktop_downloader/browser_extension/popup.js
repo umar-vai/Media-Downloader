@@ -72,7 +72,10 @@ async function testConnection(showText = true) {
     return false;
   }
   try {
-    const response = await fetch(`http://127.0.0.1:${cfg.port}/health`, {cache: "no-store"});
+    const response = await fetch(`http://127.0.0.1:${cfg.port}/health`, {
+      cache: "no-store",
+      targetAddressSpace: "local"
+    });
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error("Offline");
     statusBadge.textContent = "Connected";
