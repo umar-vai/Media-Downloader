@@ -1,0 +1,44 @@
+name: Hybrid PWA CI
+
+on:
+  push:
+    paths:
+      - "hybrid_core/**"
+      - "web_pwa/**"
+      - "desktop_downloader/media_sources.py"
+      - "desktop_downloader/browser_resolver.py"
+      - ".github/workflows/hybrid-pwa-ci.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install local-core dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r hybrid_core/requirements.txt
+
+      - name: Compile local core
+        shell: pwsh
+        run: |
+          python -m py_compile hybrid_core/engine.py
+          python -m py_compile hybrid_core/jobs.py
+          python -m py_compile hybrid_core/server.py
+          python -m py_compile hybrid_core/launcher.py
+
+      - name: Run unit tests
+        shell: pwsh
+        run: python -m unittest discover -s hybrid_core/tests -p "test_*.py" -v
+
+      - name: Validate PWA shell
+        shell: pwsh
+        run: |
+          python -c "from pathlib import Path; required=['index.html','app.js','styles.css','manifest.webmanifest','sw.js','icon.svg']; missing=[x for x in required if not (Path('web_pwa')/x).exists()]; assert not missing, missing"

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1323" />
+  <meta name="description" content="Local-first Media Downloader PWA" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+  <title>Media Downloader</title>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brandmark">MD</div>
+      <div><strong>MEDIA DOWNLOADER</strong><span>WEB/PWA • LOCAL CORE</span></div>
+    </div>
+    <div class="top-actions">
+      <span id="coreBadge" class="badge offline">CORE OFFLINE</span>
+      <button id="installBtn" class="secondary hidden">Install App</button>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="hero">
+      <p class="eyebrow">LOCAL-FIRST MEDIA WORKSPACE</p>
+      <h1>Paste. Analyze. Download locally.</h1>
+      <p>The interface lives in your browser. Extraction, FFmpeg and file saving stay on this computer.</p>
+    </section>
+
+    <section class="card">
+      <div class="section-head"><span>01 / SOURCE</span><h2>Paste a media link</h2></div>
+      <div class="url-row">
+        <input id="urlInput" type="url" placeholder="https://example.com/video/..." autocomplete="off" />
+        <button id="pasteBtn" class="secondary">Paste</button>
+        <button id="analyzeBtn" class="primary">Analyze</button>
+        <button id="cancelAnalyzeBtn" class="secondary danger" disabled>Cancel</button>
+      </div>
+      <p id="analysisStatus" class="status-text">Local Core is starting…</p>
+    </section>
+
+    <section id="mediaCard" class="card media-card muted-card">
+      <div class="preview" id="preview"><span>VIDEO<br/>PREVIEW</span></div>
+      <div class="media-copy">
+        <span id="mediaBadge" class="pill">WAITING FOR LINK</span>
+        <h2 id="mediaTitle">Analyze a link to load media details</h2>
+        <p id="mediaMeta">Title, creator, platform and duration will appear here.</p>
+      </div>
+      <button id="downloadBtn" class="download-cta" disabled>Download video</button>
+    </section>
+
+    <section class="card">
+      <div class="section-head"><span>02 / OUTPUT</span><h2>Choose what you want to save</h2></div>
+      <div class="settings-grid">
+        <div>
+          <label>Download type</label>
+          <div class="segmented">
+            <button id="videoMode" class="active">Video</button>
+            <button id="audioMode">Audio</button>
+          </div>
+          <label>Custom filename</label>
+          <input id="filenameInput" placeholder="media_download" />
+          <label>Save location</label>
+          <input id="downloadDirInput" />
+        </div>
+        <div class="settings-panel">
+          <label>Video quality</label>
+          <select id="qualitySelect"><option>Best available</option></select>
+          <label>Audio format</label>
+          <select id="audioFormatSelect"><option>MP3</option><option>M4A</option><option>WAV</option></select>
+          <label>Audio bitrate</label>
+          <select id="audioQualitySelect"><option>128</option><option selected>192</option><option>256</option><option>320</option></select>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="downloads-head">
+        <div class="section-head"><span>03 / DOWNLOADS</span><h2>Download activity</h2></div>
+        <button id="openDownloadsBtn" class="secondary">Open downloads</button>
+      </div>
+      <div id="downloadsList" class="downloads-list">
+        <div class="empty">No downloads yet.</div>
+      </div>
+    </section>
+
+    <footer>Media stays local. No browser extension is required.</footer>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
