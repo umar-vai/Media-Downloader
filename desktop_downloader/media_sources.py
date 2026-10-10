@@ -4,6 +4,7 @@ import re
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 from yt_dlp.networking.impersonate import ImpersonateTarget
+from yt_dlp.extractor.eporner import EpornerIE
 
 from network_proxy import yt_dlp_proxy_options
 
@@ -26,6 +27,31 @@ def _disable_instagram_auto_impersonation() -> None:
 
 
 _disable_instagram_auto_impersonation()
+
+
+def _patch_eporner_https_api() -> None:
+    """Force Eporner's JSON metadata endpoint to HTTPS.
+
+    Upstream currently constructs the XHR endpoint with http://. On some
+    Windows/network combinations that endpoint produces curl (52) empty replies
+    or curl (35) TLS shutdowns after redirects. Rewriting only Eporner's JSON
+    request to HTTPS keeps the site extractor intact while avoiding that path.
+    """
+    if getattr(EpornerIE, "_media_downloader_https_patch", False):
+        return
+
+    original_download_json = EpornerIE._download_json
+
+    def patched_download_json(self, url_or_request, *args, **kwargs):
+        if isinstance(url_or_request, str) and url_or_request.startswith("http://www.eporner.com/xhr/video/"):
+            url_or_request = "https://" + url_or_request[len("http://"):]
+        return original_download_json(self, url_or_request, *args, **kwargs)
+
+    EpornerIE._download_json = patched_download_json
+    EpornerIE._media_downloader_https_patch = True
+
+
+_patch_eporner_https_api()
 
 
 def _hostname(url: str) -> str:
@@ -200,17 +226,25 @@ def extraction_attempts(url: str) -> list[tuple[str, dict]]:
     if host in {"eporner.com", "www.eporner.com"}:
         base = _base_request_options()
         embed = eporner_embed_url(url)
-        attempts: list[tuple[str, dict]] = [(url, dict(base))]
-        if embed and embed != url:
-            attempts.append((embed, dict(base)))
 
-        # The current Eporner extractor can fail while fetching its JSON API.
-        # A true Generic extractor pass can still recover direct media URLs from
-        # the page/embed HTML. Do not use curl_cffi impersonation for this site:
-        # the Windows build has shown curl (52)/(35) SSL transport failures here.
-        attempts.append((url, {**base, "_force_generic_extractor": True}))
+        # Prefer yt-dlp's legacy urllib handler for Eporner. The packaged Windows
+        # build has repeatedly hit curl_cffi/SSL failures on the site's XHR
+        # metadata endpoint after one successful download.
+        legacy = {
+            **base,
+            "compat_opts": {"prefer-legacy-http-handler"},
+            "source_address": "0.0.0.0",
+        }
+
+        attempts: list[tuple[str, dict]] = [(url, dict(legacy))]
         if embed and embed != url:
-            attempts.append((embed, {**base, "_force_generic_extractor": True}))
+            attempts.append((embed, dict(legacy)))
+
+        # If the site extractor still fails, force Generic extraction from both
+        # page variants using the same non-curl transport.
+        attempts.append((url, {**legacy, "_force_generic_extractor": True}))
+        if embed and embed != url:
+            attempts.append((embed, {**legacy, "_force_generic_extractor": True}))
         return attempts
 
     if platform == "facebook":

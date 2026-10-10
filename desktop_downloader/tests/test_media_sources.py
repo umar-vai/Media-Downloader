@@ -67,6 +67,9 @@ class MediaSourceTests(unittest.TestCase):
         self.assertGreaterEqual(len(attempts), 2)
         self.assertTrue(any(options.get("force_generic_extractor") for _url, options in attempts))
         self.assertTrue(all("impersonate" not in options for _url, options in attempts))
+        self.assertTrue(
+            all("prefer-legacy-http-handler" in options.get("compat_opts", set()) for _url, options in attempts)
+        )
 
     def test_facebook_mobile_watch_url(self):
         self.assertEqual(
@@ -85,6 +88,11 @@ class MediaSourceTests(unittest.TestCase):
         self.assertTrue(attempts[0][0].startswith("https://m.facebook.com/watch/"))
         self.assertEqual(attempts[0][1].get("source_address"), "0.0.0.0")
         self.assertTrue(any("impersonate" in options for _url, options in attempts))
+
+    def test_eporner_https_api_patch_is_installed(self):
+        self.assertTrue(getattr(InstagramBaseIE, "_can_impersonate", None) is False)
+        from yt_dlp.extractor.eporner import EpornerIE
+        self.assertTrue(getattr(EpornerIE, "_media_downloader_https_patch", False))
 
     def test_eporner_uses_embed_and_true_generic_fallbacks_without_impersonation(self):
         url = "https://www.eporner.com/video-AbC123xyz/sample-title/"

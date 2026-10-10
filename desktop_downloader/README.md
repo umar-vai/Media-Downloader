@@ -68,3 +68,12 @@ Version 3.9.0 separates link analysis from downloads. A completed or active down
 - Reduced analysis retry latency so failed links return control sooner.
 - Fixed an analysis UI race that could show `LINK READY` while the same URL was already being analyzed.
 - Failed or cancelled analyses now leave the media card in a clear terminal state instead of continuing to display `Analyzing...`.
+
+
+## v3.9.2 repeated-analysis fix
+
+- Fixed the state where a second URL could show **Analyzing...** but never actually start its worker after a previous thumbnail had been rendered.
+- Thumbnail clearing is now failure-safe and can rebuild the preview label instead of aborting the analysis callback.
+- The Analyze button is disabled while the same URL is already being analyzed; use **Cancel analysis** to stop it.
+- Added a 45-second watchdog so a blocked website cannot leave the app stuck in Analyzing forever.
+- Eporner's XHR metadata endpoint is rewritten from HTTP to HTTPS at runtime and Eporner extraction prefers yt-dlp's legacy urllib handler to avoid recurring Windows curl/BoringSSL failures.

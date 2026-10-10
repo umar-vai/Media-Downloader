@@ -1228,7 +1228,7 @@ class DownloaderApp(ctk.CTk):
         self.analysis_running = True
         self.task_state = TaskState.ANALYZING
         self.cancel_analysis_button.configure(state="normal", text="Cancel analysis")
-        self.read_button.configure(text="Re-analyze")
+        self.read_button.configure(text="Analyzing…", state="disabled")
         LOGGER.info("Analysis %s started url=%s", job_id, url)
         return job_id, cancel_event
 
@@ -1243,7 +1243,7 @@ class DownloaderApp(ctk.CTk):
         self.analysis_url = ""
         self.analysis_running = False
         self.cancel_analysis_button.configure(state="disabled", text="Cancel analysis")
-        self.read_button.configure(text="Analyze")
+        self.read_button.configure(text="Analyze", state="normal")
 
     def _put_analysis_event(self, kind: str, job_id: int, data: Any = None) -> None:
         self.events.put((kind, {"job_id": job_id, "data": data}))
@@ -1262,13 +1262,35 @@ class DownloaderApp(ctk.CTk):
         self.analysis_url = ""
         self.analysis_running = False
         self.cancel_analysis_button.configure(state="disabled", text="Cancel analysis")
-        self.read_button.configure(text="Analyze")
+        self.read_button.configure(text="Analyze", state="normal")
         self.download_button.configure(state="disabled")
         if not silent:
             self.task_state = TaskState.CANCELLED
             self.media_badge.configure(text="ANALYSIS CANCELLED", fg_color="#2D2514", text_color=WARNING)
             self._set_status("Analysis cancelled. Paste or analyze another link.", "cancelled")
         LOGGER.info("Analysis %s cancellation requested", job_id)
+
+    def _analysis_watchdog(self, job_id: int, url: str) -> None:
+        if not self._is_current_analysis(job_id):
+            return
+        if self.url_var.get().strip() != url:
+            return
+
+        event = self.analysis_cancel_event
+        if event is not None:
+            event.set()
+
+        self.current_info = None
+        self.last_analyzed_url = ""
+        self.download_button.configure(state="disabled")
+        self.title_label.configure(text="Analysis timed out")
+        self.meta_label.configure(text="The website did not return media information in time.")
+        self.media_badge.configure(text="ANALYSIS TIMEOUT", fg_color="#351722", text_color=DANGER)
+        self.media_action_hint.configure(text="Press Analyze to retry, or paste another link.")
+        self.task_state = TaskState.ERROR
+        self._set_status("Analysis timed out after 45 seconds", "error")
+        self._finish_analysis(job_id)
+        LOGGER.warning("Analysis %s timed out url=%s", job_id, url)
 
     def _set_status(self, text: str, kind: str = "ready") -> None:
         palette = {
@@ -1414,6 +1436,12 @@ class DownloaderApp(ctk.CTk):
             messagebox.showerror(APP_NAME, "Please paste a valid http:// or https:// media URL.")
             return
 
+        if self.analysis_running:
+            if url == self.analysis_url:
+                self._set_status("This link is already being analyzed.", "working")
+                return
+            self.cancel_analysis(silent=True)
+
         job_id, cancel_event = self._begin_analysis(url)
         self.current_info = None
         self.last_analyzed_url = ""
@@ -1421,19 +1449,27 @@ class DownloaderApp(ctk.CTk):
         self.title_label.configure(text=f"Analyzing {platform_name(url)} media…")
         self.meta_label.configure(text="Trying compatible connection paths…")
         self.media_action_hint.configure(text="You can cancel this analysis or keep existing downloads running.")
-        self._apply_thumbnail(None)
         self._set_status(f"Analyzing {platform_name(url)}…", "working")
         self.media_badge.configure(
             text=f"{platform_name(url).upper()} • ANALYZING",
             fg_color="#162344",
             text_color=CYAN,
         )
+
+        # Thumbnail cleanup is cosmetic. A Tk image error must never prevent the
+        # extraction worker from starting for the next link.
+        try:
+            self._apply_thumbnail(None)
+        except Exception:
+            LOGGER.exception("Thumbnail reset failed before analysis %s", job_id)
+
         threading.Thread(
             target=self._analyze_media_worker,
             args=(job_id, cancel_event, url),
             daemon=True,
             name=f"media-analysis-{job_id}",
         ).start()
+        self.after(45_000, lambda jid=job_id, source=url: self._analysis_watchdog(jid, source))
 
     def _analyze_media_worker(self, job_id: int, cancel_event: threading.Event, url: str) -> None:
         try:
@@ -1777,10 +1813,30 @@ class DownloaderApp(ctk.CTk):
         finally:
             self._put_download_event("download_finished", request_id)
 
+    def _reset_thumbnail_label(self) -> None:
+        """Clear a previous CTkImage without allowing a Tk image error to abort analysis."""
+        self.thumbnail_image = None
+        try:
+            self.thumbnail_label.configure(image="", text="VIDEO\nPREVIEW")
+            return
+        except Exception:
+            LOGGER.exception("Could not clear existing thumbnail label; rebuilding it")
+
+        try:
+            self.thumbnail_label.destroy()
+        except Exception:
+            pass
+        self.thumbnail_label = ctk.CTkLabel(
+            self.thumbnail_frame,
+            text="VIDEO\nPREVIEW",
+            text_color="#526683",
+            font=("Segoe UI Semibold", 11),
+        )
+        self.thumbnail_label.place(relx=0.5, rely=0.5, anchor="center")
+
     def _apply_thumbnail(self, raw: bytes | None) -> None:
         if not raw:
-            self.thumbnail_image = None
-            self.thumbnail_label.configure(image=None, text="VIDEO\nPREVIEW")
+            self._reset_thumbnail_label()
             return
         try:
             image = Image.open(io.BytesIO(raw)).convert("RGB")
@@ -1795,8 +1851,8 @@ class DownloaderApp(ctk.CTk):
             )
             self.thumbnail_label.configure(image=self.thumbnail_image, text="")
         except Exception:
-            self.thumbnail_image = None
-            self.thumbnail_label.configure(image=None, text="VIDEO\nPREVIEW")
+            LOGGER.exception("Could not render media thumbnail")
+            self._reset_thumbnail_label()
 
     def _drain_events(self) -> None:
         with self._download_progress_lock:
