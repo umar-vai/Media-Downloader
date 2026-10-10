@@ -313,6 +313,17 @@ class JobManager:
             self._logger.exception("editor_export_failed job=%s", job.id)
             self._set(job, status="failed", detail="Export failed", error=str(exc))
 
+    def active_summary(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        with self._lock:
+            for job in self._jobs.values():
+                if job.status in {"queued", "running", "cancelling"}:
+                    counts[job.kind] = counts.get(job.kind, 0) + 1
+        return counts
+
+    def has_active_work(self) -> bool:
+        return any(self.active_summary().values())
+
     def cancel(self, job_id: str) -> bool:
         job = self.get(job_id)
         if job is None or job.status in TERMINAL:

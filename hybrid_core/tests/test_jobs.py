@@ -166,6 +166,15 @@ class JobManagerTests(unittest.TestCase):
             self.assertEqual(state["status"], "failed")
             self.assertIn("Retry", state["error"])
 
+    def test_active_summary_tracks_running_work(self):
+        manager = JobManager(max_downloads=1)
+        job = manager._new("download", {"url": "https://example.com"})
+        manager._set(job, status="running", detail="Downloading")
+        self.assertTrue(manager.has_active_work())
+        self.assertEqual(manager.active_summary()["download"], 1)
+        manager._set(job, status="completed", progress=1.0)
+        self.assertFalse(manager.has_active_work())
+
     def test_interrupted_download_is_restored_as_retryable_failure(self):
         with tempfile.TemporaryDirectory() as folder:
             state_file = Path(folder) / "jobs.json"

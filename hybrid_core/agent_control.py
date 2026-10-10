@@ -27,6 +27,15 @@ def updater_helper_path() -> Path:
     return executable_path().with_name("MediaDownloaderCoreUpdater.exe")
 
 
+def previous_core_path() -> Path:
+    target = executable_path()
+    return target.with_suffix(target.suffix + ".previous")
+
+
+def rollback_available() -> bool:
+    return is_packaged_agent() and previous_core_path().is_file()
+
+
 def can_self_update() -> bool:
     return is_packaged_agent() and updater_helper_path().is_file()
 

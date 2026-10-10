@@ -890,6 +890,8 @@ function renderSettings(settings = {}) {
   $("defaultAudioQualitySelect").value = settings.audio_quality || "192";
   $("maxDownloadsSelect").value = String(settings.max_concurrent_downloads || 3);
   $("updateChannelSelect").value = settings.update_channel || "stable";
+  $("updatePolicySelect").value = settings.update_policy || "notify";
+  $("updateInstallHourSelect").value = String(settings.update_install_hour ?? 3);
   $("autoUpdateCheck").checked = Boolean(settings.auto_check_core_updates);
   $("openBrowserCheck").checked = settings.open_browser_on_start !== false;
   $("trayIconCheck").checked = settings.tray_icon_enabled !== false;
@@ -910,6 +912,8 @@ async function saveCoreSettings(extra = {}) {
     max_concurrent_downloads: Number($("maxDownloadsSelect").value || 3),
     auto_check_core_updates: $("autoUpdateCheck").checked,
     update_channel: $("updateChannelSelect").value,
+    update_policy: $("updatePolicySelect").value,
+    update_install_hour: Number($("updateInstallHourSelect").value || 3),
     open_browser_on_start: $("openBrowserCheck").checked,
     tray_icon_enabled: $("trayIconCheck").checked,
     launch_at_login: $("launchAtLoginCheck").checked,
@@ -927,12 +931,14 @@ function renderAgent(agent = {}) {
   state.agent = {...agent};
   const connected = Boolean(agent.connected);
   const selfUpdate = Boolean(agent.self_update);
+  const rollback = Boolean(agent.rollback_available);
   $("agentStatus").textContent = connected
-    ? `Agent connected • self-update ${selfUpdate ? "ready" : "unavailable"}`
+    ? `Agent connected • self-update ${selfUpdate ? "ready" : "unavailable"} • rollback ${rollback ? "available" : "none"}`
     : "Agent supervisor is not connected. Developer launcher mode may be active.";
   $("restartAgentBtn").disabled = !connected;
   $("quitAgentBtn").disabled = !connected;
   $("openAgentAppBtn").disabled = !connected;
+  $("rollbackCoreBtn").disabled = !connected || !rollback;
   $("launchAtLoginCheck").disabled = !Boolean(agent.startup_management);
   if ("launch_at_login" in agent) $("launchAtLoginCheck").checked = Boolean(agent.launch_at_login);
 }
@@ -1078,6 +1084,8 @@ async function loadDiagnostics() {
       `Updates: ${data.update_dir}`,
       `Agent: ${data.agent?.connected ? "connected" : "not connected"}`,
       `Self-update: ${data.agent?.self_update ? "ready" : "unavailable"}`,
+      `Rollback: ${data.agent?.rollback_available ? "available" : "none"}`,
+      `Update policy: ${data.settings?.update_policy || "notify"} @ ${String(data.settings?.update_install_hour ?? 3).padStart(2, "0")}:00`,
       `Launch at sign-in: ${data.agent?.launch_at_login ? "enabled" : "disabled"}`,
       `Downloads: ${JSON.stringify(data.download_counts || {})}`,
     ].join("\n");
@@ -1158,6 +1166,11 @@ $("openAgentAppBtn").addEventListener("click", () => agentCommand("/api/agent/op
 $("restartAgentBtn").addEventListener("click", () => {
   if (window.confirm("Restart the Local Core now? Active analysis/download/export work will be interrupted.")) {
     agentCommand("/api/agent/restart", "Restarting Local Core…");
+  }
+});
+$("rollbackCoreBtn").addEventListener("click", () => {
+  if (window.confirm("Roll back to the previous Local Core version? The current Core will stop and the previous version will be health-checked before it is kept.")) {
+    agentCommand("/api/agent/rollback", "Rolling back to the previous Local Core…");
   }
 });
 $("quitAgentBtn").addEventListener("click", () => {

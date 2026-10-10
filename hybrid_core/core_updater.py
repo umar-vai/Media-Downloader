@@ -13,7 +13,8 @@ REPOSITORY = "umar-vai/Media-Downloader"
 TAG_PREFIX = "core-v"
 RELEASES_API = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=40"
 USER_AGENT = "MediaDownloaderLocalCore/1.0"
-ASSET_NAMES = ("MediaDownloaderCore.exe", "MediaDownloaderCore.zip")
+ASSET_NAMES = ("MediaDownloaderCore.exe",)
+UPDATER_ASSET_NAME = "MediaDownloaderCoreUpdater.exe"
 
 
 def version_tuple(value: str) -> tuple[int, int, int]:
@@ -92,6 +93,7 @@ class CoreUpdateService:
             "release_url": "",
             "asset_name": "",
             "staged_path": "",
+            "staged_updater_path": "",
             "can_apply": False,
         }
 
@@ -143,6 +145,7 @@ class CoreUpdateService:
                     release_url="",
                     asset_name="",
                     staged_path="",
+                    staged_updater_path="",
                 )
                 return
 
@@ -153,6 +156,7 @@ class CoreUpdateService:
             checksum_name = f"{asset_name}.sha256" if asset_name else ""
             available = version_tuple(latest) > version_tuple(self.current_version)
 
+            updater_checksum_name = f"{UPDATER_ASSET_NAME}.sha256"
             self._candidate = {
                 "version": latest,
                 "tag": tag,
@@ -160,6 +164,8 @@ class CoreUpdateService:
                 "asset_name": asset_name,
                 "asset_url": assets.get(asset_name, ""),
                 "checksum_url": assets.get(checksum_name, ""),
+                "updater_asset_url": assets.get(UPDATER_ASSET_NAME, ""),
+                "updater_checksum_url": assets.get(updater_checksum_name, ""),
             }
 
             if available:
@@ -176,6 +182,7 @@ class CoreUpdateService:
                     release_url=self._candidate["release_url"],
                     asset_name=asset_name,
                     staged_path="",
+                    staged_updater_path="",
                     progress=0.0,
                 )
             else:
@@ -219,6 +226,42 @@ class CoreUpdateService:
         with urllib.request.urlopen(request, timeout=30) as response:
             return response.read()
 
+    def _download_verified_asset(
+        self,
+        *,
+        url: str,
+        checksum_url: str,
+        target: Path,
+        asset_name: str,
+        report_progress: bool = False,
+    ) -> None:
+        checksum_text = self._download_bytes(checksum_url).decode("utf-8", errors="replace")
+        expected = _expected_checksum(checksum_text, asset_name)
+        partial = target.with_suffix(target.suffix + ".part")
+        partial.unlink(missing_ok=True)
+
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(request, timeout=30) as response, partial.open("wb") as output:
+            total = int(response.headers.get("Content-Length") or 0)
+            downloaded = 0
+            digest = hashlib.sha256()
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+                digest.update(chunk)
+                downloaded += len(chunk)
+                if report_progress:
+                    progress = (downloaded / total) if total else 0.0
+                    self._set(progress=max(0.0, min(0.98, progress)))
+
+        actual = digest.hexdigest().lower()
+        if actual != expected:
+            partial.unlink(missing_ok=True)
+            raise RuntimeError(f"Downloaded {asset_name} failed SHA-256 verification.")
+        partial.replace(target)
+
     def _download_worker(self, candidate: dict[str, Any]) -> None:
         try:
             version = str(candidate["version"])
@@ -226,40 +269,33 @@ class CoreUpdateService:
             target_dir = self.update_dir / f"core-v{version}"
             target_dir.mkdir(parents=True, exist_ok=True)
             target = target_dir / asset_name
-            partial = target.with_suffix(target.suffix + ".part")
+            self._download_verified_asset(
+                url=str(candidate["asset_url"]),
+                checksum_url=str(candidate["checksum_url"]),
+                target=target,
+                asset_name=asset_name,
+                report_progress=True,
+            )
 
-            checksum_text = self._download_bytes(str(candidate["checksum_url"])).decode("utf-8", errors="replace")
-            expected = _expected_checksum(checksum_text, asset_name)
+            staged_updater = ""
+            updater_url = str(candidate.get("updater_asset_url") or "")
+            updater_checksum_url = str(candidate.get("updater_checksum_url") or "")
+            if updater_url and updater_checksum_url:
+                updater_target = target_dir / UPDATER_ASSET_NAME
+                self._download_verified_asset(
+                    url=updater_url,
+                    checksum_url=updater_checksum_url,
+                    target=updater_target,
+                    asset_name=UPDATER_ASSET_NAME,
+                )
+                staged_updater = str(updater_target)
 
-            request = urllib.request.Request(str(candidate["asset_url"]), headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(request, timeout=30) as response, partial.open("wb") as output:
-                total = int(response.headers.get("Content-Length") or 0)
-                downloaded = 0
-                digest = hashlib.sha256()
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    output.write(chunk)
-                    digest.update(chunk)
-                    downloaded += len(chunk)
-                    progress = (downloaded / total) if total else 0.0
-                    self._set(progress=max(0.0, min(1.0, progress)))
-
-            actual = digest.hexdigest().lower()
-            if actual != expected:
-                partial.unlink(missing_ok=True)
-                raise RuntimeError("Downloaded Local Core update failed SHA-256 verification.")
-
-            partial.replace(target)
             self._set(
                 status="ready",
-                detail=(
-                    f"Local Core v{version} is downloaded and verified. "
-                    "Automatic apply will activate with the packaged Local Core agent."
-                ),
+                detail=f"Local Core v{version} is downloaded and SHA-256 verified.",
                 progress=1.0,
                 staged_path=str(target),
+                staged_updater_path=staged_updater,
                 can_apply=self.can_apply,
             )
         except Exception as exc:

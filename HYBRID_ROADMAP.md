@@ -174,11 +174,23 @@ The local Web/PWA editor now covers the core workflow from source selection thro
 - Developer BAT launcher now uses the same parent-agent / child-core architecture.
 - Local Core bumped to v0.7.0.
 
-### Remaining Phase 4 work
+### Phase 4B — Unattended updates + health rollback ✅
 
-- unattended update policy (optional auto-download/apply window)
-- automatic rollback if the newly replaced Core cannot pass post-update health checks
-- expose previous-version rollback from the PWA
+- Added update policies: **Notify only**, **Auto-download**, and **Auto-download & install**.
+- Added a configurable local install-window hour; automatic installation only runs in that hour and only when no analysis/download/editor export is active.
+- Local Core now performs background update checks even when the PWA is not open.
+- Verified updates pass the expected target version to the external updater.
+- The updater launches the replacement Core and polls the local `/api/health` endpoint before accepting it.
+- If the replacement exits, never becomes healthy, or reports the wrong version, the updater terminates it, restores the previous executable and relaunches the known-good Core automatically.
+- A failed replacement is retained as `MediaDownloaderCore.exe.failed` for diagnosis.
+- Successful updates retain `MediaDownloaderCore.exe.previous`.
+- Added **Rollback previous** in the PWA. Manual rollback also runs a health check; if the previous build fails, the rollback is reversed automatically.
+- Apply and rollback are blocked while downloads/analysis/editor exports are active.
+- Local Core bumped to v0.8.0.
+
+### Phase 4 status
+
+The lightweight Windows agent now has installation, supervision, startup control, verified self-update, unattended policy, health validation and rollback. The next major block is Phase 5 production hardening.
 
 ## Phase 5 — Production hardening
 

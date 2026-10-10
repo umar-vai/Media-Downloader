@@ -16,6 +16,8 @@ class SettingsStoreTests(unittest.TestCase):
                 "video_quality": "bad",
                 "audio_format": "ogg",
                 "update_channel": "nightly",
+                "update_policy": "dangerous",
+                "update_install_hour": 99,
             },
             Path("C:/Downloads"),
         )
@@ -23,6 +25,8 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(settings["video_quality"], "720p")
         self.assertEqual(settings["audio_format"], "MP3")
         self.assertEqual(settings["update_channel"], "stable")
+        self.assertEqual(settings["update_policy"], "notify")
+        self.assertEqual(settings["update_install_hour"], 23)
         self.assertTrue(settings["tray_icon_enabled"])
         self.assertFalse(settings["launch_at_login"])
 

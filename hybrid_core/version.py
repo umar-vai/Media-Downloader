@@ -1,1 +1,1 @@
-CORE_VERSION = "0.7.0"
+CORE_VERSION = "0.8.0"

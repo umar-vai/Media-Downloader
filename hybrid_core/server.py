@@ -4,6 +4,8 @@ import os
 import platform
 import secrets
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -150,6 +152,8 @@ class SettingsPatch(BaseModel):
     max_concurrent_downloads: int | None = Field(default=None, ge=1, le=6)
     auto_check_core_updates: bool | None = None
     update_channel: str | None = None
+    update_policy: str | None = None
+    update_install_hour: int | None = Field(default=None, ge=0, le=23)
     open_browser_on_start: bool | None = None
     tray_icon_enabled: bool | None = None
     launch_at_login: bool | None = None
@@ -170,12 +174,32 @@ def _custom_crop(payload: Any) -> tuple[int, int, int, int] | None:
     )
 
 
-def _agent_connected() -> bool:
+def _agent_snapshot() -> dict[str, Any]:
+    base = {
+        "connected": False,
+        "self_update": can_self_update(),
+        "rollback_available": False,
+        "previous_path": "",
+        "startup_management": can_manage_startup(),
+        "launch_at_login": launch_at_login_enabled(),
+    }
     try:
-        send_control("ping")
-        return True
+        ping = send_control("ping")
+        base.update(
+            connected=True,
+            self_update=bool(ping.get("self_update", base["self_update"])),
+            rollback_available=bool(ping.get("rollback_available")),
+            previous_path=str(ping.get("previous_path") or ""),
+            agent_version=str(ping.get("version") or ""),
+            agent_pid=int(ping.get("pid") or 0),
+        )
     except Exception:
-        return False
+        pass
+    return base
+
+
+def _agent_connected() -> bool:
+    return bool(_agent_snapshot()["connected"])
 
 
 def require_key(
@@ -221,12 +245,7 @@ def bootstrap() -> dict[str, Any]:
         "max_concurrent_downloads": int(settings["max_concurrent_downloads"]),
         "settings": settings,
         "update": UPDATER.snapshot(),
-        "agent": {
-            "connected": _agent_connected(),
-            "self_update": can_self_update(),
-            "startup_management": can_manage_startup(),
-            "launch_at_login": launch_at_login_enabled(),
-        },
+        "agent": _agent_snapshot(),
         "capabilities": {
             "analyze": True,
             "cancel_analysis": True,
@@ -372,12 +391,8 @@ def diagnostics() -> dict[str, Any]:
         "download_counts": counts,
         "settings": settings,
         "update": UPDATER.snapshot(),
-        "agent": {
-            "connected": _agent_connected(),
-            "self_update": can_self_update(),
-            "startup_management": can_manage_startup(),
-            "launch_at_login": launch_at_login_enabled(),
-        },
+        "agent": _agent_snapshot(),
+        "active_work": MANAGER.active_summary(),
     }
 
 
@@ -595,12 +610,7 @@ def update_settings(payload: SettingsPatch) -> dict[str, Any]:
 
 @app.get("/api/agent/status", dependencies=[Depends(require_key)])
 def agent_status() -> dict[str, Any]:
-    return {
-        "connected": _agent_connected(),
-        "self_update": can_self_update(),
-        "startup_management": can_manage_startup(),
-        "launch_at_login": launch_at_login_enabled(),
-    }
+    return _agent_snapshot()
 
 
 @app.post("/api/agent/open", dependencies=[Depends(require_key)])
@@ -623,6 +633,19 @@ def agent_restart() -> dict[str, Any]:
 def agent_quit() -> dict[str, Any]:
     try:
         return send_control("quit")
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/agent/rollback", dependencies=[Depends(require_key)])
+def agent_rollback() -> dict[str, Any]:
+    agent = _agent_snapshot()
+    if not agent.get("rollback_available"):
+        raise HTTPException(status_code=409, detail="No previous Local Core version is available.")
+    if MANAGER.has_active_work():
+        raise HTTPException(status_code=409, detail="Wait for active downloads/exports to finish before rolling back.")
+    try:
+        return send_control("rollback_previous")
     except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -655,11 +678,96 @@ def apply_update() -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="No verified Local Core update is ready to apply.")
     if not can_self_update():
         raise HTTPException(status_code=409, detail="Update apply requires the installed Local Core agent.")
+    if MANAGER.has_active_work():
+        raise HTTPException(status_code=409, detail="Wait for active downloads/exports to finish before applying the update.")
     try:
-        send_control("apply_update", path=staged)
+        send_control(
+            "apply_update",
+            path=staged,
+            expected_version=str(state.get("latest_version") or ""),
+            updater_path=str(state.get("staged_updater_path") or ""),
+        )
     except Exception as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"ok": True, "detail": "Applying verified update. Local Core will restart."}
+
+
+_AUTO_UPDATE_LOCK = threading.Lock()
+_AUTO_UPDATE_STARTED = False
+_AUTO_UPDATE_LAST_CHECK = 0.0
+
+
+def _start_unattended_update_worker() -> None:
+    global _AUTO_UPDATE_STARTED
+    with _AUTO_UPDATE_LOCK:
+        if _AUTO_UPDATE_STARTED:
+            return
+        _AUTO_UPDATE_STARTED = True
+    threading.Thread(
+        target=_unattended_update_loop,
+        daemon=True,
+        name="local-core-unattended-updater",
+    ).start()
+
+
+def _unattended_update_loop() -> None:
+    global _AUTO_UPDATE_LAST_CHECK
+    time.sleep(4.0)
+    while True:
+        try:
+            settings = SETTINGS.get()
+            if not bool(settings.get("auto_check_core_updates", True)):
+                time.sleep(60.0)
+                continue
+
+            policy = str(settings.get("update_policy") or "notify")
+            state = UPDATER.snapshot()
+            status = str(state.get("status") or "idle")
+            now = time.time()
+
+            should_check = status == "idle" or (
+                status in {"current", "error"}
+                and now - _AUTO_UPDATE_LAST_CHECK >= 6 * 60 * 60
+            )
+            if should_check:
+                UPDATER.set_channel(str(settings.get("update_channel") or "stable"))
+                UPDATER.start_check()
+                _AUTO_UPDATE_LAST_CHECK = now
+                time.sleep(15.0)
+                continue
+
+            if policy in {"download", "install"} and status == "available":
+                try:
+                    UPDATER.start_download()
+                except ValueError:
+                    pass
+                time.sleep(15.0)
+                continue
+
+            if policy == "install" and status == "ready" and bool(state.get("can_apply")):
+                install_hour = int(settings.get("update_install_hour", 3))
+                if time.localtime().tm_hour == install_hour and not MANAGER.has_active_work():
+                    staged = str(state.get("staged_path") or "")
+                    if staged:
+                        LOGGER.info(
+                            "unattended_core_update_apply version=%s",
+                            state.get("latest_version"),
+                        )
+                        send_control(
+                            "apply_update",
+                            path=staged,
+                            expected_version=str(state.get("latest_version") or ""),
+                            updater_path=str(state.get("staged_updater_path") or ""),
+                        )
+                        return
+        except Exception:
+            LOGGER.exception("unattended_core_update_cycle_failed")
+        time.sleep(60.0)
+
+
+@app.on_event("startup")
+def start_background_services() -> None:
+    _start_unattended_update_worker()
 
 
 @app.post("/api/system/open-log", dependencies=[Depends(require_key)])

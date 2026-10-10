@@ -29,6 +29,8 @@ from .agent_control import (
     MUTEX_NAME,
     can_self_update,
     executable_path,
+    previous_core_path,
+    rollback_available,
     send_control,
     updater_helper_path,
 )
@@ -156,11 +158,30 @@ class Agent:
             raise ValueError("The staged Local Core executable is missing.")
         return candidate
 
-    def apply_update(self, raw_path: str) -> None:
+    def _validate_staged_updater(self, raw: str) -> Path | None:
+        if not raw:
+            return None
+        candidate = Path(raw).expanduser().resolve()
+        root = UPDATE_DIR.resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Staged updater is outside the Local Core update directory.") from exc
+        if candidate.name.lower() != "mediadownloadercoreupdater.exe" or not candidate.is_file():
+            raise ValueError("The staged Local Core updater is missing.")
+        return candidate
+
+    def apply_update(
+        self,
+        raw_path: str,
+        expected_version: str = "",
+        staged_updater_path: str = "",
+    ) -> None:
         if not can_self_update():
             raise RuntimeError("Self-update requires the installed Media Downloader Core agent.")
         staged = self._validate_staged_update(raw_path)
-        helper = updater_helper_path()
+        staged_helper = self._validate_staged_updater(staged_updater_path)
+        helper = staged_helper or updater_helper_path()
         target = executable_path()
         self.stop_child()
         subprocess.Popen(
@@ -170,6 +191,36 @@ class Agent:
                 str(os.getpid()),
                 "--source",
                 str(staged),
+                "--target",
+                str(target),
+                "--expected-version",
+                str(expected_version or ""),
+                "--install-helper-target",
+                str(updater_helper_path()),
+            ],
+            cwd=str(target.parent),
+            close_fds=True,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        self.stop_event.set()
+        if self.icon:
+            self.icon.stop()
+
+    def rollback_previous(self) -> None:
+        if not can_self_update():
+            raise RuntimeError("Rollback requires the installed Media Downloader Core agent.")
+        if not rollback_available():
+            raise RuntimeError("No previous Local Core version is available to roll back to.")
+
+        helper = updater_helper_path()
+        target = executable_path()
+        self.stop_child()
+        subprocess.Popen(
+            [
+                str(helper),
+                "--wait-pid",
+                str(os.getpid()),
+                "--rollback",
                 "--target",
                 str(target),
             ],
@@ -189,7 +240,14 @@ class Agent:
     def handle_command(self, payload: dict[str, Any]) -> dict[str, Any]:
         command = str(payload.get("command") or "")
         if command == "ping":
-            return {"ok": True, "version": CORE_VERSION, "pid": os.getpid()}
+            return {
+                "ok": True,
+                "version": CORE_VERSION,
+                "pid": os.getpid(),
+                "self_update": can_self_update(),
+                "rollback_available": rollback_available(),
+                "previous_path": str(previous_core_path()) if rollback_available() else "",
+            }
         if command == "open_app":
             threading.Thread(target=open_app, daemon=True).start()
             return {"ok": True}
@@ -204,10 +262,24 @@ class Agent:
             return {"ok": True}
         if command == "apply_update":
             path = str(payload.get("path") or "")
+            expected_version = str(payload.get("expected_version") or "")
+            staged_updater_path = str(payload.get("updater_path") or "")
             if not can_self_update():
                 raise RuntimeError("Self-update requires the installed Media Downloader Core agent.")
             staged = self._validate_staged_update(path)
-            threading.Timer(0.2, lambda: self.apply_update(str(staged))).start()
+            threading.Timer(
+                0.2,
+                lambda: self.apply_update(
+                    str(staged),
+                    expected_version=expected_version,
+                    staged_updater_path=staged_updater_path,
+                ),
+            ).start()
+            return {"ok": True}
+        if command == "rollback_previous":
+            if not rollback_available():
+                raise RuntimeError("No previous Local Core version is available to roll back to.")
+            threading.Timer(0.2, self.rollback_previous).start()
             return {"ok": True}
         raise ValueError(f"Unknown agent command: {command}")
 
@@ -327,6 +399,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--server-child", action="store_true")
     parser.add_argument("--background", action="store_true")
     parser.add_argument("--updated", action="store_true")
+    parser.add_argument("--rollback-recovered", action="store_true")
+    parser.add_argument("--rollback-recovery-failed", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--report")
     return parser.parse_args()

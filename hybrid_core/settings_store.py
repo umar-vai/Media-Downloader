@@ -10,6 +10,7 @@ ALLOWED_VIDEO_QUALITIES = {"Best available", "1080p", "720p", "480p", "360p"}
 ALLOWED_AUDIO_FORMATS = {"MP3", "M4A", "WAV"}
 ALLOWED_AUDIO_QUALITIES = {"128", "192", "256", "320"}
 ALLOWED_UPDATE_CHANNELS = {"stable", "beta"}
+ALLOWED_UPDATE_POLICIES = {"notify", "download", "install"}
 
 
 def default_settings(default_download_dir: Path) -> dict[str, Any]:
@@ -22,6 +23,8 @@ def default_settings(default_download_dir: Path) -> dict[str, Any]:
         "max_concurrent_downloads": 3,
         "auto_check_core_updates": True,
         "update_channel": "stable",
+        "update_policy": "notify",
+        "update_install_hour": 3,
         "open_browser_on_start": True,
         "tray_icon_enabled": True,
         "launch_at_login": False,
@@ -61,6 +64,14 @@ def normalize_settings(payload: dict[str, Any] | None, default_download_dir: Pat
 
     channel = str(settings.get("update_channel") or "stable").lower()
     settings["update_channel"] = channel if channel in ALLOWED_UPDATE_CHANNELS else "stable"
+
+    policy = str(settings.get("update_policy") or "notify").lower()
+    settings["update_policy"] = policy if policy in ALLOWED_UPDATE_POLICIES else "notify"
+    try:
+        install_hour = int(settings.get("update_install_hour", 3))
+    except (TypeError, ValueError):
+        install_hour = 3
+    settings["update_install_hour"] = max(0, min(23, install_hour))
     return settings
 
 
