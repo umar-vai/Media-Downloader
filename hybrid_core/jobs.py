@@ -78,19 +78,19 @@ class JobManager:
         restored = 0
         for item in self._store.load():
             kind = str(item.get("kind") or "")
-            if kind != "download":
+            if kind not in {"download", "editor_export"}:
                 continue
             status = str(item.get("status") or "failed")
             if status in {"queued", "running", "cancelling"}:
                 status = "failed"
                 item["detail"] = "Interrupted by Local Core restart"
                 item["error"] = (
-                    "The previous Local Core session ended before this download finished. "
-                    "Press Retry to continue."
+                    "The previous Local Core session ended before this job finished. "
+                    "Press Retry to run it again."
                 )
             job = Job(
                 id=str(item.get("id") or uuid.uuid4().hex),
-                kind="download",
+                kind=kind,
                 status=status,
                 progress=float(item.get("progress") or 0.0),
                 detail=str(item.get("detail") or ""),
@@ -103,20 +103,20 @@ class JobManager:
             self._jobs[job.id] = job
             restored += 1
         if restored:
-            self._logger.info("restored_download_jobs count=%s", restored)
+            self._logger.info("restored_persistent_jobs count=%s", restored)
             self._persist()
 
     def _persist(self) -> None:
         if self._store is None:
             return
         with self._lock:
-            downloads = [
+            persistent = [
                 job.snapshot()
-                for job in sorted(self._jobs.values(), key=lambda item: item.created_at)[-120:]
-                if job.kind == "download"
+                for job in sorted(self._jobs.values(), key=lambda item: item.created_at)[-180:]
+                if job.kind in {"download", "editor_export"}
             ]
         try:
-            self._store.save(downloads)
+            self._store.save(persistent)
         except Exception:
             self._logger.exception("could_not_persist_jobs")
 
@@ -124,7 +124,7 @@ class JobManager:
         job = Job(id=uuid.uuid4().hex, kind=kind, request=dict(request))
         with self._lock:
             self._jobs[job.id] = job
-        if kind == "download":
+        if kind in {"download", "editor_export"}:
             self._persist()
         return job
 
@@ -167,7 +167,7 @@ class JobManager:
             if result is not None:
                 job.result = result
             job.updated_at = time.time()
-        if job.kind == "download":
+        if job.kind in {"download", "editor_export"}:
             self._persist()
 
     def start_analysis(self, url: str) -> Job:
@@ -293,6 +293,8 @@ class JobManager:
                 volume_percent=float(job.request.get("volume_percent") or 100.0),
                 fade_in=float(job.request.get("fade_in") or 0.0),
                 fade_out=float(job.request.get("fade_out") or 0.0),
+                audio_preset=str(job.request.get("audio_preset") or "Flat"),
+                noise_reduction=bool(job.request.get("noise_reduction")),
                 quality=str(job.request.get("quality") or "Balanced"),
                 cancel_event=job.cancel_event,
                 on_progress=lambda value, text: self._set(job, progress=value, detail=text),

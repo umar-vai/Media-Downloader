@@ -99,11 +99,38 @@
         <button id="loadEditorPathBtn" class="secondary">Load path</button>
       </div>
 
+      <div class="editor-library-bar">
+        <div>
+          <label>Preset</label>
+          <select id="editorPresetSelect"><option value="">No saved presets</option></select>
+          <div class="library-actions">
+            <button id="applyEditorPresetBtn" class="secondary">Apply</button>
+            <button id="saveEditorPresetBtn" class="secondary">Save current</button>
+            <button id="deleteEditorPresetBtn" class="secondary danger">Delete</button>
+          </div>
+        </div>
+        <div>
+          <label>Project</label>
+          <select id="editorProjectSelect"><option value="">No saved projects</option></select>
+          <div class="library-actions">
+            <button id="loadEditorProjectBtn" class="secondary">Load</button>
+            <button id="saveEditorProjectBtn" class="secondary">Save current</button>
+            <button id="deleteEditorProjectBtn" class="secondary danger">Delete</button>
+          </div>
+        </div>
+      </div>
+
       <div class="editor-layout">
         <div class="editor-visual">
-          <div class="editor-preview-shell">
+          <div id="editorPreviewShell" class="editor-preview-shell">
             <img id="editorPreviewImage" alt="" class="hidden" />
             <video id="editorPreviewVideo" class="hidden" controls playsinline preload="metadata"></video>
+            <div id="editorCropOverlay" class="crop-overlay hidden" aria-label="Custom crop selection">
+              <span class="crop-handle nw" data-crop-handle="nw"></span>
+              <span class="crop-handle ne" data-crop-handle="ne"></span>
+              <span class="crop-handle sw" data-crop-handle="sw"></span>
+              <span class="crop-handle se" data-crop-handle="se"></span>
+            </div>
             <div id="editorPreviewPlaceholder">Choose media to preview a frame, waveform or playable proxy.</div>
           </div>
           <div class="editor-preview-actions">
@@ -146,6 +173,11 @@
               <select id="editorSpeed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select>
             </label>
             <label>Volume %<input id="editorVolume" type="number" min="0" max="200" step="5" value="100" /></label>
+            <label>Audio preset
+              <select id="editorAudioPreset">
+                <option>Flat</option><option>Voice Clarity</option><option>Bass Boost</option><option>Podcast</option><option>Music</option><option>Normalize</option>
+              </select>
+            </label>
             <label>Fade in (sec)<input id="editorFadeIn" type="number" min="0" max="60" step="0.1" value="0" /></label>
             <label>Fade out (sec)<input id="editorFadeOut" type="number" min="0" max="60" step="0.1" value="0" /></label>
             <label>Export quality
@@ -160,7 +192,10 @@
             <label>Height<input id="editorCropHeight" type="number" min="2" step="2" value="2" /></label>
           </div>
 
-          <label class="editor-check"><input id="editorMute" type="checkbox" /> Mute audio</label>
+          <div class="editor-check-row">
+            <label class="editor-check"><input id="editorMute" type="checkbox" /> Mute audio</label>
+            <label class="editor-check"><input id="editorNoiseReduction" type="checkbox" /> Noise reduction</label>
+          </div>
 
           <label>Export filename</label>
           <input id="editorOutputName" placeholder="edited_media" />
@@ -183,7 +218,7 @@
       <div class="editor-history-head">
         <div>
           <strong>Export history</strong>
-          <p>Recent exports from this Local Core session.</p>
+          <p>Export history persists across Local Core restarts.</p>
         </div>
         <button id="refreshEditorExportsBtn" class="secondary">Refresh</button>
       </div>

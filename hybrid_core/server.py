@@ -19,11 +19,13 @@ from media_core.editor import extract_preview_frame, extract_waveform, probe_med
 from media_core.network import safe_proxy_label
 
 from .core_updater import CoreUpdateService
+from .editor_library import EditorLibrary
 from .jobs import JobManager
 from .logging_setup import configure_logging
 from .paths import (
     APP_DATA_DIR,
     DEFAULT_DOWNLOAD_DIR,
+    EDITOR_LIBRARY_FILE,
     LOG_FILE,
     SETTINGS_FILE,
     STATE_FILE,
@@ -38,6 +40,7 @@ CORE_KEY = secrets.token_urlsafe(32)
 LOGGER = configure_logging(LOG_FILE)
 SETTINGS = SettingsStore(SETTINGS_FILE, default_download_dir=DEFAULT_DOWNLOAD_DIR)
 CURRENT_SETTINGS = SETTINGS.get()
+EDITOR_LIBRARY = EditorLibrary(EDITOR_LIBRARY_FILE)
 MANAGER = JobManager(
     max_downloads=int(CURRENT_SETTINGS["max_concurrent_downloads"]),
     state_path=STATE_FILE,
@@ -104,6 +107,8 @@ class EditorProxyRequest(EditorPreviewRequest):
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     mute: bool = False
     volume_percent: float = Field(default=100.0, ge=0, le=200)
+    audio_preset: str = "Flat"
+    noise_reduction: bool = False
 
 
 class EditorExportRequest(EditorPathRequest):
@@ -122,7 +127,15 @@ class EditorExportRequest(EditorPathRequest):
     volume_percent: float = Field(default=100.0, ge=0, le=200)
     fade_in: float = Field(default=0.0, ge=0, le=60)
     fade_out: float = Field(default=0.0, ge=0, le=60)
+    audio_preset: str = "Flat"
+    noise_reduction: bool = False
     quality: str = "Balanced"
+
+
+class EditorLibrarySave(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    item_id: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
 
 
 class SettingsPatch(BaseModel):
@@ -331,6 +344,7 @@ def diagnostics() -> dict[str, Any]:
         "download_dir": str(settings["download_dir"]),
         "state_file": str(STATE_FILE),
         "settings_file": str(SETTINGS_FILE),
+        "editor_library_file": str(EDITOR_LIBRARY_FILE),
         "log_file": str(LOG_FILE),
         "update_dir": str(UPDATE_DIR),
         "browser": str(browser) if browser else "",
@@ -427,6 +441,8 @@ def editor_proxy(payload: EditorProxyRequest) -> Response:
             speed=payload.speed,
             mute=payload.mute,
             volume_percent=payload.volume_percent,
+            audio_preset=payload.audio_preset,
+            noise_reduction=payload.noise_reduction,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -463,6 +479,43 @@ def editor_export(payload: EditorExportRequest) -> dict[str, Any]:
 @app.get("/api/editor/exports", dependencies=[Depends(require_key)])
 def editor_exports() -> dict[str, Any]:
     return {"exports": MANAGER.list_kind("editor_export", limit=30)}
+
+
+@app.get("/api/editor/library", dependencies=[Depends(require_key)])
+def editor_library() -> dict[str, Any]:
+    return EDITOR_LIBRARY.snapshot()
+
+
+@app.post("/api/editor/presets", dependencies=[Depends(require_key)])
+def save_editor_preset(payload: EditorLibrarySave) -> dict[str, Any]:
+    try:
+        item = EDITOR_LIBRARY.save_preset(payload.name, payload.data, payload.item_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"preset": item, **EDITOR_LIBRARY.snapshot()}
+
+
+@app.delete("/api/editor/presets/{item_id}", dependencies=[Depends(require_key)])
+def delete_editor_preset(item_id: str) -> dict[str, Any]:
+    if not EDITOR_LIBRARY.delete_preset(item_id):
+        raise HTTPException(status_code=404, detail="Editor preset not found.")
+    return {"ok": True, **EDITOR_LIBRARY.snapshot()}
+
+
+@app.post("/api/editor/projects", dependencies=[Depends(require_key)])
+def save_editor_project(payload: EditorLibrarySave) -> dict[str, Any]:
+    try:
+        item = EDITOR_LIBRARY.save_project(payload.name, payload.data, payload.item_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"project": item, **EDITOR_LIBRARY.snapshot()}
+
+
+@app.delete("/api/editor/projects/{item_id}", dependencies=[Depends(require_key)])
+def delete_editor_project(item_id: str) -> dict[str, Any]:
+    if not EDITOR_LIBRARY.delete_project(item_id):
+        raise HTTPException(status_code=404, detail="Editor project not found.")
+    return {"ok": True, **EDITOR_LIBRARY.snapshot()}
 
 
 @app.post("/api/editor/exports/{job_id}/retry", dependencies=[Depends(require_key)])

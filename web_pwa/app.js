@@ -10,6 +10,8 @@ const state = {
   editorInfo: null,
   editorExportId: "",
   editorObjectUrl: "",
+  editorLibrary: {presets: [], projects: []},
+  cropDrag: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -214,7 +216,7 @@ function clearEditorPreviewObjectUrl() {
   }
 }
 
-function showEditorImage(blob) {
+function showEditorImage(blob, showCropOverlay = false) {
   clearEditorPreviewObjectUrl();
   state.editorObjectUrl = URL.createObjectURL(blob);
   $("editorPreviewVideo").pause();
@@ -223,11 +225,14 @@ function showEditorImage(blob) {
   $("editorPreviewImage").src = state.editorObjectUrl;
   $("editorPreviewImage").classList.remove("hidden");
   $("editorPreviewPlaceholder").classList.add("hidden");
+  if (showCropOverlay) requestAnimationFrame(updateCropOverlay);
+  else $("editorCropOverlay").classList.add("hidden");
 }
 
 function showEditorVideo(blob) {
   clearEditorPreviewObjectUrl();
   state.editorObjectUrl = URL.createObjectURL(blob);
+  $("editorCropOverlay").classList.add("hidden");
   $("editorPreviewImage").classList.add("hidden");
   $("editorPreviewVideo").src = state.editorObjectUrl;
   $("editorPreviewVideo").classList.remove("hidden");
@@ -242,6 +247,302 @@ function editorCustomCropPayload() {
     custom_width: Number($("editorCropWidth").value || 0),
     custom_height: Number($("editorCropHeight").value || 0),
   };
+}
+
+function cropGeometry() {
+  const info = state.editorInfo;
+  const shell = $("editorPreviewShell");
+  if (!info?.has_video || !Number(info.width) || !Number(info.height)) return null;
+  const style = getComputedStyle(shell);
+  const padLeft = Number.parseFloat(style.paddingLeft) || 0;
+  const padRight = Number.parseFloat(style.paddingRight) || 0;
+  const padTop = Number.parseFloat(style.paddingTop) || 0;
+  const padBottom = Number.parseFloat(style.paddingBottom) || 0;
+  const innerWidth = Math.max(1, shell.clientWidth - padLeft - padRight);
+  const innerHeight = Math.max(1, shell.clientHeight - padTop - padBottom);
+  const scale = Math.min(innerWidth / Number(info.width), innerHeight / Number(info.height));
+  const displayWidth = Number(info.width) * scale;
+  const displayHeight = Number(info.height) * scale;
+  return {
+    scale,
+    left: padLeft + (innerWidth - displayWidth) / 2,
+    top: padTop + (innerHeight - displayHeight) / 2,
+    displayWidth,
+    displayHeight,
+  };
+}
+
+function normalizeCropValues(values = editorCustomCropPayload()) {
+  const sourceWidth = Math.max(2, Number(state.editorInfo?.width || 2));
+  const sourceHeight = Math.max(2, Number(state.editorInfo?.height || 2));
+  let x = Math.max(0, Math.min(Math.round(Number(values.custom_x || 0)), sourceWidth - 2));
+  let y = Math.max(0, Math.min(Math.round(Number(values.custom_y || 0)), sourceHeight - 2));
+  let width = Math.max(2, Math.round(Number(values.custom_width || sourceWidth) / 2) * 2);
+  let height = Math.max(2, Math.round(Number(values.custom_height || sourceHeight) / 2) * 2);
+  width = Math.min(width, sourceWidth - x);
+  height = Math.min(height, sourceHeight - y);
+  if (width % 2) width -= 1;
+  if (height % 2) height -= 1;
+  width = Math.max(2, width);
+  height = Math.max(2, height);
+  if (x + width > sourceWidth) x = Math.max(0, sourceWidth - width);
+  if (y + height > sourceHeight) y = Math.max(0, sourceHeight - height);
+  return {custom_x:x, custom_y:y, custom_width:width, custom_height:height};
+}
+
+function writeCropValues(values) {
+  const crop = normalizeCropValues(values);
+  $("editorCropX").value = String(crop.custom_x);
+  $("editorCropY").value = String(crop.custom_y);
+  $("editorCropWidth").value = String(crop.custom_width);
+  $("editorCropHeight").value = String(crop.custom_height);
+  return crop;
+}
+
+function updateCropOverlay() {
+  const overlay = $("editorCropOverlay");
+  const imageVisible = !$("editorPreviewImage").classList.contains("hidden");
+  if ($("editorCrop").value !== "Custom" || !state.editorInfo?.has_video || !imageVisible) {
+    overlay.classList.add("hidden");
+    return;
+  }
+  const geometry = cropGeometry();
+  if (!geometry) {
+    overlay.classList.add("hidden");
+    return;
+  }
+  const crop = writeCropValues(editorCustomCropPayload());
+  overlay.style.left = `${geometry.left + crop.custom_x * geometry.scale}px`;
+  overlay.style.top = `${geometry.top + crop.custom_y * geometry.scale}px`;
+  overlay.style.width = `${crop.custom_width * geometry.scale}px`;
+  overlay.style.height = `${crop.custom_height * geometry.scale}px`;
+  overlay.classList.remove("hidden");
+}
+
+function beginCropDrag(event) {
+  if ($("editorCrop").value !== "Custom" || !state.editorInfo?.has_video) return;
+  const geometry = cropGeometry();
+  if (!geometry) return;
+  const handle = event.target.closest("[data-crop-handle]")?.dataset.cropHandle || "move";
+  state.cropDrag = {
+    handle,
+    startX:event.clientX,
+    startY:event.clientY,
+    crop:normalizeCropValues(editorCustomCropPayload()),
+    scale:geometry.scale,
+  };
+  event.preventDefault();
+}
+
+function moveCropDrag(event) {
+  const drag = state.cropDrag;
+  if (!drag) return;
+  const dx = (event.clientX - drag.startX) / drag.scale;
+  const dy = (event.clientY - drag.startY) / drag.scale;
+  const sourceWidth = Number(state.editorInfo?.width || 2);
+  const sourceHeight = Number(state.editorInfo?.height || 2);
+  let {custom_x:x, custom_y:y, custom_width:width, custom_height:height} = drag.crop;
+
+  if (drag.handle === "move") {
+    x = Math.max(0, Math.min(sourceWidth - width, x + dx));
+    y = Math.max(0, Math.min(sourceHeight - height, y + dy));
+  } else {
+    if (drag.handle.includes("w")) { x += dx; width -= dx; }
+    if (drag.handle.includes("e")) { width += dx; }
+    if (drag.handle.includes("n")) { y += dy; height -= dy; }
+    if (drag.handle.includes("s")) { height += dy; }
+
+    if (width < 16) {
+      if (drag.handle.includes("w")) x -= (16 - width);
+      width = 16;
+    }
+    if (height < 16) {
+      if (drag.handle.includes("n")) y -= (16 - height);
+      height = 16;
+    }
+    x = Math.max(0, Math.min(x, sourceWidth - 2));
+    y = Math.max(0, Math.min(y, sourceHeight - 2));
+    width = Math.min(width, sourceWidth - x);
+    height = Math.min(height, sourceHeight - y);
+  }
+
+  writeCropValues({
+    custom_x:x,
+    custom_y:y,
+    custom_width:width,
+    custom_height:height,
+  });
+  updateCropOverlay();
+}
+
+function endCropDrag() {
+  if (!state.cropDrag) return;
+  state.cropDrag = null;
+  $("editorStatus").textContent = "Custom crop updated. Play proxy to verify before export.";
+}
+
+function currentEditorSettings() {
+  return {
+    crop_preset:$("editorCrop").value,
+    ...editorCustomCropPayload(),
+    rotate:$("editorRotate").value,
+    speed:Number($("editorSpeed").value || 1),
+    mute:$("editorMute").checked,
+    volume_percent:Number($("editorVolume").value || 100),
+    fade_in:Number($("editorFadeIn").value || 0),
+    fade_out:Number($("editorFadeOut").value || 0),
+    audio_preset:$("editorAudioPreset").value || "Flat",
+    noise_reduction:$("editorNoiseReduction").checked,
+    quality:$("editorQuality").value || "Balanced",
+  };
+}
+
+function currentEditorProject() {
+  return {
+    source_path:$("editorSourcePath").value.trim(),
+    output_dir:$("editorOutputDir").value.trim(),
+    output_name:$("editorOutputName").value.trim() || "edited_media",
+    start:Number($("editorStart").value || 0),
+    end:Number($("editorEnd").value || 0),
+    preview_position:Number($("editorPreviewPosition").value || 0),
+    ...currentEditorSettings(),
+  };
+}
+
+function applyEditorSettings(data = {}) {
+  if ("crop_preset" in data) $("editorCrop").value = data.crop_preset || "Original";
+  if ("custom_x" in data) $("editorCropX").value = String(data.custom_x ?? 0);
+  if ("custom_y" in data) $("editorCropY").value = String(data.custom_y ?? 0);
+  if ("custom_width" in data) $("editorCropWidth").value = String(data.custom_width ?? state.editorInfo?.width ?? 2);
+  if ("custom_height" in data) $("editorCropHeight").value = String(data.custom_height ?? state.editorInfo?.height ?? 2);
+  if ("rotate" in data) $("editorRotate").value = data.rotate || "0°";
+  if ("speed" in data) $("editorSpeed").value = String(data.speed ?? 1);
+  if ("mute" in data) $("editorMute").checked = Boolean(data.mute);
+  if ("volume_percent" in data) $("editorVolume").value = String(data.volume_percent ?? 100);
+  if ("fade_in" in data) $("editorFadeIn").value = String(data.fade_in ?? 0);
+  if ("fade_out" in data) $("editorFadeOut").value = String(data.fade_out ?? 0);
+  if ("audio_preset" in data) $("editorAudioPreset").value = data.audio_preset || "Flat";
+  if ("noise_reduction" in data) $("editorNoiseReduction").checked = Boolean(data.noise_reduction);
+  if ("quality" in data) $("editorQuality").value = data.quality || "Balanced";
+  if ("start" in data) $("editorStart").value = String(data.start ?? 0);
+  if ("end" in data) $("editorEnd").value = String(data.end ?? state.editorInfo?.duration ?? 0);
+  if ("preview_position" in data) $("editorPreviewPosition").value = String(data.preview_position ?? 0);
+  if ("output_dir" in data) $("editorOutputDir").value = data.output_dir || "";
+  if ("output_name" in data) $("editorOutputName").value = data.output_name || "edited_media";
+
+  $("editorCustomCropPanel").classList.toggle("hidden", $("editorCrop").value !== "Custom");
+  if (state.editorInfo?.has_video && $("editorCrop").value === "Custom") {
+    writeCropValues(editorCustomCropPayload());
+  }
+  $("editorVolume").disabled = $("editorMute").checked || !state.editorInfo?.has_audio;
+  $("editorAudioPreset").disabled = !state.editorInfo?.has_audio;
+  $("editorNoiseReduction").disabled = !state.editorInfo?.has_audio;
+  if (state.editorInfo) syncTimelineFromNumbers();
+  updateCropOverlay();
+}
+
+function renderEditorLibrary(data = {}) {
+  state.editorLibrary = {
+    presets:Array.isArray(data.presets) ? data.presets : [],
+    projects:Array.isArray(data.projects) ? data.projects : [],
+  };
+  const presetSelect = $("editorPresetSelect");
+  const projectSelect = $("editorProjectSelect");
+  const previousPreset = presetSelect.value;
+  const previousProject = projectSelect.value;
+  presetSelect.innerHTML = '<option value="">Choose preset…</option>';
+  projectSelect.innerHTML = '<option value="">Choose project…</option>';
+
+  for (const item of state.editorLibrary.presets) {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = item.name;
+    presetSelect.appendChild(option);
+  }
+  for (const item of state.editorLibrary.projects) {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = item.name;
+    projectSelect.appendChild(option);
+  }
+  if ([...presetSelect.options].some((option) => option.value === previousPreset)) presetSelect.value = previousPreset;
+  if ([...projectSelect.options].some((option) => option.value === previousProject)) projectSelect.value = previousProject;
+}
+
+async function refreshEditorLibrary() {
+  if (!state.key) return;
+  try {
+    renderEditorLibrary(await api("/api/editor/library"));
+  } catch (error) {
+    $("editorStatus").textContent = error.message;
+  }
+}
+
+async function saveEditorPreset() {
+  const selected = state.editorLibrary.presets.find((item) => item.id === $("editorPresetSelect").value);
+  const name = window.prompt("Preset name", selected?.name || "My preset");
+  if (!name) return;
+  const data = await api("/api/editor/presets", {
+    method:"POST",
+    body:JSON.stringify({name, item_id:selected?.id || null, data:currentEditorSettings()}),
+  });
+  renderEditorLibrary(data);
+  $("editorPresetSelect").value = data.preset.id;
+  $("editorStatus").textContent = `Preset saved: ${data.preset.name}`;
+}
+
+function applySelectedEditorPreset() {
+  const preset = state.editorLibrary.presets.find((item) => item.id === $("editorPresetSelect").value);
+  if (!preset) return;
+  applyEditorSettings(preset.settings || {});
+  $("editorStatus").textContent = `Preset applied: ${preset.name}`;
+}
+
+async function deleteEditorPreset() {
+  const id = $("editorPresetSelect").value;
+  if (!id) return;
+  const preset = state.editorLibrary.presets.find((item) => item.id === id);
+  if (!window.confirm(`Delete preset "${preset?.name || "this preset"}"?`)) return;
+  renderEditorLibrary(await api(`/api/editor/presets/${id}`, {method:"DELETE"}));
+  $("editorStatus").textContent = "Preset deleted.";
+}
+
+async function saveEditorProject() {
+  if (!state.editorInfo) {
+    $("editorStatus").textContent = "Load media before saving a project.";
+    return;
+  }
+  const selected = state.editorLibrary.projects.find((item) => item.id === $("editorProjectSelect").value);
+  const name = window.prompt("Project name", selected?.name || $("editorOutputName").value.trim() || "Editor project");
+  if (!name) return;
+  const data = await api("/api/editor/projects", {
+    method:"POST",
+    body:JSON.stringify({name, item_id:selected?.id || null, data:currentEditorProject()}),
+  });
+  renderEditorLibrary(data);
+  $("editorProjectSelect").value = data.project.id;
+  $("editorStatus").textContent = `Project saved: ${data.project.name}`;
+}
+
+async function loadSelectedEditorProject() {
+  const project = state.editorLibrary.projects.find((item) => item.id === $("editorProjectSelect").value);
+  if (!project) return;
+  const data = project.data || {};
+  if (data.source_path) {
+    const loaded = await loadEditorPath(data.source_path);
+    if (!loaded) return;
+  }
+  applyEditorSettings(data);
+  $("editorStatus").textContent = `Project loaded: ${project.name}`;
+}
+
+async function deleteEditorProject() {
+  const id = $("editorProjectSelect").value;
+  if (!id) return;
+  const project = state.editorLibrary.projects.find((item) => item.id === id);
+  if (!window.confirm(`Delete project "${project?.name || "this project"}"?`)) return;
+  renderEditorLibrary(await api(`/api/editor/projects/${id}`, {method:"DELETE"}));
+  $("editorStatus").textContent = "Project deleted.";
 }
 
 function updateTimelineSummary() {
@@ -302,6 +603,8 @@ function renderEditorSource(data) {
   $("editorRotate").disabled = !info.has_video;
   $("editorVolume").disabled = !info.has_audio;
   $("editorMute").disabled = !info.has_audio;
+  $("editorAudioPreset").disabled = !info.has_audio;
+  $("editorNoiseReduction").disabled = !info.has_audio;
   $("editorFadeIn").disabled = !info.has_audio;
   $("editorFadeOut").disabled = !info.has_audio;
 
@@ -330,6 +633,7 @@ function renderEditorSource(data) {
   $("editorPreviewVideo").removeAttribute("src");
   $("editorPreviewVideo").classList.add("hidden");
   $("editorPreviewImage").classList.add("hidden");
+  $("editorCropOverlay").classList.add("hidden");
   $("editorPreviewPlaceholder").classList.remove("hidden");
   $("editorPreviewPlaceholder").textContent = info.has_video
     ? "Click Preview frame to render the current crop/rotation."
@@ -347,10 +651,12 @@ async function loadEditorPath(path) {
     });
     renderEditorSource(data);
     $("editorCard").scrollIntoView({behavior:"smooth", block:"start"});
+    return data;
   } catch (error) {
     state.editorInfo = null;
     $("editorExportBtn").disabled = true;
     $("editorStatus").textContent = error.message;
+    return null;
   }
 }
 
@@ -373,18 +679,21 @@ async function refreshEditorPreview() {
   $("editorStatus").textContent = "Rendering preview frame…";
   $("editorPreviewBtn").disabled = true;
   try {
+    const customMode = $("editorCrop").value === "Custom";
     const blob = await apiBlob("/api/editor/preview", {
       method:"POST",
       body:JSON.stringify({
         path:$("editorSourcePath").value.trim(),
         position:Number($("editorPreviewPosition").value || 0),
-        crop_preset:$("editorCrop").value,
-        rotate:$("editorRotate").value,
-        ...editorCustomCropPayload(),
+        crop_preset:customMode ? "Original" : $("editorCrop").value,
+        rotate:customMode ? "0°" : $("editorRotate").value,
+        ...(customMode ? {} : editorCustomCropPayload()),
       }),
     });
-    showEditorImage(blob);
-    $("editorStatus").textContent = "Preview frame updated.";
+    showEditorImage(blob, customMode);
+    $("editorStatus").textContent = customMode
+      ? "Original frame loaded. Drag/resize the cyan crop box, then play proxy to verify."
+      : "Preview frame updated.";
   } catch (error) {
     $("editorStatus").textContent = error.message;
   } finally {
@@ -409,7 +718,8 @@ async function refreshEditorProxy() {
         speed:Number($("editorSpeed").value || 1),
         mute:$("editorMute").checked,
         volume_percent:Number($("editorVolume").value || 100),
-        ...editorCustomCropPayload(),
+        audio_preset:$("editorAudioPreset").value || "Flat",
+        noise_reduction:$("editorNoiseReduction").checked,
       }),
     });
     showEditorVideo(blob);
@@ -509,6 +819,9 @@ async function startEditorExport() {
         volume_percent:Number($("editorVolume").value || 100),
         fade_in:Number($("editorFadeIn").value || 0),
         fade_out:Number($("editorFadeOut").value || 0),
+        audio_preset:$("editorAudioPreset").value || "Flat",
+        noise_reduction:$("editorNoiseReduction").checked,
+        ...editorCustomCropPayload(),
         quality:$("editorQuality").value,
       }),
     });
@@ -659,6 +972,7 @@ async function bootstrap() {
     setInterval(refreshDownloads, 900);
     refreshDownloads();
     refreshEditorExports();
+    refreshEditorLibrary();
     loadDiagnostics();
     if (["checking","downloading"].includes((data.update || {}).status)) {
       state.updatePoll = setTimeout(pollCoreUpdate, 500);
@@ -708,6 +1022,7 @@ async function loadDiagnostics() {
       `FFmpeg: ${data.ffmpeg}`,
       `State: ${data.state_file}`,
       `Settings: ${data.settings_file}`,
+      `Editor library: ${data.editor_library_file}`,
       `Log: ${data.log_file}`,
       `Updates: ${data.update_dir}`,
       `Downloads: ${JSON.stringify(data.download_counts || {})}`,
@@ -725,9 +1040,22 @@ $("chooseEditorOutputBtn").addEventListener("click", chooseEditorOutputFolder);
 $("editorExportBtn").addEventListener("click", startEditorExport);
 $("editorCancelExportBtn").addEventListener("click", cancelEditorExport);
 $("editorCrop").addEventListener("change", () => {
-  $("editorCustomCropPanel").classList.toggle("hidden", $("editorCrop").value !== "Custom");
-  if (state.editorInfo?.has_video) $("editorStatus").textContent = "Crop changed. Preview frame or proxy to refresh.";
+  const custom = $("editorCrop").value === "Custom";
+  $("editorCustomCropPanel").classList.toggle("hidden", !custom);
+  if (custom && state.editorInfo?.has_video) {
+    refreshEditorPreview();
+  } else {
+    $("editorCropOverlay").classList.add("hidden");
+    if (state.editorInfo?.has_video) $("editorStatus").textContent = "Crop changed. Preview frame or proxy to refresh.";
+  }
 });
+["editorCropX","editorCropY","editorCropWidth","editorCropHeight"].forEach((id) => {
+  $(id).addEventListener("input", updateCropOverlay);
+});
+$("editorCropOverlay").addEventListener("pointerdown", beginCropDrag);
+window.addEventListener("pointermove", moveCropDrag);
+window.addEventListener("pointerup", endCropDrag);
+window.addEventListener("resize", updateCropOverlay);
 $("editorStartRange").addEventListener("input", () => syncTimelineFromRanges("start"));
 $("editorEndRange").addEventListener("input", () => syncTimelineFromRanges("end"));
 $("editorStart").addEventListener("change", syncTimelineFromNumbers);
@@ -738,7 +1066,19 @@ $("editorRotate").addEventListener("change", () => {
 $("editorMute").addEventListener("change", () => {
   $("editorVolume").disabled = $("editorMute").checked || !state.editorInfo?.has_audio;
 });
+$("editorAudioPreset").addEventListener("change", () => {
+  if (state.editorInfo?.has_audio) $("editorStatus").textContent = "Audio preset changed. Play proxy to hear the result.";
+});
+$("editorNoiseReduction").addEventListener("change", () => {
+  if (state.editorInfo?.has_audio) $("editorStatus").textContent = "Noise reduction changed. Play proxy to hear the result.";
+});
 
+$("applyEditorPresetBtn").addEventListener("click", applySelectedEditorPreset);
+$("saveEditorPresetBtn").addEventListener("click", () => saveEditorPreset().catch((error) => $("editorStatus").textContent = error.message));
+$("deleteEditorPresetBtn").addEventListener("click", () => deleteEditorPreset().catch((error) => $("editorStatus").textContent = error.message));
+$("loadEditorProjectBtn").addEventListener("click", () => loadSelectedEditorProject().catch((error) => $("editorStatus").textContent = error.message));
+$("saveEditorProjectBtn").addEventListener("click", () => saveEditorProject().catch((error) => $("editorStatus").textContent = error.message));
+$("deleteEditorProjectBtn").addEventListener("click", () => deleteEditorProject().catch((error) => $("editorStatus").textContent = error.message));
 $("refreshEditorExportsBtn").addEventListener("click", refreshEditorExports);
 $("editorExportsList").addEventListener("click", async (event) => {
   const retry = event.target.closest("[data-retry-export]");

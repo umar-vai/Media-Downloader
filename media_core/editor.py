@@ -197,17 +197,53 @@ def build_video_filters(
     return filters
 
 
+AUDIO_PRESETS = {"Flat", "Voice Clarity", "Bass Boost", "Podcast", "Music", "Normalize"}
+
+
 def build_audio_filters(
     speed: float,
     volume_percent: float,
     fade_in: float,
     fade_out: float,
     output_duration: float,
+    *,
+    audio_preset: str = "Flat",
+    noise_reduction: bool = False,
 ) -> list[str]:
     filters: list[str] = []
     speed = max(0.5, min(2.0, float(speed)))
     if abs(speed - 1.0) > 0.0001:
         filters.append(f"atempo={speed:g}")
+
+    if noise_reduction:
+        filters.append("afftdn=nf=-25")
+
+    preset = str(audio_preset or "Flat")
+    if preset not in AUDIO_PRESETS:
+        preset = "Flat"
+    if preset == "Voice Clarity":
+        filters.extend([
+            "highpass=f=80",
+            "equalizer=f=3000:t=q:w=1:g=3",
+            "equalizer=f=6000:t=q:w=1:g=2",
+        ])
+    elif preset == "Bass Boost":
+        filters.extend([
+            "equalizer=f=100:t=q:w=1:g=5",
+            "equalizer=f=220:t=q:w=1:g=3",
+        ])
+    elif preset == "Podcast":
+        filters.extend([
+            "highpass=f=70",
+            "acompressor=threshold=-18dB:ratio=3:attack=20:release=250:makeup=2",
+        ])
+    elif preset == "Music":
+        filters.extend([
+            "bass=g=2:f=110:w=0.6",
+            "treble=g=2:f=6000:w=0.6",
+        ])
+    elif preset == "Normalize":
+        filters.append("loudnorm=I=-14:TP=-1.5:LRA=11")
 
     volume = max(0.0, min(200.0, float(volume_percent))) / 100.0
     if abs(volume - 1.0) > 0.0001:
@@ -373,6 +409,8 @@ def build_export_command(
     volume_percent: float,
     fade_in: float,
     fade_out: float,
+    audio_preset: str,
+    noise_reduction: bool,
     quality: str,
 ) -> tuple[list[str], float]:
     start = max(0.0, min(float(start), info.duration))
@@ -409,7 +447,15 @@ def build_export_command(
         command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
 
         if info.has_audio and not mute:
-            audio_filters = build_audio_filters(speed, volume_percent, fade_in, fade_out, output_duration)
+            audio_filters = build_audio_filters(
+                speed,
+                volume_percent,
+                fade_in,
+                fade_out,
+                output_duration,
+                audio_preset=audio_preset,
+                noise_reduction=noise_reduction,
+            )
             command += ["-map", "0:a:0?"]
             if audio_filters:
                 command += ["-af", ",".join(audio_filters)]
@@ -426,6 +472,8 @@ def build_export_command(
             fade_in,
             fade_out,
             output_duration,
+            audio_preset=audio_preset,
+            noise_reduction=noise_reduction,
         )
         if audio_filters:
             command += ["-af", ",".join(audio_filters)]
@@ -451,6 +499,8 @@ def render_proxy_clip(
     speed: float,
     mute: bool,
     volume_percent: float,
+    audio_preset: str = "Flat",
+    noise_reduction: bool = False,
     timeout: float = 45.0,
 ) -> bytes:
     source = Path(path).expanduser()
@@ -510,6 +560,8 @@ def render_proxy_clip(
                 0.0,
                 0.0,
                 duration / speed,
+                audio_preset=audio_preset,
+                noise_reduction=noise_reduction,
             )
             command += ["-map", "0:a:0?"]
             if audio_filters:
@@ -558,6 +610,8 @@ def run_export(
     volume_percent: float,
     fade_in: float,
     fade_out: float,
+    audio_preset: str,
+    noise_reduction: bool,
     quality: str,
     cancel_event: threading.Event,
     on_progress: ProgressCallback | None = None,
@@ -584,6 +638,8 @@ def run_export(
         volume_percent=volume_percent,
         fade_in=fade_in,
         fade_out=fade_out,
+        audio_preset=audio_preset,
+        noise_reduction=noise_reduction,
         quality=quality,
     )
 

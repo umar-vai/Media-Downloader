@@ -153,6 +153,19 @@ class JobManagerTests(unittest.TestCase):
             self.assertEqual(state["status"], "completed")
             self.assertEqual(state["result"]["filename"], "retry.mp4")
 
+    def test_interrupted_editor_export_is_restored_as_retryable_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state_file = Path(folder) / "jobs.json"
+            state_file.write_text(
+                '{"version":1,"jobs":[{"id":"edit1","kind":"editor_export","status":"running","progress":0.5,"detail":"Exporting","error":"","created_at":1,"updated_at":2,"request":{"source_path":"C:/media/source.mp4","output_dir":"C:/media","output_name":"edited","start":0,"end":5},"result":{}}]}',
+                encoding="utf-8",
+            )
+            restored = JobManager(max_downloads=1, state_path=state_file)
+            state = restored.snapshot("edit1")
+            self.assertEqual(state["kind"], "editor_export")
+            self.assertEqual(state["status"], "failed")
+            self.assertIn("Retry", state["error"])
+
     def test_interrupted_download_is_restored_as_retryable_failure(self):
         with tempfile.TemporaryDirectory() as folder:
             state_file = Path(folder) / "jobs.json"

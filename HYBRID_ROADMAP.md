@@ -140,12 +140,20 @@ All source and rendered files remain local. Editor work runs in a dedicated sing
 - Failed editor exports can be retried in-place; active exports can be cancelled from history and completed exports can be loaded back into the editor.
 - Local Core bumped to v0.5.0.
 
-### Remaining Phase 3 work
+### Phase 3C — Projects, reusable presets, audio tools + visual crop ✅
 
-- richer audio controls / equalizer presets
-- reusable editor presets
-- persistent editor project/export history across Local Core restarts
-- optional visual crop overlay / drag handles
+- Added reusable editor presets stored locally for crop, rotation, speed, audio and export settings.
+- Added persistent named editor projects containing local source path, trim range, output path/name and full editor settings.
+- Added Flat, Voice Clarity, Bass Boost, Podcast, Music and Normalize audio processing presets.
+- Added optional FFmpeg spectral noise reduction and included the active audio processing in playable proxy previews.
+- Editor export history now persists across Local Core restarts; interrupted exports return as failed/retryable jobs.
+- Added a visual custom-crop box over the original preview frame with pointer drag and four resize handles synchronized to exact X/Y/width/height fields.
+- Added persistent editor library diagnostics.
+- Local Core bumped to v0.6.0.
+
+### Phase 3 status
+
+The local Web/PWA editor now covers the core workflow from source selection through reusable projects/presets, visual crop, audio processing, preview and export. The next major block is Phase 4: packaging the Local Core as the lightweight Windows agent.
 
 ## Phase 4 — Lightweight Windows agent
 

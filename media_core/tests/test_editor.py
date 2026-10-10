@@ -31,11 +31,21 @@ class EditorEngineTests(unittest.TestCase):
             compute_crop(info, "Custom", (1800, 0, 400, 400))
 
     def test_audio_filters(self):
-        filters = build_audio_filters(2.0, 50, 1.0, 2.0, 5.0)
+        filters = build_audio_filters(
+            2.0,
+            50,
+            1.0,
+            2.0,
+            5.0,
+            audio_preset="Voice Clarity",
+            noise_reduction=True,
+        )
         self.assertIn("atempo=2", filters)
         self.assertIn("volume=0.500", filters)
         self.assertTrue(any(item.startswith("afade=t=in") for item in filters))
         self.assertTrue(any(item.startswith("afade=t=out") for item in filters))
+        self.assertIn("afftdn=nf=-25", filters)
+        self.assertIn("highpass=f=80", filters)
 
     def test_export_command_contains_trim_crop_rotate_and_progress(self):
         info = MediaInfo(duration=60, has_video=True, has_audio=True, width=1920, height=1080, fps=30)
@@ -53,6 +63,8 @@ class EditorEngineTests(unittest.TestCase):
             volume_percent=100,
             fade_in=0,
             fade_out=0,
+            audio_preset="Flat",
+            noise_reduction=False,
             quality="Balanced",
         )
         joined = " ".join(command)
