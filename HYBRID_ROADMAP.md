@@ -74,10 +74,17 @@ The browser UI never uploads the user's media to a cloud server in local mode.
 - Reuse analyzed media data before re-contacting a website.
 - Installed Chromium resolver remains available as an extraction fallback.
 
-## Phase 2 — Core extraction/refactor
+## Phase 2 — Core extraction/refactor 🟡
 
-- Move reusable extraction/downloading logic out of the legacy desktop UI into a dedicated shared `media_core` package.
-- Remove duplicated worker code between legacy desktop and hybrid core.
+### Phase 2A — Shared media engine ✅
+
+- Moved reusable extraction/downloading logic out of the legacy desktop UI into a dedicated shared `media_core` package.
+- Legacy desktop and Hybrid/PWA now call the same analysis/download workers.
+- Desktop compatibility modules are thin import shims; extraction logic has one source of truth.
+- Shared engine has its own CI/unit tests.
+
+### Remaining Phase 2 work
+
 - Persist download queue/history across core restarts.
 - Native folder picker endpoint.
 - Agent diagnostics and structured logs.

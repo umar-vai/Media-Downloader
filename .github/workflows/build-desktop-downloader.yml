@@ -7,10 +7,12 @@ on:
       - 'v*'
     paths:
       - 'desktop_downloader/**'
+      - 'media_core/**'
       - '.github/workflows/build-desktop-downloader.yml'
   pull_request:
     paths:
       - 'desktop_downloader/**'
+      - 'media_core/**'
       - '.github/workflows/build-desktop-downloader.yml'
   workflow_dispatch:
 
@@ -42,6 +44,10 @@ jobs:
       - name: Validate Python and updater tests
         shell: pwsh
         run: |
+          python -m py_compile media_core/network.py
+          python -m py_compile media_core/sources.py
+          python -m py_compile media_core/browser_resolver.py
+          python -m py_compile media_core/engine.py
           python -m py_compile desktop_downloader/app.py
           python -m py_compile desktop_downloader/app_logging.py
           python -m py_compile desktop_downloader/download_queue.py
@@ -60,6 +66,7 @@ jobs:
           python -m py_compile desktop_downloader/network_proxy.py
           python -m py_compile desktop_downloader/self_test.py
           python -m py_compile desktop_downloader/settings_window.py
+          python -m py_compile desktop_downloader/shared_engine.py
           python -m py_compile desktop_downloader/update_manager.py
           python -m py_compile desktop_downloader/updater.py
           python -m py_compile desktop_downloader/version.py

@@ -19,9 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import customtkinter as ctk
-import yt_dlp
 from PIL import Image
-from imageio_ffmpeg import get_ffmpeg_exe
 from tkinter import filedialog, messagebox
 
 from app_logging import get_logger, log_path
@@ -31,8 +29,8 @@ from history_store import HistoryStore, make_history_entry
 from history_window import HistoryWindow
 from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
-from media_sources import detect_platform, extraction_attempts, platform_name, video_format_selector
-from browser_resolver import resolve_with_installed_browser
+from media_sources import detect_platform, platform_name
+from shared_engine import Cancelled as SharedCancelled, analyze_url as shared_analyze_url, download_from_analysis as shared_download_from_analysis
 from settings_window import SettingsWindow
 from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_installer_release, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
@@ -1488,74 +1486,18 @@ class DownloaderApp(ctk.CTk):
 
     def _analyze_media_worker(self, job_id: int, cancel_event: threading.Event, url: str) -> None:
         try:
-            attempts = extraction_attempts(url)
-            info: dict[str, Any] = {}
-            last_error: Exception | None = None
-            attempt_errors: list[str] = []
-            for index, (attempt_url, network_options) in enumerate(attempts, start=1):
-                if cancel_event.is_set():
-                    self._put_analysis_event("analysis_cancelled", job_id, "Analysis cancelled.")
-                    return
-                if len(attempts) > 1:
-                    self._put_analysis_event(
-                        "analysis_status",
-                        job_id,
-                        f"Connection attempt {index}/{len(attempts)}…",
-                    )
-                try:
-                    attempt_options = dict(network_options)
-                    force_generic = bool(attempt_options.pop("_force_generic_extractor", False))
-                    with yt_dlp.YoutubeDL(
-                        {
-                            "quiet": True,
-                            "no_warnings": True,
-                            "skip_download": True,
-                            "noplaylist": True,
-                            "cachedir": False,
-                            "socket_timeout": 12,
-                            "retries": 0,
-                            "fragment_retries": 0,
-                            **attempt_options,
-                        }
-                    ) as ydl:
-                        info = ydl.extract_info(
-                            attempt_url,
-                            download=False,
-                            force_generic_extractor=force_generic,
-                        ) or {}
-                    if info:
-                        break
-                except Exception as exc:
-                    last_error = exc
-                    attempt_errors.append(f"Attempt {index}: {str(exc).strip()}")
-
-            if cancel_event.is_set():
-                self._put_analysis_event("analysis_cancelled", job_id, "Analysis cancelled.")
-                return
-            if not info and not cancel_event.is_set():
-                try:
-                    self._put_analysis_event(
-                        "analysis_status",
-                        job_id,
-                        "Trying installed-browser fallback…",
-                    )
-                    info = resolve_with_installed_browser(
-                        url,
-                        cancel_event=cancel_event,
-                        capture_seconds=12.0,
-                    )
-                except Exception as exc:
-                    last_error = exc
-                    attempt_errors.append(f"Installed browser: {str(exc).strip()}")
-
-            if not info:
-                if attempt_errors:
-                    detail = "\n".join(attempt_errors[-5:])
-                    raise RuntimeError("No compatible connection path succeeded.\n" + detail) from last_error
-                raise last_error or RuntimeError("No compatible connection path succeeded.")
+            summary, info = shared_analyze_url(
+                url,
+                cancel_event=cancel_event,
+                on_status=lambda text: self._put_analysis_event(
+                    "analysis_status",
+                    job_id,
+                    f"{text}…" if text and not str(text).endswith("…") else str(text),
+                ),
+            )
 
             thumb_bytes = None
-            thumbnail_url = str(info.get("thumbnail") or "")
+            thumbnail_url = str(summary.get("thumbnail") or "")
             if thumbnail_url and not cancel_event.is_set():
                 try:
                     request = urllib.request.Request(thumbnail_url, headers={"User-Agent": "Mozilla/5.0"})
@@ -1573,15 +1515,17 @@ class DownloaderApp(ctk.CTk):
                 job_id,
                 {
                     "source_url": url,
-                    "title": str(info.get("title") or info.get("description") or "Media"),
-                    "channel": str(info.get("channel") or info.get("uploader") or info.get("uploader_id") or "Creator"),
-                    "duration": format_duration(info.get("duration")),
+                    "title": str(summary.get("title") or "Media"),
+                    "channel": str(summary.get("creator") or "Creator"),
+                    "duration": format_duration(summary.get("duration")),
                     "views": info.get("view_count"),
                     "platform": detect_platform(url) or str(info.get("extractor_key") or "media").lower(),
                     "info": info,
                     "thumbnail": thumb_bytes,
                 },
             )
+        except SharedCancelled:
+            self._put_analysis_event("analysis_cancelled", job_id, "Analysis cancelled.")
         except Exception as exc:
             LOGGER.exception("Analysis %s failed", job_id)
             self._put_analysis_event(
@@ -1701,171 +1645,29 @@ class DownloaderApp(ctk.CTk):
         request_settings: dict[str, Any],
         cached_info: dict[str, Any] | None = None,
     ) -> None:
-        started_at = time.time()
-
-        def hook(data: dict[str, Any]) -> None:
-            if cancel_event.is_set():
-                raise RuntimeError("Download cancelled by user.")
-            status = data.get("status")
-            if status == "downloading":
-                downloaded = int(data.get("downloaded_bytes") or 0)
-                total = int(data.get("total_bytes") or data.get("total_bytes_estimate") or 0)
-                percent = (downloaded / total * 100.0) if total else 0.0
-                speed = human_bytes(data.get("speed"))
-                eta = data.get("eta")
-                extras = []
-                if speed:
-                    extras.append(f"{speed}/s")
-                if eta is not None:
-                    try:
-                        extras.append(f"ETA {int(eta)}s")
-                    except Exception:
-                        pass
-                self._put_download_event(
-                    "download_progress",
-                    request_id,
-                    {"percent": percent, "detail": "  •  ".join(extras)},
-                )
-            elif status == "finished":
-                self._put_download_event("download_status", request_id, "Finalizing file…")
-
-        opts: dict[str, Any] = {
-            "outtmpl": str(download_dir / f"{name}.%(ext)s"),
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "cachedir": False,
-            "socket_timeout": 30,
-            "retries": 3,
-            "fragment_retries": 4,
-            "concurrent_fragment_downloads": 4,
-            "progress_hooks": [hook],
-            "overwrites": False,
-            "ffmpeg_location": get_ffmpeg_exe(),
-        }
-
-        if request_settings["mode"] == "Audio":
-            opts.update(
-                {
-                    "format": "bestaudio/best",
-                    "postprocessors": [
-                        {
-                            "key": "FFmpegExtractAudio",
-                            "preferredcodec": request_settings["audio_format"],
-                            "preferredquality": request_settings["audio_quality"],
-                        }
-                    ],
-                }
-            )
-        else:
-            opts["format"] = video_format_selector(url, str(request_settings["video_quality"]))
-            opts["merge_output_format"] = "mp4"
-
         try:
-            attempts = extraction_attempts(url)
-            last_error: Exception | None = None
-            attempt_errors: list[str] = []
-            downloaded = False
-
-            # Fast/reliable path: the Analyze step already resolved this page and
-            # produced direct format URLs. Re-use that snapshot instead of
-            # contacting the webpage and metadata API a second time. This is
-            # especially important for sites such as Eporner that may allow the
-            # first metadata request and then reset/close subsequent requests.
-            if isinstance(cached_info, dict) and cached_info.get("formats"):
-                if cancel_event.is_set():
-                    self._put_download_event("download_cancelled", request_id, "Download cancelled.")
-                    return
-
-                self._put_download_event(
+            final_path = shared_download_from_analysis(
+                url=url,
+                cached_info=dict(cached_info or {}),
+                download_dir=download_dir,
+                filename=name,
+                mode=str(request_settings.get("mode") or "Video"),
+                video_quality=str(request_settings.get("video_quality") or "Best available"),
+                audio_format=str(request_settings.get("audio_format") or "mp3"),
+                audio_quality=str(request_settings.get("audio_quality") or "192"),
+                cancel_event=cancel_event,
+                on_status=lambda text: self._put_download_event(
                     "download_status",
                     request_id,
-                    "Using analyzed media data…",
-                )
-                cached_network_options: dict[str, Any] = {}
-                if attempts:
-                    cached_network_options = dict(attempts[0][1] or {})
-                    cached_network_options.pop("_force_generic_extractor", None)
+                    f"{text}…" if text and not str(text).endswith("…") else str(text),
+                ),
+                on_progress=lambda value, detail: self._put_download_event(
+                    "download_progress",
+                    request_id,
+                    {"percent": float(value) * 100.0, "detail": str(detail or "")},
+                ),
+            )
 
-                try:
-                    cached_opts = {**opts, **cached_network_options}
-                    with yt_dlp.YoutubeDL(cached_opts) as ydl:
-                        ydl.process_ie_result(copy.deepcopy(cached_info), download=True)
-                    downloaded = True
-                except Exception as exc:
-                    last_error = exc
-                    attempt_errors.append(f"Analyzed media: {str(exc).strip()}")
-                    LOGGER.warning(
-                        "Cached analyzed media download failed request=%s; falling back to URL extraction: %s",
-                        request_id,
-                        exc,
-                    )
-                    for partial in download_dir.glob(f"{name}.*"):
-                        if partial.suffix.lower() in {".part", ".ytdl", ".temp", ".tmp"}:
-                            try:
-                                partial.unlink()
-                            except OSError:
-                                pass
-
-            for index, (attempt_url, network_options) in enumerate(attempts, start=1):
-                if downloaded:
-                    break
-                if cancel_event.is_set():
-                    self._put_download_event("download_cancelled", request_id, "Download cancelled.")
-                    return
-                if len(attempts) > 1:
-                    self._put_download_event(
-                        "download_status",
-                        request_id,
-                        f"URL fallback {index}/{len(attempts)}…",
-                    )
-                attempt_network_options = dict(network_options)
-                force_generic = bool(attempt_network_options.pop("_force_generic_extractor", False))
-                attempt_opts = {**opts, **attempt_network_options}
-                try:
-                    with yt_dlp.YoutubeDL(attempt_opts) as ydl:
-                        ydl.extract_info(
-                            attempt_url,
-                            download=True,
-                            force_generic_extractor=force_generic,
-                        )
-                    downloaded = True
-                    break
-                except Exception as exc:
-                    last_error = exc
-                    attempt_errors.append(f"Attempt {index}: {str(exc).strip()}")
-                    for partial in download_dir.glob(f"{name}.*"):
-                        if partial.suffix.lower() in {".part", ".ytdl", ".temp", ".tmp"}:
-                            try:
-                                partial.unlink()
-                            except OSError:
-                                pass
-                    if cancel_event.is_set():
-                        self._put_download_event("download_cancelled", request_id, "Download cancelled.")
-                        return
-
-            if not downloaded:
-                if attempt_errors:
-                    detail = "\n".join(attempt_errors[-4:])
-                    raise RuntimeError("No compatible download path succeeded.\n" + detail) from last_error
-                raise last_error or RuntimeError("No compatible connection path succeeded.")
-
-            candidates = []
-            for path in download_dir.iterdir():
-                if not path.is_file() or path.stem != name:
-                    continue
-                if path.suffix.lower() in {".part", ".ytdl", ".temp", ".tmp"}:
-                    continue
-                try:
-                    if path.stat().st_mtime >= started_at - 2.0:
-                        candidates.append(path)
-                except OSError:
-                    continue
-
-            if not candidates:
-                raise RuntimeError("Download finished, but the final file could not be located.")
-
-            final_path = max(candidates, key=lambda path: path.stat().st_mtime)
             self._put_download_event(
                 "download_done",
                 request_id,
@@ -1880,6 +1682,8 @@ class DownloaderApp(ctk.CTk):
                     "duration_seconds": request_settings.get("history_duration") or 0,
                 },
             )
+        except SharedCancelled:
+            self._put_download_event("download_cancelled", request_id, "Download cancelled.")
         except Exception as exc:
             if cancel_event.is_set():
                 self._put_download_event("download_cancelled", request_id, "Download cancelled.")

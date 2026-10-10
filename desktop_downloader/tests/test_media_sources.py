@@ -60,16 +60,13 @@ class MediaSourceTests(unittest.TestCase):
         attempts = extraction_attempts("https://example.com/watch/123")
         self.assertGreaterEqual(len(attempts), 4)
         self.assertTrue(any("impersonate" in options for _url, options in attempts))
-        self.assertTrue(any(options.get("force_generic_extractor") for _url, options in attempts))
+        self.assertTrue(any(options.get("_force_generic_extractor") for _url, options in attempts))
 
     def test_instagram_avoids_impersonation_but_has_generic_fallback(self):
         attempts = extraction_attempts("https://www.instagram.com/reel/ABC/")
         self.assertGreaterEqual(len(attempts), 2)
-        self.assertTrue(any(options.get("force_generic_extractor") for _url, options in attempts))
+        self.assertTrue(any(options.get("_force_generic_extractor") for _url, options in attempts))
         self.assertTrue(all("impersonate" not in options for _url, options in attempts))
-        self.assertTrue(
-            all("prefer-legacy-http-handler" in options.get("compat_opts", set()) for _url, options in attempts)
-        )
 
     def test_facebook_mobile_watch_url(self):
         self.assertEqual(
@@ -106,6 +103,9 @@ class MediaSourceTests(unittest.TestCase):
         self.assertIn("https://www.eporner.com/embed/AbC123xyz/", urls)
         self.assertTrue(any(options.get("_force_generic_extractor") for _url, options in attempts))
         self.assertTrue(all("impersonate" not in options for _url, options in attempts))
+        self.assertTrue(
+            all("prefer-legacy-http-handler" in options.get("compat_opts", set()) for _url, options in attempts)
+        )
 
     def test_generic_fallback_uses_execution_marker(self):
         attempts = extraction_attempts("https://example.com/watch/123")
