@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 from yt_dlp.networking.impersonate import ImpersonateTarget
@@ -159,7 +160,7 @@ def _generic_transport_attempts(url: str, *, allow_impersonation: bool = True) -
     if allow_impersonation:
         attempts.append((url, {**base, "impersonate": ImpersonateTarget("chrome")}))
 
-    attempts.append((url, {**base, "force_generic_extractor": True}))
+    attempts.append((url, {**base, "_force_generic_extractor": True}))
     if allow_impersonation:
         attempts.append(
             (
@@ -167,11 +168,26 @@ def _generic_transport_attempts(url: str, *, allow_impersonation: bool = True) -
                 {
                     **base,
                     "impersonate": ImpersonateTarget("chrome"),
-                    "force_generic_extractor": True,
+                    "_force_generic_extractor": True,
                 },
             )
         )
     return attempts
+
+
+def eporner_embed_url(url: str) -> str | None:
+    """Return the canonical embed URL for an Eporner video URL."""
+    host = _hostname(url)
+    if host not in {"eporner.com", "www.eporner.com"}:
+        return None
+    try:
+        path = urlparse((url or "").strip()).path
+    except ValueError:
+        return None
+    match = re.search(r"/(?:video-|hd-porn/|embed/)([A-Za-z0-9]+)", path)
+    if not match:
+        return None
+    return f"https://www.eporner.com/embed/{match.group(1)}/"
 
 
 def extraction_attempts(url: str) -> list[tuple[str, dict]]:
@@ -179,6 +195,23 @@ def extraction_attempts(url: str) -> list[tuple[str, dict]]:
     platform = detect_platform(url)
     if platform is None:
         return []
+
+    host = _hostname(url)
+    if host in {"eporner.com", "www.eporner.com"}:
+        base = _base_request_options()
+        embed = eporner_embed_url(url)
+        attempts: list[tuple[str, dict]] = [(url, dict(base))]
+        if embed and embed != url:
+            attempts.append((embed, dict(base)))
+
+        # The current Eporner extractor can fail while fetching its JSON API.
+        # A true Generic extractor pass can still recover direct media URLs from
+        # the page/embed HTML. Do not use curl_cffi impersonation for this site:
+        # the Windows build has shown curl (52)/(35) SSL transport failures here.
+        attempts.append((url, {**base, "_force_generic_extractor": True}))
+        if embed and embed != url:
+            attempts.append((embed, {**base, "_force_generic_extractor": True}))
+        return attempts
 
     if platform == "facebook":
         base = _base_request_options()
@@ -201,7 +234,7 @@ def extraction_attempts(url: str) -> list[tuple[str, dict]]:
                     },
                 )
             )
-        candidates.append((url, {**base, "force_generic_extractor": True}))
+        candidates.append((url, {**base, "_force_generic_extractor": True}))
         return candidates
 
     if platform == "instagram":

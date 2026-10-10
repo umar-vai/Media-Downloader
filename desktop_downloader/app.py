@@ -1168,8 +1168,13 @@ class DownloaderApp(ctk.CTk):
         self._cancel_auto_analyze()
         url = self.url_var.get().strip()
 
-        if self.analysis_running and url != self.analysis_url:
-            self.cancel_analysis(silent=True)
+        if self.analysis_running:
+            if url != self.analysis_url:
+                self.cancel_analysis(silent=True)
+            else:
+                # Ignore duplicate KeyRelease/programmatic-change events for the
+                # same URL while its worker is already running.
+                return
 
         if url != self.last_analyzed_url:
             self.current_info = None
@@ -1435,6 +1440,7 @@ class DownloaderApp(ctk.CTk):
             attempts = extraction_attempts(url)
             info: dict[str, Any] = {}
             last_error: Exception | None = None
+            attempt_errors: list[str] = []
             for index, (attempt_url, network_options) in enumerate(attempts, start=1):
                 if cancel_event.is_set():
                     self._put_analysis_event("analysis_cancelled", job_id, "Analysis cancelled.")
@@ -1446,6 +1452,8 @@ class DownloaderApp(ctk.CTk):
                         f"Connection attempt {index}/{len(attempts)}…",
                     )
                 try:
+                    attempt_options = dict(network_options)
+                    force_generic = bool(attempt_options.pop("_force_generic_extractor", False))
                     with yt_dlp.YoutubeDL(
                         {
                             "quiet": True,
@@ -1453,22 +1461,30 @@ class DownloaderApp(ctk.CTk):
                             "skip_download": True,
                             "noplaylist": True,
                             "cachedir": False,
-                            "socket_timeout": 20,
-                            "retries": 1,
-                            "fragment_retries": 1,
-                            **network_options,
+                            "socket_timeout": 12,
+                            "retries": 0,
+                            "fragment_retries": 0,
+                            **attempt_options,
                         }
                     ) as ydl:
-                        info = ydl.extract_info(attempt_url, download=False) or {}
+                        info = ydl.extract_info(
+                            attempt_url,
+                            download=False,
+                            force_generic_extractor=force_generic,
+                        ) or {}
                     if info:
                         break
                 except Exception as exc:
                     last_error = exc
+                    attempt_errors.append(f"Attempt {index}: {str(exc).strip()}")
 
             if cancel_event.is_set():
                 self._put_analysis_event("analysis_cancelled", job_id, "Analysis cancelled.")
                 return
             if not info:
+                if attempt_errors:
+                    detail = "\n".join(attempt_errors[-4:])
+                    raise RuntimeError("No compatible connection path succeeded.\n" + detail) from last_error
                 raise last_error or RuntimeError("No compatible connection path succeeded.")
 
             thumb_bytes = None
@@ -1679,6 +1695,7 @@ class DownloaderApp(ctk.CTk):
         try:
             attempts = extraction_attempts(url)
             last_error: Exception | None = None
+            attempt_errors: list[str] = []
             downloaded = False
             for index, (attempt_url, network_options) in enumerate(attempts, start=1):
                 if cancel_event.is_set():
@@ -1690,14 +1707,21 @@ class DownloaderApp(ctk.CTk):
                         request_id,
                         f"Connection {index}/{len(attempts)}…",
                     )
-                attempt_opts = {**opts, **network_options}
+                attempt_network_options = dict(network_options)
+                force_generic = bool(attempt_network_options.pop("_force_generic_extractor", False))
+                attempt_opts = {**opts, **attempt_network_options}
                 try:
                     with yt_dlp.YoutubeDL(attempt_opts) as ydl:
-                        ydl.extract_info(attempt_url, download=True)
+                        ydl.extract_info(
+                            attempt_url,
+                            download=True,
+                            force_generic_extractor=force_generic,
+                        )
                     downloaded = True
                     break
                 except Exception as exc:
                     last_error = exc
+                    attempt_errors.append(f"Attempt {index}: {str(exc).strip()}")
                     for partial in download_dir.glob(f"{name}.*"):
                         if partial.suffix.lower() in {".part", ".ytdl", ".temp", ".tmp"}:
                             try:
@@ -1709,6 +1733,9 @@ class DownloaderApp(ctk.CTk):
                         return
 
             if not downloaded:
+                if attempt_errors:
+                    detail = "\n".join(attempt_errors[-4:])
+                    raise RuntimeError("No compatible download path succeeded.\n" + detail) from last_error
                 raise last_error or RuntimeError("No compatible connection path succeeded.")
 
             candidates = []
@@ -1839,8 +1866,10 @@ class DownloaderApp(ctk.CTk):
                         self.last_analyzed_url = ""
                         self.download_button.configure(state="disabled")
                         self.task_state = TaskState.ERROR
+                        self.title_label.configure(text="Could not analyze this link")
+                        self.meta_label.configure(text="All compatible extraction paths failed.")
                         self.media_badge.configure(text="ANALYSIS FAILED", fg_color="#351722", text_color=DANGER)
-                        self.media_action_hint.configure(text="Try another public link or retry this one.")
+                        self.media_action_hint.configure(text="Try Re-analyze or paste another public link.")
                         self._set_status("Analysis failed", "error")
                         self._finish_analysis(job_id)
                         messagebox.showerror(APP_NAME, str(data))
@@ -1850,6 +1879,8 @@ class DownloaderApp(ctk.CTk):
                         self.last_analyzed_url = ""
                         self.download_button.configure(state="disabled")
                         self.task_state = TaskState.CANCELLED
+                        self.title_label.configure(text="Analysis cancelled")
+                        self.meta_label.configure(text="Paste another link or press Analyze to try again.")
                         self.media_badge.configure(text="ANALYSIS CANCELLED", fg_color="#2D2514", text_color=WARNING)
                         self._set_status(str(data or "Analysis cancelled."), "cancelled")
                         self._finish_analysis(job_id)

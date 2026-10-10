@@ -17,6 +17,7 @@ from media_sources import (
     platform_name,
     request_options,
     video_format_selector,
+    eporner_embed_url,
 )
 
 
@@ -84,6 +85,24 @@ class MediaSourceTests(unittest.TestCase):
         self.assertTrue(attempts[0][0].startswith("https://m.facebook.com/watch/"))
         self.assertEqual(attempts[0][1].get("source_address"), "0.0.0.0")
         self.assertTrue(any("impersonate" in options for _url, options in attempts))
+
+    def test_eporner_uses_embed_and_true_generic_fallbacks_without_impersonation(self):
+        url = "https://www.eporner.com/video-AbC123xyz/sample-title/"
+        self.assertEqual(
+            eporner_embed_url(url),
+            "https://www.eporner.com/embed/AbC123xyz/",
+        )
+        attempts = extraction_attempts(url)
+        urls = [candidate for candidate, _options in attempts]
+        self.assertIn(url, urls)
+        self.assertIn("https://www.eporner.com/embed/AbC123xyz/", urls)
+        self.assertTrue(any(options.get("_force_generic_extractor") for _url, options in attempts))
+        self.assertTrue(all("impersonate" not in options for _url, options in attempts))
+
+    def test_generic_fallback_uses_execution_marker(self):
+        attempts = extraction_attempts("https://example.com/watch/123")
+        self.assertTrue(any(options.get("_force_generic_extractor") for _url, options in attempts))
+        self.assertTrue(all("force_generic_extractor" not in options for _url, options in attempts))
 
     def test_generic_video_format_is_resilient(self):
         selector = video_format_selector("https://example.com/video", "720p")

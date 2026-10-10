@@ -59,3 +59,12 @@ Version 3.9.0 separates link analysis from downloads. A completed or active down
 - Up to **3 files download concurrently**; additional files wait in the queue.
 - The compact Download button sits beside the analyzed media information.
 - Download Activity shows per-file progress, state and errors while you continue analyzing new links.
+
+
+## v3.9.1 extraction reliability fix
+
+- Fixed the Generic extractor fallback so it is actually passed to yt-dlp's `extract_info(..., force_generic_extractor=True)` call instead of being placed only in the options dictionary.
+- Added an Eporner-specific recovery path that tries the canonical embed URL and Generic extraction without curl_cffi impersonation, avoiding observed Windows curl (52) and BoringSSL curl (35) failures.
+- Reduced analysis retry latency so failed links return control sooner.
+- Fixed an analysis UI race that could show `LINK READY` while the same URL was already being analyzed.
+- Failed or cancelled analyses now leave the media card in a clear terminal state instead of continuing to display `Analyzing...`.
