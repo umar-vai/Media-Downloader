@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import re
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -31,12 +32,13 @@ class MediaInfo:
     fps: float = 0.0
 
 
-CROP_PRESETS: dict[str, tuple[int, int] | None] = {
+CROP_PRESETS: dict[str, tuple[int, int] | None | str] = {
     "Original": None,
     "16:9": (16, 9),
     "9:16": (9, 16),
     "1:1": (1, 1),
     "4:5": (4, 5),
+    "Custom": "custom",
 }
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
@@ -113,16 +115,35 @@ def even_size(value: int) -> int:
     return value if value % 2 == 0 else value - 1
 
 
-def compute_crop(info: MediaInfo, preset: str) -> tuple[int, int, int, int] | None:
+def compute_crop(
+    info: MediaInfo,
+    preset: str,
+    custom: tuple[int, int, int, int] | None = None,
+) -> tuple[int, int, int, int] | None:
     if not info.has_video or preset == "Original":
         return None
     if preset not in CROP_PRESETS:
         raise ValueError("Unsupported crop preset.")
-    ratio = CROP_PRESETS[preset]
-    if ratio is None:
-        return None
     if info.width <= 0 or info.height <= 0:
         raise ValueError("Video dimensions could not be detected.")
+
+    if preset == "Custom":
+        if custom is None:
+            raise ValueError("Custom crop requires X, Y, width and height.")
+        x, y, width, height = (int(value) for value in custom)
+        x = max(0, x)
+        y = max(0, y)
+        width = even_size(width)
+        height = even_size(height)
+        if x >= info.width or y >= info.height:
+            raise ValueError("Custom crop starts outside the source frame.")
+        if x + width > info.width or y + height > info.height:
+            raise ValueError("Custom crop is outside the source frame.")
+        return x, y, width, height
+
+    ratio = CROP_PRESETS[preset]
+    if not isinstance(ratio, tuple):
+        return None
 
     target_ratio = ratio[0] / ratio[1]
     source_ratio = info.width / info.height
@@ -144,11 +165,12 @@ def build_video_filters(
     rotate: str,
     speed: float,
     *,
+    custom_crop: tuple[int, int, int, int] | None = None,
     include_speed: bool = True,
     preview_size: tuple[int, int] | None = None,
 ) -> list[str]:
     filters: list[str] = []
-    crop = compute_crop(info, crop_preset)
+    crop = compute_crop(info, crop_preset, custom_crop)
     if crop:
         x, y, width, height = crop
         filters.append(f"crop={width}:{height}:{x}:{y}")
@@ -207,6 +229,7 @@ def extract_preview_frame(
     *,
     crop_preset: str = "Original",
     rotate: str = "0°",
+    custom_crop: tuple[int, int, int, int] | None = None,
     timeout: float = 12.0,
 ) -> bytes:
     source = Path(path).expanduser()
@@ -219,6 +242,7 @@ def extract_preview_frame(
         crop_preset,
         rotate,
         1.0,
+        custom_crop=custom_crop,
         include_speed=False,
         preview_size=(800, 450),
     )
@@ -342,6 +366,7 @@ def build_export_command(
     start: float,
     end: float,
     crop_preset: str,
+    custom_crop: tuple[int, int, int, int] | None,
     rotate: str,
     speed: float,
     mute: bool,
@@ -372,7 +397,13 @@ def build_export_command(
     ]
 
     if info.has_video:
-        video_filters = build_video_filters(info, crop_preset, rotate, speed)
+        video_filters = build_video_filters(
+            info,
+            crop_preset,
+            rotate,
+            speed,
+            custom_crop=custom_crop,
+        )
         command += ["-map", "0:v:0", "-vf", ",".join(video_filters)]
         crf = {"High": "18", "Balanced": "23", "Small": "28"}.get(quality, "23")
         command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
@@ -409,6 +440,98 @@ def build_export_command(
     return command, output_duration
 
 
+def render_proxy_clip(
+    path: Path,
+    *,
+    start: float,
+    duration: float,
+    crop_preset: str,
+    custom_crop: tuple[int, int, int, int] | None,
+    rotate: str,
+    speed: float,
+    mute: bool,
+    volume_percent: float,
+    timeout: float = 45.0,
+) -> bytes:
+    source = Path(path).expanduser()
+    info = probe_media(source)
+    if not info.has_video:
+        raise ValueError("Playable proxy preview requires a video stream.")
+
+    start = max(0.0, min(float(start), info.duration))
+    duration = max(0.75, min(float(duration), 10.0, max(0.75, info.duration - start)))
+    speed = max(0.5, min(2.0, float(speed)))
+
+    with tempfile.TemporaryDirectory(prefix="MediaDownloaderPreview_") as folder:
+        output = Path(folder) / "preview.mp4"
+        command = [
+            ffmpeg_exe(),
+            "-y",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{start:.3f}",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            str(source),
+        ]
+
+        filters = build_video_filters(
+            info,
+            crop_preset,
+            rotate,
+            speed,
+            custom_crop=custom_crop,
+            include_speed=True,
+            preview_size=(640, 360),
+        )
+        command += [
+            "-map",
+            "0:v:0",
+            "-vf",
+            ",".join(filters),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "29",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+
+        if info.has_audio and not mute:
+            audio_filters = build_audio_filters(
+                speed,
+                volume_percent,
+                0.0,
+                0.0,
+                duration / speed,
+            )
+            command += ["-map", "0:a:0?"]
+            if audio_filters:
+                command += ["-af", ",".join(audio_filters)]
+            command += ["-c:a", "aac", "-b:a", "96k"]
+        else:
+            command += ["-an"]
+
+        command += ["-movflags", "+faststart", str(output)]
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=CREATE_NO_WINDOW,
+            timeout=timeout,
+        )
+        if result.returncode != 0 or not output.is_file() or output.stat().st_size <= 0:
+            error = result.stderr.decode("utf-8", errors="replace")[-1600:]
+            raise RuntimeError(error or "Could not render playable preview clip.")
+        return output.read_bytes()
+
+
 def _reader(stream, output_queue: queue.Queue[tuple[str, str]], name: str) -> None:
     try:
         for line in iter(stream.readline, ""):
@@ -428,6 +551,7 @@ def run_export(
     start: float,
     end: float,
     crop_preset: str,
+    custom_crop: tuple[int, int, int, int] | None,
     rotate: str,
     speed: float,
     mute: bool,
@@ -453,6 +577,7 @@ def run_export(
         start=start,
         end=end,
         crop_preset=crop_preset,
+        custom_crop=custom_crop,
         rotate=rotate,
         speed=speed,
         mute=mute,

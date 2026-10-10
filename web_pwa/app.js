@@ -207,26 +207,95 @@ async function refreshDownloads() {
   } catch {}
 }
 
+function clearEditorPreviewObjectUrl() {
+  if (state.editorObjectUrl) {
+    URL.revokeObjectURL(state.editorObjectUrl);
+    state.editorObjectUrl = "";
+  }
+}
+
 function showEditorImage(blob) {
-  if (state.editorObjectUrl) URL.revokeObjectURL(state.editorObjectUrl);
+  clearEditorPreviewObjectUrl();
   state.editorObjectUrl = URL.createObjectURL(blob);
+  $("editorPreviewVideo").pause();
+  $("editorPreviewVideo").removeAttribute("src");
+  $("editorPreviewVideo").classList.add("hidden");
   $("editorPreviewImage").src = state.editorObjectUrl;
   $("editorPreviewImage").classList.remove("hidden");
   $("editorPreviewPlaceholder").classList.add("hidden");
+}
+
+function showEditorVideo(blob) {
+  clearEditorPreviewObjectUrl();
+  state.editorObjectUrl = URL.createObjectURL(blob);
+  $("editorPreviewImage").classList.add("hidden");
+  $("editorPreviewVideo").src = state.editorObjectUrl;
+  $("editorPreviewVideo").classList.remove("hidden");
+  $("editorPreviewPlaceholder").classList.add("hidden");
+  $("editorPreviewVideo").play().catch(() => {});
+}
+
+function editorCustomCropPayload() {
+  return {
+    custom_x: Number($("editorCropX").value || 0),
+    custom_y: Number($("editorCropY").value || 0),
+    custom_width: Number($("editorCropWidth").value || 0),
+    custom_height: Number($("editorCropHeight").value || 0),
+  };
+}
+
+function updateTimelineSummary() {
+  const start = Number($("editorStart").value || 0);
+  const end = Number($("editorEnd").value || 0);
+  const duration = Math.max(0, end - start);
+  $("editorTimelineSummary").textContent = `${formatDuration(start)} → ${formatDuration(end)} • ${formatDuration(duration)} selected`;
+}
+
+function syncTimelineFromRanges(changed) {
+  let start = Number($("editorStartRange").value || 0);
+  let end = Number($("editorEndRange").value || 0);
+  const step = 0.05;
+  if (start >= end) {
+    if (changed === "start") start = Math.max(0, end - step);
+    else end = Math.min(Number($("editorEndRange").max || end + step), start + step);
+  }
+  $("editorStartRange").value = String(start);
+  $("editorEndRange").value = String(end);
+  $("editorStart").value = start.toFixed(2);
+  $("editorEnd").value = end.toFixed(2);
+  updateTimelineSummary();
+}
+
+function syncTimelineFromNumbers() {
+  const duration = Number(state.editorInfo?.duration || 0);
+  let start = Math.max(0, Math.min(Number($("editorStart").value || 0), duration));
+  let end = Math.max(0, Math.min(Number($("editorEnd").value || duration), duration));
+  if (end <= start) end = Math.min(duration, start + 0.05);
+  $("editorStart").value = String(start);
+  $("editorEnd").value = String(end);
+  $("editorStartRange").value = String(start);
+  $("editorEndRange").value = String(end);
+  updateTimelineSummary();
 }
 
 function renderEditorSource(data) {
   const info = data.info || {};
   state.editorInfo = info;
   $("editorSourcePath").value = data.path || data.selected || "";
+  const duration = Number(info.duration || 0);
   $("editorStart").value = "0";
-  $("editorEnd").value = String(Number(info.duration || 0).toFixed(3));
-  $("editorEnd").max = String(info.duration || 0);
-  $("editorPreviewPosition").value = String(Math.min(Number(info.duration || 0) / 2, 5).toFixed(2));
-  $("editorPreviewPosition").max = String(info.duration || 0);
+  $("editorEnd").value = String(duration.toFixed(3));
+  $("editorEnd").max = String(duration);
+  $("editorStartRange").max = String(duration);
+  $("editorEndRange").max = String(duration);
+  $("editorStartRange").value = "0";
+  $("editorEndRange").value = String(duration);
+  $("editorPreviewPosition").value = String(Math.min(duration / 2, 5).toFixed(2));
+  $("editorPreviewPosition").max = String(duration);
   $("editorOutputName").value = data.output_name || "edited_media";
   $("editorOutputDir").value = data.output_dir || state.settings.download_dir || "";
   $("editorPreviewBtn").disabled = !info.has_video;
+  $("editorProxyBtn").disabled = !info.has_video;
   $("editorWaveformBtn").disabled = !info.has_audio;
   $("editorExportBtn").disabled = false;
   $("editorCrop").disabled = !info.has_video;
@@ -235,6 +304,17 @@ function renderEditorSource(data) {
   $("editorMute").disabled = !info.has_audio;
   $("editorFadeIn").disabled = !info.has_audio;
   $("editorFadeOut").disabled = !info.has_audio;
+
+  $("editorCropX").value = "0";
+  $("editorCropY").value = "0";
+  $("editorCropWidth").value = String(info.width || 2);
+  $("editorCropHeight").value = String(info.height || 2);
+  $("editorCropX").max = String(Math.max(0, Number(info.width || 0) - 2));
+  $("editorCropY").max = String(Math.max(0, Number(info.height || 0) - 2));
+  $("editorCropWidth").max = String(info.width || 2);
+  $("editorCropHeight").max = String(info.height || 2);
+  $("editorCustomCropPanel").classList.toggle("hidden", $("editorCrop").value !== "Custom");
+  updateTimelineSummary();
 
   const dimensions = info.has_video ? `${info.width || "?"}×${info.height || "?"}` : "Audio only";
   $("editorSourceMeta").textContent = [
@@ -245,10 +325,10 @@ function renderEditorSource(data) {
   ].filter(Boolean).join(" • ");
   $("editorStatus").textContent = "Source loaded. Adjust controls, preview, then export.";
 
-  if (state.editorObjectUrl) {
-    URL.revokeObjectURL(state.editorObjectUrl);
-    state.editorObjectUrl = "";
-  }
+  clearEditorPreviewObjectUrl();
+  $("editorPreviewVideo").pause();
+  $("editorPreviewVideo").removeAttribute("src");
+  $("editorPreviewVideo").classList.add("hidden");
   $("editorPreviewImage").classList.add("hidden");
   $("editorPreviewPlaceholder").classList.remove("hidden");
   $("editorPreviewPlaceholder").textContent = info.has_video
@@ -300,6 +380,7 @@ async function refreshEditorPreview() {
         position:Number($("editorPreviewPosition").value || 0),
         crop_preset:$("editorCrop").value,
         rotate:$("editorRotate").value,
+        ...editorCustomCropPayload(),
       }),
     });
     showEditorImage(blob);
@@ -308,6 +389,35 @@ async function refreshEditorPreview() {
     $("editorStatus").textContent = error.message;
   } finally {
     $("editorPreviewBtn").disabled = !state.editorInfo?.has_video;
+  }
+}
+
+async function refreshEditorProxy() {
+  if (!state.editorInfo?.has_video) return;
+  $("editorStatus").textContent = "Rendering 6-second playable proxy…";
+  $("editorProxyBtn").disabled = true;
+  try {
+    const blob = await apiBlob("/api/editor/proxy", {
+      method:"POST",
+      body:JSON.stringify({
+        path:$("editorSourcePath").value.trim(),
+        position:Number($("editorPreviewPosition").value || $("editorStart").value || 0),
+        duration:6,
+        crop_preset:$("editorCrop").value,
+        rotate:$("editorRotate").value,
+        ...editorCustomCropPayload(),
+        speed:Number($("editorSpeed").value || 1),
+        mute:$("editorMute").checked,
+        volume_percent:Number($("editorVolume").value || 100),
+        ...editorCustomCropPayload(),
+      }),
+    });
+    showEditorVideo(blob);
+    $("editorStatus").textContent = "Playable proxy ready. This preview is temporary and local.";
+  } catch (error) {
+    $("editorStatus").textContent = error.message;
+  } finally {
+    $("editorProxyBtn").disabled = !state.editorInfo?.has_video;
   }
 }
 
@@ -358,11 +468,13 @@ async function pollEditorExport(id) {
       $("editorExportProgressBar").style.width = "100%";
       $("editorStatus").textContent = `Export complete: ${job.result?.path || job.result?.filename || ""}`;
       state.editorExportId = "";
+      await refreshEditorExports();
       return;
     }
     if (["failed","cancelled"].includes(job.status)) {
       setEditorExportBusy(false);
       state.editorExportId = "";
+      await refreshEditorExports();
       return;
     }
     await sleep(450);
@@ -416,6 +528,43 @@ async function cancelEditorExport() {
   } catch (error) {
     $("editorStatus").textContent = error.message;
   }
+}
+
+function editorExportRow(job) {
+  const row = document.createElement("article");
+  row.className = "download-row";
+  const percent = Math.round(Number(job.progress || 0) * 100);
+  const actions = [];
+  if (["queued","running","cancelling"].includes(job.status)) {
+    actions.push(`<button data-cancel-export="${job.id}" class="mini danger">${job.status === "cancelling" ? "Cancelling" : "Cancel"}</button>`);
+  } else if (job.status === "failed") {
+    actions.push(`<button data-retry-export="${job.id}" class="mini retry">Retry</button>`);
+  } else if (job.status === "completed" && job.result?.path) {
+    actions.push(`<button data-edit-export="${job.id}" data-export-path="${escapeHtml(job.result.path)}" class="mini retry">Edit output</button>`);
+  }
+  row.innerHTML = `
+    <div class="row-top">
+      <strong>${escapeHtml(job.request?.output_name || job.result?.filename || "Editor export")}</strong>
+      <span class="job-status ${job.status}">${String(job.status || "").toUpperCase()}</span>
+    </div>
+    <div class="progress"><span style="width:${job.status === "completed" ? 100 : percent}%"></span></div>
+    <div class="row-bottom"><span>${escapeHtml(job.error || job.detail || job.result?.path || "")}</span><div class="row-actions">${actions.join("")}</div></div>
+  `;
+  return row;
+}
+
+async function refreshEditorExports() {
+  if (!state.key) return;
+  try {
+    const {exports} = await api("/api/editor/exports");
+    const list = $("editorExportsList");
+    list.innerHTML = "";
+    if (!exports.length) {
+      list.innerHTML = '<div class="empty">No editor exports yet.</div>';
+      return;
+    }
+    exports.forEach((job) => list.appendChild(editorExportRow(job)));
+  } catch {}
 }
 
 function renderSettings(settings = {}) {
@@ -509,6 +658,7 @@ async function bootstrap() {
     $("analysisStatus").textContent = "Ready for a media link.";
     setInterval(refreshDownloads, 900);
     refreshDownloads();
+    refreshEditorExports();
     loadDiagnostics();
     if (["checking","downloading"].includes((data.update || {}).status)) {
       state.updatePoll = setTimeout(pollCoreUpdate, 500);
@@ -569,13 +719,19 @@ async function loadDiagnostics() {
 $("chooseEditorFileBtn").addEventListener("click", chooseEditorFile);
 $("loadEditorPathBtn").addEventListener("click", () => loadEditorPath());
 $("editorPreviewBtn").addEventListener("click", refreshEditorPreview);
+$("editorProxyBtn").addEventListener("click", refreshEditorProxy);
 $("editorWaveformBtn").addEventListener("click", refreshEditorWaveform);
 $("chooseEditorOutputBtn").addEventListener("click", chooseEditorOutputFolder);
 $("editorExportBtn").addEventListener("click", startEditorExport);
 $("editorCancelExportBtn").addEventListener("click", cancelEditorExport);
 $("editorCrop").addEventListener("change", () => {
-  if (state.editorInfo?.has_video) $("editorStatus").textContent = "Crop changed. Click Preview frame to refresh.";
+  $("editorCustomCropPanel").classList.toggle("hidden", $("editorCrop").value !== "Custom");
+  if (state.editorInfo?.has_video) $("editorStatus").textContent = "Crop changed. Preview frame or proxy to refresh.";
 });
+$("editorStartRange").addEventListener("input", () => syncTimelineFromRanges("start"));
+$("editorEndRange").addEventListener("input", () => syncTimelineFromRanges("end"));
+$("editorStart").addEventListener("change", syncTimelineFromNumbers);
+$("editorEnd").addEventListener("change", syncTimelineFromNumbers);
 $("editorRotate").addEventListener("change", () => {
   if (state.editorInfo?.has_video) $("editorStatus").textContent = "Rotation changed. Click Preview frame to refresh.";
 });
@@ -583,6 +739,20 @@ $("editorMute").addEventListener("change", () => {
   $("editorVolume").disabled = $("editorMute").checked || !state.editorInfo?.has_audio;
 });
 
+$("refreshEditorExportsBtn").addEventListener("click", refreshEditorExports);
+$("editorExportsList").addEventListener("click", async (event) => {
+  const retry = event.target.closest("[data-retry-export]");
+  const cancel = event.target.closest("[data-cancel-export]");
+  const edit = event.target.closest("[data-edit-export]");
+  try {
+    if (retry) await api(`/api/editor/exports/${retry.dataset.retryExport}/retry`, {method:"POST"});
+    if (cancel) await api(`/api/jobs/${cancel.dataset.cancelExport}`, {method:"DELETE"});
+    if (edit?.dataset.exportPath) await loadEditorPath(edit.dataset.exportPath);
+    await refreshEditorExports();
+  } catch (error) {
+    $("editorStatus").textContent = error.message;
+  }
+});
 $("saveCoreSettingsBtn").addEventListener("click", async () => {
   try { await saveCoreSettings(); }
   catch (error) { $("settingsStatus").textContent = error.message; }

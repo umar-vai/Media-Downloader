@@ -269,13 +269,24 @@ class JobManager:
     def _run_editor_export(self, job: Job) -> None:
         self._set(job, status="running", detail="Preparing export")
         try:
+            crop_preset = str(job.request.get("crop_preset") or "Original")
+            custom_crop = None
+            if crop_preset == "Custom":
+                custom_crop = (
+                    int(job.request.get("custom_x") or 0),
+                    int(job.request.get("custom_y") or 0),
+                    int(job.request.get("custom_width") or 0),
+                    int(job.request.get("custom_height") or 0),
+                )
+
             output = run_export(
                 Path(str(job.request.get("source_path") or "")),
                 output_dir=Path(str(job.request.get("output_dir") or "")),
                 output_name=str(job.request.get("output_name") or "edited_media"),
                 start=float(job.request.get("start") or 0.0),
                 end=float(job.request.get("end") or 0.0),
-                crop_preset=str(job.request.get("crop_preset") or "Original"),
+                crop_preset=crop_preset,
+                custom_crop=custom_crop,
                 rotate=str(job.request.get("rotate") or "0°"),
                 speed=float(job.request.get("speed") or 1.0),
                 mute=bool(job.request.get("mute")),
@@ -307,6 +318,16 @@ class JobManager:
         job.cancel_event.set()
         self._set(job, status="cancelling", detail="Cancelling")
         return True
+
+    def retry_editor_export(self, job_id: str) -> Job:
+        job = self.get(job_id)
+        if job is None or job.kind != "editor_export" or job.status != "failed":
+            raise ValueError("Only failed editor exports can be retried.")
+
+        job.cancel_event = threading.Event()
+        self._set(job, status="queued", progress=0.0, detail="Retry queued", error="", result={})
+        self._editor_pool.submit(self._run_editor_export, job)
+        return job
 
     def retry_download(self, job_id: str) -> Job:
         job = self.get(job_id)

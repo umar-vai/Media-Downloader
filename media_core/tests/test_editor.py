@@ -24,6 +24,12 @@ class EditorEngineTests(unittest.TestCase):
         self.assertEqual(x, (1920 - width) // 2)
         self.assertEqual(y, 0)
 
+    def test_custom_crop(self):
+        info = MediaInfo(duration=10, has_video=True, has_audio=False, width=1920, height=1080, fps=30)
+        self.assertEqual(compute_crop(info, "Custom", (100, 50, 800, 600)), (100, 50, 800, 600))
+        with self.assertRaises(ValueError):
+            compute_crop(info, "Custom", (1800, 0, 400, 400))
+
     def test_audio_filters(self):
         filters = build_audio_filters(2.0, 50, 1.0, 2.0, 5.0)
         self.assertIn("atempo=2", filters)
@@ -40,6 +46,7 @@ class EditorEngineTests(unittest.TestCase):
             start=5,
             end=25,
             crop_preset="1:1",
+            custom_crop=None,
             rotate="90°",
             speed=2,
             mute=False,

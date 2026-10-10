@@ -103,25 +103,40 @@
         <div class="editor-visual">
           <div class="editor-preview-shell">
             <img id="editorPreviewImage" alt="" class="hidden" />
-            <div id="editorPreviewPlaceholder">Choose media to preview a frame or waveform.</div>
+            <video id="editorPreviewVideo" class="hidden" controls playsinline preload="metadata"></video>
+            <div id="editorPreviewPlaceholder">Choose media to preview a frame, waveform or playable proxy.</div>
           </div>
           <div class="editor-preview-actions">
             <label>Preview position (sec)
               <input id="editorPreviewPosition" type="number" min="0" step="0.1" value="0" />
             </label>
             <button id="editorPreviewBtn" class="secondary" disabled>Preview frame</button>
+            <button id="editorProxyBtn" class="secondary" disabled>Play 6s proxy</button>
             <button id="editorWaveformBtn" class="secondary" disabled>Waveform</button>
           </div>
           <p id="editorSourceMeta" class="status-text">No editor source loaded.</p>
         </div>
 
         <div class="editor-controls">
+          <div class="timeline-panel">
+            <div class="timeline-head">
+              <strong>Trim timeline</strong>
+              <span id="editorTimelineSummary">0:00 → 0:00</span>
+            </div>
+            <label>Start
+              <input id="editorStartRange" type="range" min="0" max="1" step="0.05" value="0" />
+            </label>
+            <label>End
+              <input id="editorEndRange" type="range" min="0" max="1" step="0.05" value="1" />
+            </label>
+          </div>
+
           <div class="editor-control-grid">
             <label>Trim start (sec)<input id="editorStart" type="number" min="0" step="0.1" value="0" /></label>
             <label>Trim end (sec)<input id="editorEnd" type="number" min="0" step="0.1" value="0" /></label>
             <label>Crop
               <select id="editorCrop">
-                <option>Original</option><option>16:9</option><option>9:16</option><option>1:1</option><option>4:5</option>
+                <option>Original</option><option>16:9</option><option>9:16</option><option>1:1</option><option>4:5</option><option>Custom</option>
               </select>
             </label>
             <label>Rotate
@@ -136,6 +151,13 @@
             <label>Export quality
               <select id="editorQuality"><option>High</option><option selected>Balanced</option><option>Small</option></select>
             </label>
+          </div>
+
+          <div id="editorCustomCropPanel" class="custom-crop-panel hidden">
+            <label>X<input id="editorCropX" type="number" min="0" step="2" value="0" /></label>
+            <label>Y<input id="editorCropY" type="number" min="0" step="2" value="0" /></label>
+            <label>Width<input id="editorCropWidth" type="number" min="2" step="2" value="2" /></label>
+            <label>Height<input id="editorCropHeight" type="number" min="2" step="2" value="2" /></label>
           </div>
 
           <label class="editor-check"><input id="editorMute" type="checkbox" /> Mute audio</label>
@@ -156,6 +178,17 @@
           <div class="progress editor-export-progress"><span id="editorExportProgressBar" style="width:0%"></span></div>
           <p id="editorStatus" class="status-text">Editor is ready.</p>
         </div>
+      </div>
+
+      <div class="editor-history-head">
+        <div>
+          <strong>Export history</strong>
+          <p>Recent exports from this Local Core session.</p>
+        </div>
+        <button id="refreshEditorExportsBtn" class="secondary">Refresh</button>
+      </div>
+      <div id="editorExportsList" class="downloads-list editor-exports-list">
+        <div class="empty">No editor exports yet.</div>
       </div>
     </section>
 

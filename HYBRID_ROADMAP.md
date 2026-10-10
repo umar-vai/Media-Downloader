@@ -130,13 +130,22 @@ The PWA now exposes the first end-to-end local editor workflow:
 
 All source and rendered files remain local. Editor work runs in a dedicated single-worker pool so a heavy export does not block link analysis/download queue workers.
 
+### Phase 3B — Timeline, playable proxy, custom crop + export retry ✅
+
+- Added synchronized trim start/end range sliders while retaining exact numeric entry.
+- Added timeline selection summary showing start, end and selected duration.
+- Added temporary 6-second H.264/AAC proxy generation for in-browser playback with the active crop, rotation, speed, mute and volume settings.
+- Added freeform custom crop X/Y/width/height controls with source-bound validation.
+- Added editor export history for the current Local Core session.
+- Failed editor exports can be retried in-place; active exports can be cancelled from history and completed exports can be loaded back into the editor.
+- Local Core bumped to v0.5.0.
+
 ### Remaining Phase 3 work
 
-- timeline/range slider UX instead of numeric-only trim fields
-- in-browser playable proxy/preview clips
-- custom freeform crop controls
-- export history/retry
-- richer audio controls and editor presets
+- richer audio controls / equalizer presets
+- reusable editor presets
+- persistent editor project/export history across Local Core restarts
+- optional visual crop overlay / drag handles
 
 ## Phase 4 — Lightweight Windows agent
 

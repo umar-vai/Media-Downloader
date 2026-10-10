@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from imageio_ffmpeg import get_ffmpeg_exe
 
 from media_core.browser_resolver import find_browser
-from media_core.editor import extract_preview_frame, extract_waveform, probe_media, public_media_info, safe_export_name
+from media_core.editor import extract_preview_frame, extract_waveform, probe_media, public_media_info, render_proxy_clip, safe_export_name
 from media_core.network import safe_proxy_label
 
 from .core_updater import CoreUpdateService
@@ -93,6 +93,17 @@ class EditorPreviewRequest(EditorPathRequest):
     position: float = Field(default=0.0, ge=0)
     crop_preset: str = "Original"
     rotate: str = "0°"
+    custom_x: int = Field(default=0, ge=0)
+    custom_y: int = Field(default=0, ge=0)
+    custom_width: int = Field(default=0, ge=0)
+    custom_height: int = Field(default=0, ge=0)
+
+
+class EditorProxyRequest(EditorPreviewRequest):
+    duration: float = Field(default=6.0, ge=0.75, le=10.0)
+    speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    mute: bool = False
+    volume_percent: float = Field(default=100.0, ge=0, le=200)
 
 
 class EditorExportRequest(EditorPathRequest):
@@ -102,6 +113,10 @@ class EditorExportRequest(EditorPathRequest):
     end: float = Field(gt=0)
     crop_preset: str = "Original"
     rotate: str = "0°"
+    custom_x: int = Field(default=0, ge=0)
+    custom_y: int = Field(default=0, ge=0)
+    custom_width: int = Field(default=0, ge=0)
+    custom_height: int = Field(default=0, ge=0)
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
     mute: bool = False
     volume_percent: float = Field(default=100.0, ge=0, le=200)
@@ -120,6 +135,21 @@ class SettingsPatch(BaseModel):
     auto_check_core_updates: bool | None = None
     update_channel: str | None = None
     open_browser_on_start: bool | None = None
+
+
+def _custom_crop(payload: Any) -> tuple[int, int, int, int] | None:
+    if str(getattr(payload, "crop_preset", "Original")) != "Custom":
+        return None
+    width = int(getattr(payload, "custom_width", 0) or 0)
+    height = int(getattr(payload, "custom_height", 0) or 0)
+    if width <= 0 or height <= 0:
+        raise HTTPException(status_code=400, detail="Custom crop width and height must be greater than zero.")
+    return (
+        int(getattr(payload, "custom_x", 0) or 0),
+        int(getattr(payload, "custom_y", 0) or 0),
+        width,
+        height,
+    )
 
 
 def require_key(
@@ -377,10 +407,30 @@ def editor_preview(payload: EditorPreviewRequest) -> Response:
             payload.position,
             crop_preset=payload.crop_preset,
             rotate=payload.rotate,
+            custom_crop=_custom_crop(payload),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return Response(content=image, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/editor/proxy", dependencies=[Depends(require_key)])
+def editor_proxy(payload: EditorProxyRequest) -> Response:
+    try:
+        clip = render_proxy_clip(
+            Path(payload.path),
+            start=payload.position,
+            duration=payload.duration,
+            crop_preset=payload.crop_preset,
+            custom_crop=_custom_crop(payload),
+            rotate=payload.rotate,
+            speed=payload.speed,
+            mute=payload.mute,
+            volume_percent=payload.volume_percent,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(content=clip, media_type="video/mp4", headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/editor/waveform", dependencies=[Depends(require_key)])
@@ -413,6 +463,15 @@ def editor_export(payload: EditorExportRequest) -> dict[str, Any]:
 @app.get("/api/editor/exports", dependencies=[Depends(require_key)])
 def editor_exports() -> dict[str, Any]:
     return {"exports": MANAGER.list_kind("editor_export", limit=30)}
+
+
+@app.post("/api/editor/exports/{job_id}/retry", dependencies=[Depends(require_key)])
+def retry_editor_export(job_id: str) -> dict[str, Any]:
+    try:
+        job = MANAGER.retry_editor_export(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"job": job.snapshot()}
 
 
 @app.get("/api/settings", dependencies=[Depends(require_key)])

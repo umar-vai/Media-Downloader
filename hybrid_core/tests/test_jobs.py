@@ -107,6 +107,52 @@ class JobManagerTests(unittest.TestCase):
             self.assertEqual(state["status"], "completed")
             self.assertEqual(state["result"]["filename"], "edited.mp4")
 
+    @patch("hybrid_core.jobs.run_export")
+    def test_failed_editor_export_can_be_retried(self, mocked_export):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "retry.mp4"
+            mocked_export.side_effect = [RuntimeError("temporary encoder failure"), output]
+
+            manager = JobManager(max_downloads=1)
+            request = {
+                "source_path": str(Path(folder) / "source.mp4"),
+                "output_dir": folder,
+                "output_name": "retry",
+                "start": 0,
+                "end": 5,
+                "crop_preset": "Custom",
+                "custom_x": 0,
+                "custom_y": 0,
+                "custom_width": 640,
+                "custom_height": 360,
+                "rotate": "0°",
+                "speed": 1,
+                "mute": False,
+                "volume_percent": 100,
+                "fade_in": 0,
+                "fade_out": 0,
+                "quality": "Balanced",
+            }
+            job = manager.start_editor_export(request)
+            for _ in range(100):
+                state = manager.snapshot(job.id)
+                if state and state["status"] == "failed":
+                    break
+                time.sleep(0.01)
+
+            output.write_bytes(b"demo")
+            retried = manager.retry_editor_export(job.id)
+            self.assertEqual(retried.id, job.id)
+            for _ in range(100):
+                state = manager.snapshot(job.id)
+                if state and state["status"] == "completed":
+                    break
+                time.sleep(0.01)
+
+            state = manager.snapshot(job.id)
+            self.assertEqual(state["status"], "completed")
+            self.assertEqual(state["result"]["filename"], "retry.mp4")
+
     def test_interrupted_download_is_restored_as_retryable_failure(self):
         with tempfile.TemporaryDirectory() as folder:
             state_file = Path(folder) / "jobs.json"
