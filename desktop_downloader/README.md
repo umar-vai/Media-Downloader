@@ -48,3 +48,14 @@ The GitHub Actions workflow builds:
 ## Updates
 
 The app checks GitHub Releases and can download verified updates. Installer mode uses the installer package; portable mode uses the portable executable/update flow.
+
+
+## Continuous workflow and multiple downloads
+
+Version 3.9.0 separates link analysis from downloads. A completed or active download no longer blocks the next URL from being analyzed.
+
+- **Cancel analysis** stops/invalidate the current analysis immediately.
+- Each active/queued download has its own **Cancel** control.
+- Up to **3 files download concurrently**; additional files wait in the queue.
+- The compact Download button sits beside the analyzed media information.
+- Download Activity shows per-file progress, state and errors while you continue analyzing new links.

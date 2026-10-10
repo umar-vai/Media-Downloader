@@ -12,43 +12,58 @@ from download_queue import DownloadQueue
 
 
 class DownloadQueueTests(unittest.TestCase):
-    def test_fifo_link_downloads(self) -> None:
-        queue = DownloadQueue()
-        first = queue.enqueue({"url": "https://example.com/1"})
-        second = queue.enqueue({"url": "https://example.com/2"})
+    def test_starts_multiple_downloads_concurrently(self) -> None:
+        queue = DownloadQueue(max_concurrent=3)
+        requests = [
+            queue.enqueue({"url": f"https://example.com/{index}", "name": f"Video {index}"})
+            for index in range(5)
+        ]
 
-        running = queue.start_next()
-        self.assertIsNotNone(running)
-        self.assertEqual(running.id, first.id)
+        started = queue.start_available()
+        self.assertEqual([item.id for item in started], [item.id for item in requests[:3]])
+        self.assertEqual(queue.running_count(), 3)
+        self.assertEqual(queue.queued_count(), 2)
+
+        queue.complete(requests[0].id)
+        newly_started = queue.start_available()
+        self.assertEqual([item.id for item in newly_started], [requests[3].id])
+        self.assertEqual(queue.running_count(), 3)
         self.assertEqual(queue.queued_count(), 1)
+
+    def test_running_download_can_enter_cancelling_state(self) -> None:
+        queue = DownloadQueue(max_concurrent=2)
+        request = queue.enqueue({"url": "https://example.com/1", "name": "Video"})
+        queue.start_available()
+
+        self.assertEqual(queue.request_cancel(request.id), "cancelling")
+        self.assertEqual(queue.get(request.id)["status"], "cancelling")
         self.assertEqual(queue.running_count(), 1)
 
-        queue.complete(first.id)
-        running = queue.start_next()
-        self.assertIsNotNone(running)
-        self.assertEqual(running.id, second.id)
-        self.assertEqual(queue.running_count(), 1)
+        self.assertTrue(queue.cancel(request.id))
+        self.assertEqual(queue.get(request.id)["status"], "cancelled")
+        self.assertEqual(queue.running_count(), 0)
 
-    def test_queue_position_and_progress(self) -> None:
-        queue = DownloadQueue()
-        queue.enqueue({"url": "https://example.com/1"})
-        second = queue.enqueue({"url": "https://example.com/2"})
+    def test_queued_download_can_be_cancelled_immediately(self) -> None:
+        queue = DownloadQueue(max_concurrent=1)
+        first = queue.enqueue({"url": "https://example.com/1", "name": "One"})
+        second = queue.enqueue({"url": "https://example.com/2", "name": "Two"})
+        queue.start_available()
 
-        self.assertEqual(queue.position(second.id), 2)
-        first = queue.start_next()
-        queue.update_progress(first.id, 0.42, "4 MB/s")
-        self.assertAlmostEqual(queue.active().progress, 0.42)
-        self.assertEqual(queue.active().detail, "4 MB/s")
-
-    def test_queued_link_can_be_cancelled_without_affecting_active_job(self) -> None:
-        queue = DownloadQueue()
-        active = queue.enqueue({"url": "https://example.com/1"})
-        queued = queue.enqueue({"url": "https://example.com/2"})
-        queue.start_next()
-
-        self.assertTrue(queue.cancel(queued.id))
-        self.assertEqual(queue.active().id, active.id)
+        self.assertEqual(queue.request_cancel(second.id), "cancelled")
+        self.assertEqual(queue.get(second.id)["status"], "cancelled")
+        self.assertEqual(queue.active().id, first.id)
         self.assertEqual(queue.queued_count(), 0)
+
+    def test_progress_and_snapshot_include_display_name(self) -> None:
+        queue = DownloadQueue(max_concurrent=1)
+        request = queue.enqueue({"url": "https://example.com/1", "name": "My Video"})
+        queue.start_available()
+        queue.update_progress(request.id, 0.42, "4 MB/s")
+
+        state = queue.get(request.id)
+        self.assertEqual(state["name"], "My Video")
+        self.assertAlmostEqual(state["progress"], 0.42)
+        self.assertEqual(state["detail"], "4 MB/s")
 
 
 if __name__ == "__main__":

@@ -237,20 +237,23 @@ class DownloaderApp(ctk.CTk):
         self.current_info: dict[str, Any] | None = None
         self.thumbnail_image: ctk.CTkImage | None = None
         self.last_file: Path | None = None
-        self.is_busy = False
-        self.edit_after_download = False
         self.editor_window: MediaEditorWindow | None = None
         self.diagnostics_window: DiagnosticsWindow | None = None
         self.settings_window: SettingsWindow | None = None
         self.history_window: HistoryWindow | None = None
-        self.download_queue = DownloadQueue()
-        self.active_download_request_id: str | None = None
+        self.download_queue = DownloadQueue(max_concurrent=3)
         self.task_state = TaskState.IDLE
-        self._job_counter = 0
-        self.active_job_id: int | None = None
-        self.active_job_cancel: threading.Event | None = None
-        self._progress_event_lock = threading.Lock()
-        self._latest_progress_by_job: dict[int, Any] = {}
+
+        self._analysis_counter = 0
+        self.analysis_job_id: int | None = None
+        self.analysis_cancel_event: threading.Event | None = None
+        self.analysis_url = ""
+        self.analysis_running = False
+
+        self.download_cancel_events: dict[str, threading.Event] = {}
+        self._download_progress_lock = threading.Lock()
+        self._latest_download_progress: dict[str, dict[str, Any]] = {}
+        self._download_activity_after_id: str | None = None
 
         self.settings = load_settings()
         self.history_store = HistoryStore(HISTORY_FILE)
@@ -285,22 +288,28 @@ class DownloaderApp(ctk.CTk):
             self.after(1500, lambda: self.check_for_updates(manual=False))
 
     def _close_app(self) -> None:
-        active = self.is_busy or self.update_downloading or self.download_queue.queued_count() > 0
+        active_downloads = self.download_queue.queued_count() + self.download_queue.running_count()
+        active = self.analysis_running or self.update_downloading or active_downloads > 0
         if active:
             should_confirm = bool(self.settings.get("confirm_before_exit", True))
             if should_confirm and not messagebox.askyesno(
                 APP_NAME,
-                "A task is still running. Cancel it and close Media Downloader?",
+                "Tasks are still running. Cancel them and close Media Downloader?",
                 parent=self,
             ):
                 return
-            if self.active_job_cancel is not None:
-                self.active_job_cancel.set()
-            if self.update_cancel_event is not None:
-                self.update_cancel_event.set()
+
+        if self.analysis_cancel_event is not None:
+            self.analysis_cancel_event.set()
+        for event in list(self.download_cancel_events.values()):
+            event.set()
+        if self.update_cancel_event is not None:
+            self.update_cancel_event.set()
+
         LOGGER.info(
-            "App closing task_state=%s update_downloading=%s",
-            self.task_state.value,
+            "App closing analysis_running=%s active_downloads=%s update_downloading=%s",
+            self.analysis_running,
+            active_downloads,
             self.update_downloading,
         )
         self.destroy()
@@ -483,7 +492,7 @@ class DownloaderApp(ctk.CTk):
             border_color="#2A4169",
             border_width=1,
             text_color=TEXT,
-            placeholder_text="YouTube, Facebook or Instagram URL",
+            placeholder_text="Paste any public http:// or https:// media URL",
             placeholder_text_color="#667995",
             font=("Segoe UI", 11),
         )
@@ -494,7 +503,7 @@ class DownloaderApp(ctk.CTk):
         self.paste_button = ctk.CTkButton(
             row,
             text="Paste",
-            width=82,
+            width=76,
             height=48,
             corner_radius=12,
             fg_color=SURFACE_3,
@@ -507,8 +516,8 @@ class DownloaderApp(ctk.CTk):
 
         self.read_button = ctk.CTkButton(
             row,
-            text="Analyze media",
-            width=132,
+            text="Analyze",
+            width=104,
             height=48,
             corner_radius=12,
             fg_color=PURPLE,
@@ -518,6 +527,22 @@ class DownloaderApp(ctk.CTk):
             command=self.analyze_media,
         )
         self.read_button.grid(row=0, column=2, padx=(10, 0))
+
+        self.cancel_analysis_button = ctk.CTkButton(
+            row,
+            text="Cancel analysis",
+            width=112,
+            height=48,
+            corner_radius=12,
+            fg_color="transparent",
+            hover_color=SURFACE_2,
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=self.cancel_analysis,
+            state="disabled",
+        )
+        self.cancel_analysis_button.grid(row=0, column=3, padx=(10, 0))
 
     def _build_media_card(self) -> None:
         self.media_card = self._card(self.content)
@@ -533,7 +558,7 @@ class DownloaderApp(ctk.CTk):
             border_width=1,
             border_color="#24395C",
         )
-        self.thumbnail_frame.grid(row=0, column=0, rowspan=3, sticky="nw", padx=18, pady=18)
+        self.thumbnail_frame.grid(row=0, column=0, rowspan=4, sticky="nw", padx=18, pady=18)
         self.thumbnail_frame.grid_propagate(False)
         self.thumbnail_label = ctk.CTkLabel(
             self.thumbnail_frame, text="VIDEO\nPREVIEW", text_color="#526683", font=("Segoe UI Semibold", 11)
@@ -549,7 +574,8 @@ class DownloaderApp(ctk.CTk):
             text_color=MUTED,
             font=("Segoe UI Semibold", 9),
         )
-        self.media_badge.grid(row=0, column=1, sticky="nw", pady=(20, 0), padx=(0, 18))
+        self.media_badge.grid(row=0, column=1, sticky="nw", pady=(20, 0), padx=(0, 14))
+
         self.title_label = ctk.CTkLabel(
             self.media_card,
             text="Analyze media to see its details here",
@@ -557,17 +583,62 @@ class DownloaderApp(ctk.CTk):
             font=("Segoe UI Semibold", 18),
             anchor="w",
             justify="left",
-            wraplength=760,
+            wraplength=560,
         )
-        self.title_label.grid(row=1, column=1, sticky="ew", padx=(0, 18), pady=(8, 2))
+        self.title_label.grid(row=1, column=1, sticky="ew", padx=(0, 14), pady=(8, 2))
+
         self.meta_label = ctk.CTkLabel(
             self.media_card,
             text="Title, creator, platform and duration will appear after analysis.",
             text_color=MUTED,
             font=("Segoe UI", 11),
             anchor="w",
+            justify="left",
+            wraplength=560,
         )
-        self.meta_label.grid(row=2, column=1, sticky="new", padx=(0, 18), pady=(2, 18))
+        self.meta_label.grid(row=2, column=1, sticky="new", padx=(0, 14), pady=(2, 6))
+
+        self.media_action_hint = ctk.CTkLabel(
+            self.media_card,
+            text="Analyze a link first, then add it to the download list.",
+            text_color="#637696",
+            font=("Segoe UI", 9),
+            anchor="w",
+        )
+        self.media_action_hint.grid(row=3, column=1, sticky="ew", padx=(0, 14), pady=(0, 18))
+
+        action = ctk.CTkFrame(self.media_card, fg_color=SURFACE_2, corner_radius=12, border_width=1, border_color="#23385A")
+        action.grid(row=0, column=2, rowspan=4, sticky="ns", padx=(0, 18), pady=18)
+        action.grid_columnconfigure(0, weight=1)
+
+        self.download_button = ctk.CTkButton(
+            action,
+            text="Download video",
+            width=154,
+            height=42,
+            corner_radius=10,
+            fg_color=CYAN,
+            hover_color=CYAN_HOVER,
+            text_color="#031018",
+            font=("Segoe UI Semibold", 11),
+            command=self.download,
+            state="disabled",
+        )
+        self.download_button.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+
+        self.open_editor_after_check = ctk.CTkCheckBox(
+            action,
+            text="Open in editor\nafter download",
+            variable=self.open_editor_after_var,
+            checkbox_width=20,
+            checkbox_height=20,
+            fg_color=PURPLE,
+            hover_color=PURPLE_HOVER,
+            border_color=BORDER,
+            text_color=TEXT,
+            font=("Segoe UI", 9),
+        )
+        self.open_editor_after_check.grid(row=1, column=0, sticky="w", padx=12, pady=(2, 12))
 
     def _build_settings_card(self) -> None:
         card = self._card(self.content)
@@ -742,97 +813,60 @@ class DownloaderApp(ctk.CTk):
         card.grid_columnconfigure(0, weight=1)
 
         header = ctk.CTkFrame(card, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 10))
+        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(15, 8))
         header.grid_columnconfigure(1, weight=1)
+
         self.status_chip = ctk.CTkLabel(
             header,
             text="READY",
-            height=28,
-            corner_radius=9,
+            height=26,
+            corner_radius=8,
             fg_color="#0D2A2A",
             text_color=SUCCESS,
             font=("Segoe UI Semibold", 9),
         )
         self.status_chip.grid(row=0, column=0, sticky="w")
+
         self.status_label = ctk.CTkLabel(
             header,
-            text="Ready to download",
+            text="Ready for a link",
             text_color=MUTED,
             font=("Segoe UI", 10),
+            anchor="w",
+        )
+        self.status_label.grid(row=0, column=1, sticky="w", padx=(10, 0))
+
+        self.downloads_summary = ctk.CTkLabel(
+            header,
+            text="0 active • 0 queued",
+            text_color=CYAN,
+            font=("Segoe UI Semibold", 10),
             anchor="e",
         )
-        self.status_label.grid(row=0, column=1, sticky="e")
+        self.downloads_summary.grid(row=0, column=2, sticky="e")
 
-        primary_actions = ctk.CTkFrame(card, fg_color="transparent")
-        primary_actions.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 14))
-        primary_actions.grid_columnconfigure(0, weight=1)
+        self.downloads_list = ctk.CTkFrame(card, fg_color="transparent")
+        self.downloads_list.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 10))
+        self.downloads_list.grid_columnconfigure(0, weight=1)
 
-        self.download_button = ctk.CTkButton(
-            primary_actions,
-            text="Download video",
-            height=54,
-            corner_radius=13,
-            fg_color=CYAN,
-            hover_color=CYAN_HOVER,
-            text_color="#031018",
-            font=("Segoe UI Semibold", 13),
-            command=self.download,
+        self.downloads_empty_label = ctk.CTkLabel(
+            self.downloads_list,
+            text="No downloads yet. Analyze a video and press Download.",
+            text_color="#637696",
+            font=("Segoe UI", 10),
+            anchor="w",
         )
-        self.download_button.grid(row=0, column=0, sticky="ew", padx=(0, 14))
-
-        self.open_editor_after_check = ctk.CTkCheckBox(
-            primary_actions,
-            text="Open in editor after download",
-            variable=self.open_editor_after_var,
-            width=210,
-            checkbox_width=22,
-            checkbox_height=22,
-            fg_color=PURPLE,
-            hover_color=PURPLE_HOVER,
-            border_color=BORDER,
-            text_color=TEXT,
-            font=("Segoe UI", 11),
-        )
-        self.open_editor_after_check.grid(row=0, column=1, sticky="e")
-
-        self.progress = ctk.CTkProgressBar(card, height=10, corner_radius=6, fg_color=SURFACE_3, progress_color=PURPLE)
-        self.progress.grid(row=2, column=0, sticky="ew", padx=18)
-        self.progress.set(0)
-
-        progress_row = ctk.CTkFrame(card, fg_color="transparent")
-        progress_row.grid(row=3, column=0, sticky="ew", padx=18, pady=(8, 16))
-        progress_row.grid_columnconfigure(0, weight=1)
-        self.progress_label = ctk.CTkLabel(
-            progress_row, text="0%", text_color=TEXT, font=("Segoe UI Semibold", 10)
-        )
-        self.progress_label.grid(row=0, column=0, sticky="w")
-        self.speed_label = ctk.CTkLabel(progress_row, text="", text_color=MUTED, font=("Segoe UI", 10))
-        self.speed_label.grid(row=0, column=1, sticky="e")
-
-        self.cancel_job_button = ctk.CTkButton(
-            progress_row,
-            text="Cancel task",
-            width=92,
-            height=30,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=MUTED,
-            command=self.cancel_current_job,
-            state="disabled",
-        )
-        self.cancel_job_button.grid(row=0, column=2, sticky="e", padx=(12, 0))
+        self.downloads_empty_label.grid(row=0, column=0, sticky="ew", pady=(8, 12))
 
         actions = ctk.CTkFrame(card, fg_color="transparent")
-        actions.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 18))
+        actions.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 16))
         for index in range(3):
             actions.grid_columnconfigure(index, weight=1)
 
         self.open_file_button = ctk.CTkButton(
             actions,
             text="Open last file",
-            height=40,
+            height=38,
             corner_radius=10,
             fg_color=SURFACE_2,
             hover_color=SURFACE_3,
@@ -843,10 +877,11 @@ class DownloaderApp(ctk.CTk):
             state="disabled",
         )
         self.open_file_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
         ctk.CTkButton(
             actions,
             text="Open downloads",
-            height=40,
+            height=38,
             corner_radius=10,
             fg_color=SURFACE_2,
             hover_color=SURFACE_3,
@@ -855,18 +890,21 @@ class DownloaderApp(ctk.CTk):
             text_color=TEXT,
             command=self.open_download_folder,
         ).grid(row=0, column=1, sticky="ew", padx=6)
-        ctk.CTkButton(
+
+        self.cancel_all_downloads_button = ctk.CTkButton(
             actions,
-            text="Clear workspace",
-            height=40,
+            text="Cancel all downloads",
+            height=38,
             corner_radius=10,
             fg_color="transparent",
             hover_color=SURFACE_2,
             border_width=1,
             border_color=BORDER,
             text_color=MUTED,
-            command=self.clear_form,
-        ).grid(row=0, column=2, sticky="ew", padx=(6, 0))
+            command=self.cancel_all_downloads,
+            state="disabled",
+        )
+        self.cancel_all_downloads_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
     def _build_update_card(self) -> None:
         self.update_card = self._card(self.content)
@@ -1127,28 +1165,35 @@ class DownloaderApp(ctk.CTk):
         self.url_auto_after_id = None
 
     def _on_url_changed(self, _event: Any = None) -> None:
-        if self.is_busy:
-            return
         self._cancel_auto_analyze()
         url = self.url_var.get().strip()
 
+        if self.analysis_running and url != self.analysis_url:
+            self.cancel_analysis(silent=True)
+
         if url != self.last_analyzed_url:
-            # Once the user edits an analyzed URL, invalidate that snapshot.
-            # This also lets returning to the same URL trigger a fresh analysis.
-            if self.last_analyzed_url:
-                self.last_analyzed_url = ""
             self.current_info = None
+            self.last_analyzed_url = ""
             self.name_var.set("")
-            self.title_label.configure(text="Ready to analyze this link" if url else "Analyze media to see its details here")
+            self.download_button.configure(state="disabled")
+            self.title_label.configure(
+                text="Ready to analyze this link" if url else "Analyze media to see its details here"
+            )
             self.meta_label.configure(
                 text="Media details will load automatically."
                 if url
                 else "Title, creator, platform and duration will appear after analysis."
             )
+            valid = bool(detect_platform(url))
             self.media_badge.configure(
-                text="LINK READY" if detect_platform(url) else "WAITING FOR LINK",
+                text="LINK READY" if valid else "WAITING FOR LINK",
                 fg_color=SURFACE_2,
-                text_color=CYAN if detect_platform(url) else MUTED,
+                text_color=CYAN if valid else MUTED,
+            )
+            self.media_action_hint.configure(
+                text="Analyzing will not interrupt downloads already running."
+                if valid
+                else "Analyze a link first, then add it to the download list."
             )
             self._apply_thumbnail(None)
 
@@ -1162,78 +1207,63 @@ class DownloaderApp(ctk.CTk):
     def _auto_analyze_now(self) -> None:
         self.url_auto_after_id = None
         url = self.url_var.get().strip()
-        if self.is_busy or not detect_platform(url) or url == self.last_analyzed_url:
+        if not detect_platform(url) or url == self.last_analyzed_url:
             return
         self.analyze_media()
 
-    def _begin_job(self, state: TaskState) -> tuple[int, threading.Event]:
-        self._job_counter += 1
-        job_id = self._job_counter
+    def _begin_analysis(self, url: str) -> tuple[int, threading.Event]:
+        if self.analysis_running:
+            self.cancel_analysis(silent=True)
+        self._analysis_counter += 1
+        job_id = self._analysis_counter
         cancel_event = threading.Event()
-        self.active_job_id = job_id
-        self.active_job_cancel = cancel_event
-        self.task_state = state
-        LOGGER.info("Job %s started state=%s", job_id, state.value)
+        self.analysis_job_id = job_id
+        self.analysis_cancel_event = cancel_event
+        self.analysis_url = url
+        self.analysis_running = True
+        self.task_state = TaskState.ANALYZING
+        self.cancel_analysis_button.configure(state="normal", text="Cancel analysis")
+        self.read_button.configure(text="Re-analyze")
+        LOGGER.info("Analysis %s started url=%s", job_id, url)
         return job_id, cancel_event
 
-    def _is_current_job(self, job_id: int) -> bool:
-        return self.active_job_id == job_id
+    def _is_current_analysis(self, job_id: int) -> bool:
+        return self.analysis_job_id == job_id
 
-    def _put_job_event(self, kind: str, job_id: int, data: Any = None) -> None:
-        if kind == "progress":
-            # yt-dlp can emit dozens or hundreds of progress callbacks per
-            # second, especially with parallel HLS fragments. Keep only the
-            # newest sample so Tk never gets starved by an event backlog.
-            with self._progress_event_lock:
-                self._latest_progress_by_job[job_id] = data
+    def _finish_analysis(self, job_id: int) -> None:
+        if not self._is_current_analysis(job_id):
             return
+        self.analysis_job_id = None
+        self.analysis_cancel_event = None
+        self.analysis_url = ""
+        self.analysis_running = False
+        self.cancel_analysis_button.configure(state="disabled", text="Cancel analysis")
+        self.read_button.configure(text="Analyze")
+
+    def _put_analysis_event(self, kind: str, job_id: int, data: Any = None) -> None:
         self.events.put((kind, {"job_id": job_id, "data": data}))
 
-    def _finish_job(self, job_id: int) -> None:
-        if self.active_job_id != job_id:
-            return
-        LOGGER.info("Job %s finished state=%s", job_id, self.task_state.value)
-        with self._progress_event_lock:
-            self._latest_progress_by_job.pop(job_id, None)
-        self.active_job_id = None
-        self.active_job_cancel = None
-        self.active_download_request_id = None
-        self._set_busy(False)
-        self.after(40, self._start_next_queued_download)
-
-    def cancel_current_job(self) -> None:
-        event = self.active_job_cancel
-        if not self.is_busy or event is None:
+    def cancel_analysis(self, silent: bool = False) -> None:
+        event = self.analysis_cancel_event
+        job_id = self.analysis_job_id
+        if event is None or job_id is None:
             return
         event.set()
-        self.cancel_job_button.configure(state="disabled", text="Cancelling…")
-        self._set_status("Cancelling current task…", "working")
-        LOGGER.info("Cancellation requested for job %s", self.active_job_id)
 
-    def _set_busy(self, busy: bool) -> None:
-        self.is_busy = busy
-        state = "disabled" if busy else "normal"
-        self.read_button.configure(state=state)
-        self.paste_button.configure(state=state)
-        self.url_entry.configure(state=state)
-        self.mode_control.configure(state=state)
-        self.name_entry.configure(state=state)
-        self.download_button.configure(state=state)
-        self.open_editor_after_check.configure(state=state)
-        self.edit_local_button.configure(state=state)
-        self.choose_folder_button.configure(state=state)
-        self.reset_folder_button.configure(state=state)
-        if busy:
-            self.video_quality.configure(state="disabled")
-            self.audio_format.configure(state="disabled")
-            self.audio_quality.configure(state="disabled")
-        else:
-            self._sync_mode(self.mode_var.get())
-        if hasattr(self, "cancel_job_button"):
-            self.cancel_job_button.configure(
-                state="normal" if busy else "disabled",
-                text="Cancel task",
-            )
+        # Invalidate immediately. yt-dlp may be inside a blocking network call,
+        # so the UI must not wait for that call before the user can analyze again.
+        self.analysis_job_id = None
+        self.analysis_cancel_event = None
+        self.analysis_url = ""
+        self.analysis_running = False
+        self.cancel_analysis_button.configure(state="disabled", text="Cancel analysis")
+        self.read_button.configure(text="Analyze")
+        self.download_button.configure(state="disabled")
+        if not silent:
+            self.task_state = TaskState.CANCELLED
+            self.media_badge.configure(text="ANALYSIS CANCELLED", fg_color="#2D2514", text_color=WARNING)
+            self._set_status("Analysis cancelled. Paste or analyze another link.", "cancelled")
+        LOGGER.info("Analysis %s cancellation requested", job_id)
 
     def _set_status(self, text: str, kind: str = "ready") -> None:
         palette = {
@@ -1247,9 +1277,131 @@ class DownloaderApp(ctk.CTk):
         self.status_chip.configure(text=chip, fg_color=bg, text_color=fg)
         self.status_label.configure(text=text)
 
-    def analyze_media(self) -> None:
-        if self.is_busy:
+    def _schedule_download_activity_refresh(self, delay_ms: int = 120) -> None:
+        if self._download_activity_after_id is not None:
             return
+
+        def run() -> None:
+            self._download_activity_after_id = None
+            self._render_download_activity()
+
+        self._download_activity_after_id = self.after(max(40, int(delay_ms)), run)
+
+    def _render_download_activity(self) -> None:
+        if not hasattr(self, "downloads_list"):
+            return
+
+        for child in self.downloads_list.winfo_children():
+            child.destroy()
+
+        snapshots = self.download_queue.snapshot()
+        active = self.download_queue.running_count()
+        queued = self.download_queue.queued_count()
+        self.downloads_summary.configure(text=f"{active} active • {queued} queued")
+        self.cancel_all_downloads_button.configure(
+            state="normal" if active + queued > 0 else "disabled"
+        )
+
+        if not snapshots:
+            ctk.CTkLabel(
+                self.downloads_list,
+                text="No downloads yet. Analyze a video and press Download.",
+                text_color="#637696",
+                font=("Segoe UI", 10),
+                anchor="w",
+            ).grid(row=0, column=0, sticky="ew", pady=(8, 12))
+            return
+
+        visible = snapshots[:6]
+        status_palette = {
+            "queued": ("QUEUED", MUTED),
+            "running": ("DOWNLOADING", CYAN),
+            "cancelling": ("CANCELLING", WARNING),
+            "completed": ("DONE", SUCCESS),
+            "failed": ("FAILED", DANGER),
+            "cancelled": ("CANCELLED", WARNING),
+        }
+
+        for row_index, item in enumerate(visible):
+            request_id = str(item.get("id") or "")
+            status = str(item.get("status") or "queued")
+            label, status_color = status_palette.get(status, (status.upper(), MUTED))
+            title = str(item.get("name") or "Media download")
+            detail = str(item.get("detail") or "")
+            error = str(item.get("error") or "")
+            progress_value = max(0.0, min(1.0, float(item.get("progress") or 0.0)))
+
+            row = ctk.CTkFrame(
+                self.downloads_list,
+                fg_color=SURFACE_2,
+                corner_radius=11,
+                border_width=1,
+                border_color="#203654",
+            )
+            row.grid(row=row_index, column=0, sticky="ew", pady=(0, 7))
+            row.grid_columnconfigure(0, weight=1)
+
+            top = ctk.CTkFrame(row, fg_color="transparent")
+            top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(9, 4))
+            top.grid_columnconfigure(0, weight=1)
+
+            ctk.CTkLabel(
+                top,
+                text=title,
+                text_color=TEXT,
+                font=("Segoe UI Semibold", 10),
+                anchor="w",
+            ).grid(row=0, column=0, sticky="ew")
+
+            ctk.CTkLabel(
+                top,
+                text=label,
+                text_color=status_color,
+                font=("Segoe UI Semibold", 9),
+            ).grid(row=0, column=1, sticky="e", padx=(8, 0))
+
+            bar = ctk.CTkProgressBar(row, height=7, corner_radius=5, fg_color=SURFACE_3, progress_color=PURPLE)
+            bar.grid(row=1, column=0, sticky="ew", padx=(12, 8), pady=(0, 8))
+            bar.set(1.0 if status == "completed" else progress_value)
+
+            info_text = error if status == "failed" and error else detail
+            if not info_text:
+                if status == "queued":
+                    position = int(item.get("position") or 0)
+                    info_text = f"Waiting • queue position {position}" if position else "Waiting"
+                elif status == "completed":
+                    info_text = "Download completed"
+                elif status == "cancelled":
+                    info_text = "Download cancelled"
+                else:
+                    info_text = "Starting…"
+
+            ctk.CTkLabel(
+                row,
+                text=info_text[:150],
+                text_color=MUTED,
+                font=("Segoe UI", 9),
+                anchor="w",
+            ).grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 9))
+
+            if status in {"queued", "running", "cancelling"}:
+                button = ctk.CTkButton(
+                    row,
+                    text="Cancel",
+                    width=72,
+                    height=29,
+                    corner_radius=8,
+                    fg_color="transparent",
+                    hover_color="#2A1B27",
+                    border_width=1,
+                    border_color="#5B3440",
+                    text_color=WARNING,
+                    command=lambda rid=request_id: self.cancel_download(rid),
+                    state="disabled" if status == "cancelling" else "normal",
+                )
+                button.grid(row=1, column=1, rowspan=2, sticky="e", padx=(0, 12), pady=(0, 8))
+
+    def analyze_media(self) -> None:
         self._cancel_auto_analyze()
         url = self.url_var.get().strip()
         platform = detect_platform(url)
@@ -1257,15 +1409,17 @@ class DownloaderApp(ctk.CTk):
             messagebox.showerror(APP_NAME, "Please paste a valid http:// or https:// media URL.")
             return
 
-        job_id, cancel_event = self._begin_job(TaskState.ANALYZING)
-        self._set_busy(True)
+        job_id, cancel_event = self._begin_analysis(url)
         self.current_info = None
-        self.title_label.configure(text=f"Analyzing {platform_name(platform)} media…")
+        self.last_analyzed_url = ""
+        self.download_button.configure(state="disabled")
+        self.title_label.configure(text=f"Analyzing {platform_name(url)} media…")
         self.meta_label.configure(text="Trying compatible connection paths…")
+        self.media_action_hint.configure(text="You can cancel this analysis or keep existing downloads running.")
         self._apply_thumbnail(None)
-        self._set_status(f"Reading {platform_name(platform)} media information…", "working")
+        self._set_status(f"Analyzing {platform_name(url)}…", "working")
         self.media_badge.configure(
-            text=f"{platform_name(platform).upper()} • ANALYZING",
+            text=f"{platform_name(url).upper()} • ANALYZING",
             fg_color="#162344",
             text_color=CYAN,
         )
@@ -1273,6 +1427,7 @@ class DownloaderApp(ctk.CTk):
             target=self._analyze_media_worker,
             args=(job_id, cancel_event, url),
             daemon=True,
+            name=f"media-analysis-{job_id}",
         ).start()
 
     def _analyze_media_worker(self, job_id: int, cancel_event: threading.Event, url: str) -> None:
@@ -1282,11 +1437,11 @@ class DownloaderApp(ctk.CTk):
             last_error: Exception | None = None
             for index, (attempt_url, network_options) in enumerate(attempts, start=1):
                 if cancel_event.is_set():
-                    self._put_job_event("cancelled", job_id, "Analysis cancelled.")
+                    self._put_analysis_event("analysis_cancelled", job_id, "Analysis cancelled.")
                     return
                 if len(attempts) > 1:
-                    self._put_job_event(
-                        "status",
+                    self._put_analysis_event(
+                        "analysis_status",
                         job_id,
                         f"Connection attempt {index}/{len(attempts)}…",
                     )
@@ -1311,7 +1466,7 @@ class DownloaderApp(ctk.CTk):
                     last_error = exc
 
             if cancel_event.is_set():
-                self._put_job_event("cancelled", job_id, "Analysis cancelled.")
+                self._put_analysis_event("analysis_cancelled", job_id, "Analysis cancelled.")
                 return
             if not info:
                 raise last_error or RuntimeError("No compatible connection path succeeded.")
@@ -1327,13 +1482,14 @@ class DownloaderApp(ctk.CTk):
                     thumb_bytes = None
 
             if cancel_event.is_set():
-                self._put_job_event("cancelled", job_id, "Analysis cancelled.")
+                self._put_analysis_event("analysis_cancelled", job_id, "Analysis cancelled.")
                 return
 
-            self._put_job_event(
-                "info",
+            self._put_analysis_event(
+                "analysis_info",
                 job_id,
                 {
+                    "source_url": url,
                     "title": str(info.get("title") or info.get("description") or "Media"),
                     "channel": str(info.get("channel") or info.get("uploader") or info.get("uploader_id") or "Creator"),
                     "duration": format_duration(info.get("duration")),
@@ -1344,61 +1500,82 @@ class DownloaderApp(ctk.CTk):
                 },
             )
         except Exception as exc:
-            LOGGER.exception("Analysis job %s failed", job_id)
-            self._put_job_event(
-                "error",
+            LOGGER.exception("Analysis %s failed", job_id)
+            self._put_analysis_event(
+                "analysis_error",
                 job_id,
                 "Could not extract media from this URL after trying the available connection paths. "
                 "The page may require login, use DRM, block automated access, or use a player yt-dlp does not support yet.\n\n"
                 + str(exc),
             )
         finally:
-            self._put_job_event("analysis_finished", job_id)
+            self._put_analysis_event("analysis_finished", job_id)
 
     def download(self) -> None:
         self._start_download(edit_after_download=bool(self.open_editor_after_var.get()))
 
-    def download_for_editing(self) -> None:
-        self._start_download(edit_after_download=True)
+    def _available_download_name(self, base_name: str) -> str:
+        base = safe_filename(base_name, "media_download")
+        used = {
+            str(item.get("name") or "")
+            for item in self.download_queue.snapshot()
+            if str(item.get("status") or "") in {"queued", "running", "cancelling"}
+        }
+
+        def exists(name: str) -> bool:
+            if name in used:
+                return True
+            try:
+                return any(path.is_file() and path.stem == name for path in self.download_dir.iterdir())
+            except OSError:
+                return False
+
+        if not exists(base):
+            return base
+        for index in range(2, 1000):
+            candidate = f"{base} ({index})"
+            if not exists(candidate):
+                return candidate
+        return f"{base} {int(time.time())}"
 
     def _start_download(self, edit_after_download: bool) -> None:
-        if self.is_busy:
-            return
         url = self.url_var.get().strip()
         platform = detect_platform(url)
         if not platform:
-            messagebox.showerror(APP_NAME, "Please paste a valid YouTube, Facebook or Instagram URL.")
+            messagebox.showerror(APP_NAME, "Please paste a valid http:// or https:// media URL.")
+            return
+        if not isinstance(self.current_info, dict) or self.last_analyzed_url != url:
+            self._set_status("Analyze this link before downloading it.", "error")
+            messagebox.showinfo(APP_NAME, "Analyze this link first, then press Download.")
             return
 
         try:
             self.download_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             LOGGER.exception("Could not create download directory")
-            messagebox.showerror(
-                APP_NAME,
-                f"Could not use the selected download folder.\n\n{exc}",
-            )
+            messagebox.showerror(APP_NAME, f"Could not use the selected download folder.\n\n{exc}")
             return
 
-        name = safe_filename(self.name_var.get(), "media_download")
-        info = self.current_info if isinstance(self.current_info, dict) else {}
+        name = self._available_download_name(self.name_var.get())
+        info = dict(self.current_info)
         try:
             history_duration = max(0, int(float(info.get("duration") or 0)))
         except (TypeError, ValueError):
             history_duration = 0
+
         mode = self.mode_var.get()
         audio_format = self.audio_format_var.get()
         audio_quality = self.audio_quality_var.get()
         video_quality = self.video_quality_var.get()
+
         request_settings = {
             "mode": mode,
             "video_quality": video_quality,
             "audio_format": audio_format.lower(),
             "audio_quality": audio_quality,
-            "edit_after_download": bool(edit_after_download),
             "history_title": str(info.get("title") or self.name_var.get() or name),
             "history_creator": str(info.get("channel") or info.get("uploader") or info.get("creator") or ""),
-            "history_platform": platform,
+            "history_platform": platform_name(url),
             "history_duration": history_duration,
             "history_quality": (
                 str(video_quality)
@@ -1407,6 +1584,7 @@ class DownloaderApp(ctk.CTk):
             ),
             "source_url": url,
         }
+
         request = self.download_queue.enqueue(
             {
                 "url": url,
@@ -1416,12 +1594,22 @@ class DownloaderApp(ctk.CTk):
             },
             edit_after_download=bool(edit_after_download),
         )
-        LOGGER.info("Queued link download request=%s", request.id)
-        self._start_next_queued_download()
+        LOGGER.info("Queued link download request=%s url=%s", request.id, url)
+        self._set_status(f"Added to downloads: {name}", "ready")
+        self.media_action_hint.configure(text="Added to downloads. Paste another link whenever you want.")
+        self._schedule_download_activity_refresh(20)
+        self._start_available_downloads()
+
+    def _put_download_event(self, kind: str, request_id: str, data: Any = None) -> None:
+        if kind == "download_progress":
+            with self._download_progress_lock:
+                self._latest_download_progress[request_id] = dict(data or {})
+            return
+        self.events.put((kind, {"request_id": request_id, "data": data}))
 
     def _download_worker(
         self,
-        job_id: int,
+        request_id: str,
         cancel_event: threading.Event,
         url: str,
         name: str,
@@ -1448,13 +1636,13 @@ class DownloaderApp(ctk.CTk):
                         extras.append(f"ETA {int(eta)}s")
                     except Exception:
                         pass
-                self._put_job_event(
-                    "progress",
-                    job_id,
+                self._put_download_event(
+                    "download_progress",
+                    request_id,
                     {"percent": percent, "detail": "  •  ".join(extras)},
                 )
             elif status == "finished":
-                self._put_job_event("status", job_id, "Download finished. Finalizing file…")
+                self._put_download_event("download_status", request_id, "Finalizing file…")
 
         opts: dict[str, Any] = {
             "outtmpl": str(download_dir / f"{name}.%(ext)s"),
@@ -1467,7 +1655,7 @@ class DownloaderApp(ctk.CTk):
             "fragment_retries": 4,
             "concurrent_fragment_downloads": 4,
             "progress_hooks": [hook],
-            "overwrites": True,
+            "overwrites": False,
             "ffmpeg_location": get_ffmpeg_exe(),
         }
 
@@ -1494,13 +1682,13 @@ class DownloaderApp(ctk.CTk):
             downloaded = False
             for index, (attempt_url, network_options) in enumerate(attempts, start=1):
                 if cancel_event.is_set():
-                    self._put_job_event("cancelled", job_id, "Download cancelled.")
+                    self._put_download_event("download_cancelled", request_id, "Download cancelled.")
                     return
                 if len(attempts) > 1:
-                    self._put_job_event(
-                        "status",
-                        job_id,
-                        f"Download connection {index}/{len(attempts)}…",
+                    self._put_download_event(
+                        "download_status",
+                        request_id,
+                        f"Connection {index}/{len(attempts)}…",
                     )
                 attempt_opts = {**opts, **network_options}
                 try:
@@ -1517,15 +1705,17 @@ class DownloaderApp(ctk.CTk):
                             except OSError:
                                 pass
                     if cancel_event.is_set():
-                        self._put_job_event("cancelled", job_id, "Download cancelled.")
+                        self._put_download_event("download_cancelled", request_id, "Download cancelled.")
                         return
 
             if not downloaded:
                 raise last_error or RuntimeError("No compatible connection path succeeded.")
 
             candidates = []
-            for path in download_dir.glob(f"{name}.*"):
-                if not path.is_file() or path.suffix.lower() in {".part", ".ytdl", ".temp", ".tmp"}:
+            for path in download_dir.iterdir():
+                if not path.is_file() or path.stem != name:
+                    continue
+                if path.suffix.lower() in {".part", ".ytdl", ".temp", ".tmp"}:
                     continue
                 try:
                     if path.stat().st_mtime >= started_at - 2.0:
@@ -1537,9 +1727,9 @@ class DownloaderApp(ctk.CTk):
                 raise RuntimeError("Download finished, but the final file could not be located.")
 
             final_path = max(candidates, key=lambda path: path.stat().st_mtime)
-            self._put_job_event(
-                "done",
-                job_id,
+            self._put_download_event(
+                "download_done",
+                request_id,
                 {
                     "path": str(final_path),
                     "title": request_settings.get("history_title") or name,
@@ -1553,12 +1743,12 @@ class DownloaderApp(ctk.CTk):
             )
         except Exception as exc:
             if cancel_event.is_set():
-                self._put_job_event("cancelled", job_id, "Download cancelled.")
+                self._put_download_event("download_cancelled", request_id, "Download cancelled.")
             else:
-                LOGGER.exception("Download job %s failed", job_id)
-                self._put_job_event("error", job_id, str(exc))
+                LOGGER.exception("Download request %s failed", request_id)
+                self._put_download_event("download_error", request_id, str(exc))
         finally:
-            self._put_job_event("download_finished", job_id)
+            self._put_download_event("download_finished", request_id)
 
     def _apply_thumbnail(self, raw: bytes | None) -> None:
         if not raw:
@@ -1581,161 +1771,170 @@ class DownloaderApp(ctk.CTk):
             self.thumbnail_image = None
             self.thumbnail_label.configure(image=None, text="VIDEO\nPREVIEW")
 
-    def _apply_progress_event(self, job_id: int, data: Any) -> None:
-        if not self._is_current_job(job_id):
-            return
-        detail = dict(data or {})
-        percent = max(0.0, min(100.0, float(detail.get("percent") or 0)))
-        self.progress.set(percent / 100.0)
-        self.progress_label.configure(text=f"{percent:.0f}%")
-        progress_detail = str(detail.get("detail") or "Downloading…")
-        self.speed_label.configure(text=progress_detail)
-        if self.active_download_request_id:
-            self.download_queue.update_progress(
-                self.active_download_request_id,
-                percent / 100.0,
-                progress_detail,
-            )
-        self._set_status(f"Downloading… {percent:.1f}%", "working")
-
     def _drain_events(self) -> None:
-        active_job_id = self.active_job_id
-        if active_job_id is not None:
-            with self._progress_event_lock:
-                latest_progress = self._latest_progress_by_job.pop(active_job_id, None)
-            if latest_progress is not None:
-                self._apply_progress_event(active_job_id, latest_progress)
+        with self._download_progress_lock:
+            progress_items = list(self._latest_download_progress.items())
+            self._latest_download_progress.clear()
 
-        job_kinds = {
-            "info",
-            "progress",
-            "status",
-            "done",
-            "error",
-            "cancelled",
-            "analysis_finished",
-            "download_finished",
-        }
+        if progress_items:
+            for request_id, detail in progress_items:
+                percent = max(0.0, min(100.0, float(detail.get("percent") or 0.0)))
+                progress_detail = str(detail.get("detail") or "Downloading…")
+                self.download_queue.update_progress(
+                    request_id,
+                    percent / 100.0,
+                    progress_detail,
+                )
+            self._schedule_download_activity_refresh(80)
+
         processed = 0
         started = time.monotonic()
         try:
-            while processed < 80 and (time.monotonic() - started) < 0.012:
+            while processed < 100 and (time.monotonic() - started) < 0.014:
                 kind, payload = self.events.get_nowait()
                 processed += 1
-                data = payload
 
-                if kind in job_kinds:
+                if kind.startswith("analysis_"):
                     if not isinstance(payload, dict):
-                        LOGGER.warning("Ignoring malformed job event kind=%s payload=%r", kind, payload)
                         continue
                     job_id = int(payload.get("job_id") or -1)
-                    if not self._is_current_job(job_id):
-                        LOGGER.info(
-                            "Ignoring stale job event kind=%s job=%s active=%s",
-                            kind,
-                            job_id,
-                            self.active_job_id,
-                        )
+                    if not self._is_current_analysis(job_id):
                         continue
                     data = payload.get("data")
 
-                if kind == "info":
-                    media = dict(data or {})
-                    self.current_info = media.get("info")
-                    self.last_analyzed_url = self.url_var.get().strip()
-                    self.name_var.set(safe_filename(str(media.get("title") or "Media")))
-                    self.title_label.configure(text=str(media.get("title") or "Media"))
-                    platform_label = platform_name(str(media.get("platform") or ""))
-                    self.meta_label.configure(
-                        text=f"{media.get('channel') or 'Creator'}  •  {platform_label}  •  {media.get('duration') or '--:--'}"
-                    )
-                    self.media_badge.configure(
-                        text=f"{platform_label.upper()} • READY",
-                        fg_color="#0E3025",
-                        text_color=SUCCESS,
-                    )
-                    self._apply_thumbnail(media.get("thumbnail"))
-                    self.task_state = TaskState.READY
-                    self._set_status(f"{platform_label} media information loaded", "ready")
-                    self._finish_job(job_id)
+                    if kind == "analysis_info":
+                        media = dict(data or {})
+                        source_url = str(media.get("source_url") or "")
+                        if source_url != self.url_var.get().strip():
+                            self._finish_analysis(job_id)
+                            continue
 
-                elif kind == "progress":
-                    self._apply_progress_event(job_id, data)
-
-                elif kind == "status":
-                    self._set_status(str(data or ""), "working")
-
-                elif kind == "done":
-                    detail = dict(data) if isinstance(data, dict) else {"path": str(data)}
-                    completed_path = Path(str(detail.get("path") or ""))
-                    self.last_file = completed_path
-                    self.progress.set(1)
-                    self.progress_label.configure(text="100%")
-                    self.speed_label.configure(text=completed_path.name)
-                    self.task_state = TaskState.DOWNLOADED
-                    self._set_status("Download completed successfully", "success")
-
-                    try:
-                        entry = make_history_entry(
-                            completed_path,
-                            title=str(detail.get("title") or completed_path.stem),
-                            source_url=str(detail.get("source_url") or ""),
-                            platform=str(detail.get("platform") or ""),
-                            creator=str(detail.get("creator") or ""),
-                            mode=str(detail.get("mode") or "Video"),
-                            quality=str(detail.get("quality") or ""),
-                            duration_seconds=int(detail.get("duration_seconds") or 0),
+                        self.current_info = media.get("info")
+                        self.last_analyzed_url = source_url
+                        self.name_var.set(safe_filename(str(media.get("title") or "Media")))
+                        self.title_label.configure(text=str(media.get("title") or "Media"))
+                        platform_label = platform_name(source_url)
+                        self.meta_label.configure(
+                            text=f"{media.get('channel') or 'Creator'}  •  {platform_label}  •  {media.get('duration') or '--:--'}"
                         )
-                        self.history_store.add(entry)
-                        LOGGER.info("Download history recorded file=%s", completed_path)
-                    except Exception:
-                        LOGGER.exception("Could not save download history file=%s", completed_path)
+                        self.media_badge.configure(
+                            text=f"{platform_label.upper()} • READY",
+                            fg_color="#0E3025",
+                            text_color=SUCCESS,
+                        )
+                        self.media_action_hint.configure(
+                            text="Ready. Download this file or paste another link after adding it to the list."
+                        )
+                        self._apply_thumbnail(media.get("thumbnail"))
+                        self.download_button.configure(state="normal")
+                        self.task_state = TaskState.READY
+                        self._set_status(f"{platform_label} media information loaded", "ready")
+                        self._finish_analysis(job_id)
 
-                    self._sync_recent_file()
-                    if self.history_window is not None:
+                    elif kind == "analysis_status":
+                        self._set_status(str(data or "Analyzing…"), "working")
+
+                    elif kind == "analysis_error":
+                        self.current_info = None
+                        self.last_analyzed_url = ""
+                        self.download_button.configure(state="disabled")
+                        self.task_state = TaskState.ERROR
+                        self.media_badge.configure(text="ANALYSIS FAILED", fg_color="#351722", text_color=DANGER)
+                        self.media_action_hint.configure(text="Try another public link or retry this one.")
+                        self._set_status("Analysis failed", "error")
+                        self._finish_analysis(job_id)
+                        messagebox.showerror(APP_NAME, str(data))
+
+                    elif kind == "analysis_cancelled":
+                        self.current_info = None
+                        self.last_analyzed_url = ""
+                        self.download_button.configure(state="disabled")
+                        self.task_state = TaskState.CANCELLED
+                        self.media_badge.configure(text="ANALYSIS CANCELLED", fg_color="#2D2514", text_color=WARNING)
+                        self._set_status(str(data or "Analysis cancelled."), "cancelled")
+                        self._finish_analysis(job_id)
+
+                    elif kind == "analysis_finished":
+                        self._finish_analysis(job_id)
+
+                    continue
+
+                if kind.startswith("download_"):
+                    if not isinstance(payload, dict):
+                        continue
+                    request_id = str(payload.get("request_id") or "")
+                    data = payload.get("data")
+                    request_state = self.download_queue.get(request_id)
+
+                    if kind == "download_status":
+                        self.download_queue.update_detail(request_id, str(data or "Working…"))
+                        self._schedule_download_activity_refresh(80)
+
+                    elif kind == "download_done":
+                        detail = dict(data or {})
+                        completed_path = Path(str(detail.get("path") or ""))
+                        edit_after = bool((request_state or {}).get("edit_after_download"))
+                        self.download_queue.complete(request_id, detail=completed_path.name)
+                        self.last_file = completed_path
+                        self.task_state = TaskState.DOWNLOADED
+                        self._set_status(f"Download completed: {completed_path.name}", "success")
+
                         try:
-                            if self.history_window.winfo_exists():
-                                self.history_window.refresh()
+                            entry = make_history_entry(
+                                completed_path,
+                                title=str(detail.get("title") or completed_path.stem),
+                                source_url=str(detail.get("source_url") or ""),
+                                platform=str(detail.get("platform") or ""),
+                                creator=str(detail.get("creator") or ""),
+                                mode=str(detail.get("mode") or "Video"),
+                                quality=str(detail.get("quality") or ""),
+                                duration_seconds=int(detail.get("duration_seconds") or 0),
+                            )
+                            self.history_store.add(entry)
+                            LOGGER.info("Download history recorded file=%s", completed_path)
                         except Exception:
-                            self.history_window = None
+                            LOGGER.exception("Could not save download history file=%s", completed_path)
 
-                    should_edit = self.edit_after_download
-                    self.edit_after_download = False
-                    if self.active_download_request_id:
-                        self.download_queue.complete(
-                            self.active_download_request_id,
-                            detail=completed_path.name,
-                        )
-                    self._finish_job(job_id)
-                    if should_edit:
-                        self.after(200, lambda path=completed_path: self.open_editor(path))
+                        self._sync_recent_file()
+                        if self.history_window is not None:
+                            try:
+                                if self.history_window.winfo_exists():
+                                    self.history_window.refresh()
+                            except Exception:
+                                self.history_window = None
 
-                elif kind == "error":
-                    self.task_state = TaskState.ERROR
-                    self._set_status("Task failed", "error")
-                    self.speed_label.configure(text="")
-                    self.edit_after_download = False
-                    LOGGER.error("Job %s failed: %s", job_id, data)
-                    if self.active_download_request_id:
-                        self.download_queue.fail(self.active_download_request_id, str(data or "Download failed"))
-                    self._finish_job(job_id)
-                    messagebox.showerror(APP_NAME, str(data))
+                        if edit_after:
+                            existing = self.editor_window
+                            can_open = True
+                            if existing is not None:
+                                try:
+                                    can_open = not existing.winfo_exists()
+                                except Exception:
+                                    can_open = True
+                            if can_open:
+                                self.after(180, lambda path=completed_path: self.open_editor(path))
 
-                elif kind == "cancelled":
-                    self.task_state = TaskState.CANCELLED
-                    self.edit_after_download = False
-                    self.speed_label.configure(text="Cancelled")
-                    self._set_status(str(data or "Task cancelled"), "cancelled")
-                    if self.active_download_request_id:
-                        self.download_queue.cancel(self.active_download_request_id)
-                    self._finish_job(job_id)
+                        self._schedule_download_activity_refresh(30)
 
-                elif kind in {"analysis_finished", "download_finished"}:
-                    # Safety net only. Success/error/cancel normally finish the
-                    # job first; stale final events are ignored by job_id.
-                    self._finish_job(job_id)
+                    elif kind == "download_error":
+                        self.download_queue.fail(request_id, str(data or "Download failed"))
+                        self.task_state = TaskState.ERROR
+                        self._set_status("A download failed. See Download Activity for details.", "error")
+                        self._schedule_download_activity_refresh(30)
 
-                elif kind == "update_available":
+                    elif kind == "download_cancelled":
+                        self.download_queue.cancel(request_id)
+                        self._set_status("Download cancelled", "cancelled")
+                        self._schedule_download_activity_refresh(30)
+
+                    elif kind == "download_finished":
+                        self.download_cancel_events.pop(request_id, None)
+                        self._start_available_downloads()
+                        self._schedule_download_activity_refresh(30)
+
+                    continue
+
+                if kind == "update_available":
                     self._handle_update_available(payload)
                 elif kind == "update_current":
                     self._handle_update_current(payload)
@@ -1783,9 +1982,6 @@ class DownloaderApp(ctk.CTk):
             subprocess.Popen(["xdg-open", str(self.download_dir)])
 
     def open_editor(self, source_path: Path | None = None) -> None:
-        if self.is_busy:
-            return
-
         existing = self.editor_window
         if existing is not None:
             try:
@@ -1852,27 +2048,24 @@ class DownloaderApp(ctk.CTk):
             self.open_history()
 
     def clear_form(self) -> None:
-        if self.is_busy:
-            self._set_status("Finish or cancel the active task before clearing the form.", "working")
-            return
         self._cancel_auto_analyze()
+        if self.analysis_running:
+            self.cancel_analysis(silent=True)
+
         self.last_analyzed_url = ""
         self.open_editor_after_var.set(bool(self.settings.get("open_editor_after_download", False)))
         self.task_state = TaskState.IDLE
-        self.active_job_id = None
-        self.active_job_cancel = None
         self.url_var.set("")
         self.name_var.set("")
         self.current_info = None
-        self.progress.set(0)
-        self.progress_label.configure(text="0%")
-        self.speed_label.configure(text="")
+        self.download_button.configure(state="disabled")
         self.title_label.configure(text="Analyze media to see its details here")
         self.meta_label.configure(text="Title, creator, platform and duration will appear after analysis.")
         self.media_badge.configure(text="WAITING FOR LINK", fg_color=SURFACE_2, text_color=MUTED)
+        self.media_action_hint.configure(text="Analyze a link first, then add it to the download list.")
         self._apply_thumbnail(None)
-        self._set_status("Ready to download", "ready")
-        self._set_busy(False)
+        self._set_status("Ready for the next link", "ready")
+        self.url_entry.focus_set()
 
     def _save_update_preferences(self) -> None:
         self.settings["auto_check_updates"] = bool(self.auto_check_updates_var.get())
@@ -2164,42 +2357,42 @@ class DownloaderApp(ctk.CTk):
         self.top_update_button.grid_remove()
         self.update_detail_label.configure(text="Update reminder snoozed for 24 hours.")
 
-    def _start_next_queued_download(self) -> None:
-        if self.is_busy or self.active_job_id is not None:
-            return
-        request = self.download_queue.start_next()
-        if request is None:
-            return
-        self.active_download_request_id = request.id
-        self._start_link_request(request)
+    def _start_available_downloads(self) -> None:
+        for request in self.download_queue.start_available():
+            payload = dict(request.payload or {})
+            url = str(payload.get("url") or "")
+            name = str(payload.get("name") or "media_download")
+            download_dir = Path(str(payload.get("download_dir") or self.download_dir))
+            request_settings = dict(payload.get("request_settings") or {})
+            cancel_event = threading.Event()
+            self.download_cancel_events[request.id] = cancel_event
 
-    def _start_link_request(self, request: DownloadRequest) -> None:
-        payload = dict(request.payload or {})
-        url = str(payload.get("url") or "")
-        name = str(payload.get("name") or "media_download")
-        download_dir = Path(str(payload.get("download_dir") or self.download_dir))
-        request_settings = dict(payload.get("request_settings") or {})
-        edit_after_download = bool(request.edit_after_download)
-        platform = detect_platform(url)
+            LOGGER.info("Starting download request=%s url=%s", request.id, url)
+            threading.Thread(
+                target=self._download_worker,
+                args=(request.id, cancel_event, url, name, download_dir, request_settings),
+                daemon=True,
+                name=f"link-download-{request.id[:8]}",
+            ).start()
 
-        job_id, cancel_event = self._begin_job(TaskState.DOWNLOADING)
-        self.active_download_request_id = request.id
-        self.edit_after_download = edit_after_download
-        self.progress.set(0)
-        self.progress_label.configure(text="0%")
-        self.speed_label.configure(text="Preparing editor…" if edit_after_download else "Starting…")
-        self._set_status(
-            f"Downloading from {platform_name(platform)} for editing…" if edit_after_download
-            else f"Connecting to {platform_name(platform)}…",
-            "working",
-        )
-        self._set_busy(True)
-        threading.Thread(
-            target=self._download_worker,
-            args=(job_id, cancel_event, url, name, download_dir, request_settings),
-            daemon=True,
-            name=f"link-download-{job_id}",
-        ).start()
+        self._schedule_download_activity_refresh(20)
+
+    def cancel_download(self, request_id: str) -> None:
+        state = self.download_queue.request_cancel(request_id)
+        if state == "cancelling":
+            event = self.download_cancel_events.get(request_id)
+            if event is not None:
+                event.set()
+            self._set_status("Cancelling download…", "working")
+        elif state == "cancelled":
+            self._set_status("Queued download cancelled", "cancelled")
+            self._start_available_downloads()
+        self._schedule_download_activity_refresh(20)
+
+    def cancel_all_downloads(self) -> None:
+        for item in self.download_queue.snapshot():
+            if str(item.get("status") or "") in {"queued", "running", "cancelling"}:
+                self.cancel_download(str(item.get("id") or ""))
 
     def _sync_recent_file(self) -> None:
         recent = self.history_store.most_recent_existing()
