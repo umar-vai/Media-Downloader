@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from media_core.editor import EditorCancelled, run_export
+
 from .engine import Cancelled, analyze_url, download_from_analysis
 from .state_store import JsonStateStore
 
@@ -65,6 +67,7 @@ class JobManager:
             max_workers=max(1, min(6, int(max_downloads))),
             thread_name_prefix="hybrid-download",
         )
+        self._editor_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hybrid-editor")
         self._store = JsonStateStore(state_path) if state_path is not None else None
         self._logger = logger or logging.getLogger("media_downloader.hybrid")
         self._restore()
@@ -121,7 +124,8 @@ class JobManager:
         job = Job(id=uuid.uuid4().hex, kind=kind, request=dict(request))
         with self._lock:
             self._jobs[job.id] = job
-        self._persist()
+        if kind == "download":
+            self._persist()
         return job
 
     def get(self, job_id: str) -> Job | None:
@@ -163,7 +167,8 @@ class JobManager:
             if result is not None:
                 job.result = result
             job.updated_at = time.time()
-        self._persist()
+        if job.kind == "download":
+            self._persist()
 
     def start_analysis(self, url: str) -> Job:
         job = self._new("analysis", {"url": url})
@@ -255,6 +260,45 @@ class JobManager:
             self._set(job, status="cancelled", detail="Download cancelled")
         except Exception as exc:
             self._set(job, status="failed", detail="Download failed", error=str(exc))
+
+    def start_editor_export(self, request: dict[str, Any]) -> Job:
+        job = self._new("editor_export", request)
+        self._editor_pool.submit(self._run_editor_export, job)
+        return job
+
+    def _run_editor_export(self, job: Job) -> None:
+        self._set(job, status="running", detail="Preparing export")
+        try:
+            output = run_export(
+                Path(str(job.request.get("source_path") or "")),
+                output_dir=Path(str(job.request.get("output_dir") or "")),
+                output_name=str(job.request.get("output_name") or "edited_media"),
+                start=float(job.request.get("start") or 0.0),
+                end=float(job.request.get("end") or 0.0),
+                crop_preset=str(job.request.get("crop_preset") or "Original"),
+                rotate=str(job.request.get("rotate") or "0°"),
+                speed=float(job.request.get("speed") or 1.0),
+                mute=bool(job.request.get("mute")),
+                volume_percent=float(job.request.get("volume_percent") or 100.0),
+                fade_in=float(job.request.get("fade_in") or 0.0),
+                fade_out=float(job.request.get("fade_out") or 0.0),
+                quality=str(job.request.get("quality") or "Balanced"),
+                cancel_event=job.cancel_event,
+                on_progress=lambda value, text: self._set(job, progress=value, detail=text),
+                on_status=lambda text: self._set(job, detail=text),
+            )
+            self._set(
+                job,
+                status="completed",
+                progress=1.0,
+                detail="Export complete",
+                result={"path": str(output), "filename": output.name},
+            )
+        except EditorCancelled:
+            self._set(job, status="cancelled", detail="Export cancelled")
+        except Exception as exc:
+            self._logger.exception("editor_export_failed job=%s", job.id)
+            self._set(job, status="failed", detail="Export failed", error=str(exc))
 
     def cancel(self, job_id: str) -> bool:
         job = self.get(job_id)

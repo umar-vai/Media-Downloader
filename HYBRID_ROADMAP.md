@@ -106,23 +106,37 @@ The browser UI never uploads the user's media to a cloud server in local mode.
 
 Core extraction/refactor is functionally complete. The next major block is Phase 3 (Web editor), while Phase 4 will turn the Python Local Core into the small installable Windows agent.
 
-## Phase 3 — Web editor
+## Phase 3 — Web editor 🟡
 
-Expose local FFmpeg editing through the API:
+### Phase 3A — Local FFmpeg editor MVP ✅
 
-- probe media
-- trim
-- crop presets
-- rotate
-- speed
-- mute / volume
-- fade in/out
-- preview frame
-- waveform
-- export progress
-- cancel export
+The PWA now exposes the first end-to-end local editor workflow:
 
-All source and rendered files remain local.
+- choose a local video/audio file with the native Windows file picker
+- open any completed download directly in the editor
+- probe duration, video/audio streams, dimensions and FPS
+- trim start/end
+- crop presets: Original, 16:9, 9:16, 1:1 and 4:5
+- rotate 0° / 90° / 180° / 270°
+- speed 0.5× through 2×
+- mute or set volume up to 200%
+- audio fade in/out
+- High / Balanced / Small video export quality
+- FFmpeg preview frame with current crop/rotation
+- audio waveform rendering
+- collision-safe local export filenames
+- live FFmpeg export progress
+- cancel a running export and delete the incomplete part file
+
+All source and rendered files remain local. Editor work runs in a dedicated single-worker pool so a heavy export does not block link analysis/download queue workers.
+
+### Remaining Phase 3 work
+
+- timeline/range slider UX instead of numeric-only trim fields
+- in-browser playable proxy/preview clips
+- custom freeform crop controls
+- export history/retry
+- richer audio controls and editor presets
 
 ## Phase 4 — Lightweight Windows agent
 

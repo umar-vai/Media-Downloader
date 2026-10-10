@@ -71,6 +71,42 @@ class JobManagerTests(unittest.TestCase):
             self.assertEqual(items[0]["status"], "completed")
             self.assertEqual(items[0]["result"]["filename"], "video.mp4")
 
+    @patch("hybrid_core.jobs.run_export")
+    def test_editor_export_reports_completed_output(self, mocked_export):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "edited.mp4"
+            output.write_bytes(b"demo")
+            mocked_export.return_value = output
+
+            manager = JobManager(max_downloads=1)
+            job = manager.start_editor_export(
+                {
+                    "source_path": str(Path(folder) / "source.mp4"),
+                    "output_dir": folder,
+                    "output_name": "edited",
+                    "start": 0,
+                    "end": 5,
+                    "crop_preset": "Original",
+                    "rotate": "0°",
+                    "speed": 1,
+                    "mute": False,
+                    "volume_percent": 100,
+                    "fade_in": 0,
+                    "fade_out": 0,
+                    "quality": "Balanced",
+                }
+            )
+
+            for _ in range(100):
+                state = manager.snapshot(job.id)
+                if state and state["status"] in {"completed", "failed", "cancelled"}:
+                    break
+                time.sleep(0.01)
+
+            state = manager.snapshot(job.id)
+            self.assertEqual(state["status"], "completed")
+            self.assertEqual(state["result"]["filename"], "edited.mp4")
+
     def test_interrupted_download_is_restored_as_retryable_failure(self):
         with tempfile.TemporaryDirectory() as folder:
             state_file = Path(folder) / "jobs.json"

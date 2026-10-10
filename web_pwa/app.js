@@ -6,6 +6,10 @@ const state = {
   installPrompt: null,
   settings: {},
   updatePoll: null,
+  downloads: {},
+  editorInfo: null,
+  editorExportId: "",
+  editorObjectUrl: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -19,6 +23,18 @@ async function api(path, options = {}) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.detail || data.error || `Request failed (${response.status})`);
   return data;
+}
+
+async function apiBlob(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (state.key) headers.set("X-Media-Core-Key", state.key);
+  if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const response = await fetch(path, {...options, headers});
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `Request failed (${response.status})`);
+  }
+  return response.blob();
 }
 
 function formatDuration(seconds) {
@@ -152,18 +168,22 @@ function jobRow(job) {
   const row = document.createElement("article");
   row.className = "download-row";
   const percent = Math.round((Number(job.progress || 0)) * 100);
-  const action = ["running","queued","cancelling"].includes(job.status)
-    ? `<button data-cancel="${job.id}" class="mini danger">${job.status === "cancelling" ? "Cancelling" : "Cancel"}</button>`
-    : job.status === "failed"
-      ? `<button data-retry="${job.id}" class="mini retry">Retry</button>`
-      : "";
+  const actions = [];
+  if (["running","queued","cancelling"].includes(job.status)) {
+    actions.push(`<button data-cancel="${job.id}" class="mini danger">${job.status === "cancelling" ? "Cancelling" : "Cancel"}</button>`);
+  } else if (job.status === "failed") {
+    actions.push(`<button data-retry="${job.id}" class="mini retry">Retry</button>`);
+  } else if (job.status === "completed" && job.result?.path) {
+    actions.push(`<button data-edit-job="${job.id}" class="mini retry">Edit</button>`);
+  }
+
   row.innerHTML = `
     <div class="row-top">
       <strong>${escapeHtml(job.request?.filename || "Media download")}</strong>
       <span class="job-status ${job.status}">${job.status.toUpperCase()}</span>
     </div>
     <div class="progress"><span style="width:${job.status === "completed" ? 100 : percent}%"></span></div>
-    <div class="row-bottom"><span>${escapeHtml(job.error || job.detail || "")}</span>${action}</div>
+    <div class="row-bottom"><span>${escapeHtml(job.error || job.detail || "")}</span><div class="row-actions">${actions.join("")}</div></div>
   `;
   return row;
 }
@@ -176,6 +196,7 @@ async function refreshDownloads() {
   if (!state.key) return;
   try {
     const {downloads} = await api("/api/downloads");
+    state.downloads = Object.fromEntries(downloads.map((job) => [job.id, job]));
     const list = $("downloadsList");
     list.innerHTML = "";
     if (!downloads.length) {
@@ -184,6 +205,217 @@ async function refreshDownloads() {
     }
     downloads.forEach((job) => list.appendChild(jobRow(job)));
   } catch {}
+}
+
+function showEditorImage(blob) {
+  if (state.editorObjectUrl) URL.revokeObjectURL(state.editorObjectUrl);
+  state.editorObjectUrl = URL.createObjectURL(blob);
+  $("editorPreviewImage").src = state.editorObjectUrl;
+  $("editorPreviewImage").classList.remove("hidden");
+  $("editorPreviewPlaceholder").classList.add("hidden");
+}
+
+function renderEditorSource(data) {
+  const info = data.info || {};
+  state.editorInfo = info;
+  $("editorSourcePath").value = data.path || data.selected || "";
+  $("editorStart").value = "0";
+  $("editorEnd").value = String(Number(info.duration || 0).toFixed(3));
+  $("editorEnd").max = String(info.duration || 0);
+  $("editorPreviewPosition").value = String(Math.min(Number(info.duration || 0) / 2, 5).toFixed(2));
+  $("editorPreviewPosition").max = String(info.duration || 0);
+  $("editorOutputName").value = data.output_name || "edited_media";
+  $("editorOutputDir").value = data.output_dir || state.settings.download_dir || "";
+  $("editorPreviewBtn").disabled = !info.has_video;
+  $("editorWaveformBtn").disabled = !info.has_audio;
+  $("editorExportBtn").disabled = false;
+  $("editorCrop").disabled = !info.has_video;
+  $("editorRotate").disabled = !info.has_video;
+  $("editorVolume").disabled = !info.has_audio;
+  $("editorMute").disabled = !info.has_audio;
+  $("editorFadeIn").disabled = !info.has_audio;
+  $("editorFadeOut").disabled = !info.has_audio;
+
+  const dimensions = info.has_video ? `${info.width || "?"}×${info.height || "?"}` : "Audio only";
+  $("editorSourceMeta").textContent = [
+    data.filename || "Media",
+    formatDuration(info.duration),
+    dimensions,
+    info.has_audio ? "Audio" : "",
+  ].filter(Boolean).join(" • ");
+  $("editorStatus").textContent = "Source loaded. Adjust controls, preview, then export.";
+
+  if (state.editorObjectUrl) {
+    URL.revokeObjectURL(state.editorObjectUrl);
+    state.editorObjectUrl = "";
+  }
+  $("editorPreviewImage").classList.add("hidden");
+  $("editorPreviewPlaceholder").classList.remove("hidden");
+  $("editorPreviewPlaceholder").textContent = info.has_video
+    ? "Click Preview frame to render the current crop/rotation."
+    : "Click Waveform to preview this audio file.";
+}
+
+async function loadEditorPath(path) {
+  const source = String(path || $("editorSourcePath").value || "").trim();
+  if (!source) return;
+  $("editorStatus").textContent = "Reading local media…";
+  try {
+    const data = await api("/api/editor/probe", {
+      method:"POST",
+      body:JSON.stringify({path:source}),
+    });
+    renderEditorSource(data);
+    $("editorCard").scrollIntoView({behavior:"smooth", block:"start"});
+  } catch (error) {
+    state.editorInfo = null;
+    $("editorExportBtn").disabled = true;
+    $("editorStatus").textContent = error.message;
+  }
+}
+
+async function chooseEditorFile() {
+  $("editorStatus").textContent = "Opening media picker…";
+  try {
+    const data = await api("/api/editor/choose-file", {method:"POST"});
+    if (data.selected) {
+      renderEditorSource(data);
+    } else {
+      $("editorStatus").textContent = "No file selected.";
+    }
+  } catch (error) {
+    $("editorStatus").textContent = error.message;
+  }
+}
+
+async function refreshEditorPreview() {
+  if (!state.editorInfo?.has_video) return;
+  $("editorStatus").textContent = "Rendering preview frame…";
+  $("editorPreviewBtn").disabled = true;
+  try {
+    const blob = await apiBlob("/api/editor/preview", {
+      method:"POST",
+      body:JSON.stringify({
+        path:$("editorSourcePath").value.trim(),
+        position:Number($("editorPreviewPosition").value || 0),
+        crop_preset:$("editorCrop").value,
+        rotate:$("editorRotate").value,
+      }),
+    });
+    showEditorImage(blob);
+    $("editorStatus").textContent = "Preview frame updated.";
+  } catch (error) {
+    $("editorStatus").textContent = error.message;
+  } finally {
+    $("editorPreviewBtn").disabled = !state.editorInfo?.has_video;
+  }
+}
+
+async function refreshEditorWaveform() {
+  if (!state.editorInfo?.has_audio) return;
+  $("editorStatus").textContent = "Rendering waveform…";
+  $("editorWaveformBtn").disabled = true;
+  try {
+    const blob = await apiBlob("/api/editor/waveform", {
+      method:"POST",
+      body:JSON.stringify({path:$("editorSourcePath").value.trim()}),
+    });
+    showEditorImage(blob);
+    $("editorStatus").textContent = "Waveform updated.";
+  } catch (error) {
+    $("editorStatus").textContent = error.message;
+  } finally {
+    $("editorWaveformBtn").disabled = !state.editorInfo?.has_audio;
+  }
+}
+
+async function chooseEditorOutputFolder() {
+  try {
+    const data = await api("/api/system/choose-folder", {
+      method:"POST",
+      body:JSON.stringify({current_dir:$("editorOutputDir").value.trim() || null}),
+    });
+    if (data.selected) $("editorOutputDir").value = data.selected;
+  } catch (error) {
+    $("editorStatus").textContent = error.message;
+  }
+}
+
+function setEditorExportBusy(busy) {
+  $("editorExportBtn").disabled = busy || !state.editorInfo;
+  $("editorCancelExportBtn").disabled = !busy;
+}
+
+async function pollEditorExport(id) {
+  while (state.editorExportId === id) {
+    const {job} = await api(`/api/jobs/${id}`);
+    const percent = Math.round(Number(job.progress || 0) * 100);
+    $("editorExportProgressBar").style.width = `${percent}%`;
+    $("editorStatus").textContent = job.error || job.detail || job.status;
+
+    if (job.status === "completed") {
+      setEditorExportBusy(false);
+      $("editorExportProgressBar").style.width = "100%";
+      $("editorStatus").textContent = `Export complete: ${job.result?.path || job.result?.filename || ""}`;
+      state.editorExportId = "";
+      return;
+    }
+    if (["failed","cancelled"].includes(job.status)) {
+      setEditorExportBusy(false);
+      state.editorExportId = "";
+      return;
+    }
+    await sleep(450);
+  }
+}
+
+async function startEditorExport() {
+  if (!state.editorInfo) return;
+  const start = Number($("editorStart").value || 0);
+  const end = Number($("editorEnd").value || 0);
+  if (!(end > start)) {
+    $("editorStatus").textContent = "Trim end must be greater than trim start.";
+    return;
+  }
+
+  setEditorExportBusy(true);
+  $("editorExportProgressBar").style.width = "0%";
+  $("editorStatus").textContent = "Starting local FFmpeg export…";
+  try {
+    const {job} = await api("/api/editor/exports", {
+      method:"POST",
+      body:JSON.stringify({
+        path:$("editorSourcePath").value.trim(),
+        output_dir:$("editorOutputDir").value.trim(),
+        output_name:$("editorOutputName").value.trim() || "edited_media",
+        start,
+        end,
+        crop_preset:$("editorCrop").value,
+        rotate:$("editorRotate").value,
+        speed:Number($("editorSpeed").value || 1),
+        mute:$("editorMute").checked,
+        volume_percent:Number($("editorVolume").value || 100),
+        fade_in:Number($("editorFadeIn").value || 0),
+        fade_out:Number($("editorFadeOut").value || 0),
+        quality:$("editorQuality").value,
+      }),
+    });
+    state.editorExportId = job.id;
+    await pollEditorExport(job.id);
+  } catch (error) {
+    setEditorExportBusy(false);
+    $("editorStatus").textContent = error.message;
+  }
+}
+
+async function cancelEditorExport() {
+  if (!state.editorExportId) return;
+  try {
+    await api(`/api/jobs/${state.editorExportId}`, {method:"DELETE"});
+    $("editorStatus").textContent = "Cancelling export…";
+  } catch (error) {
+    $("editorStatus").textContent = error.message;
+  }
 }
 
 function renderSettings(settings = {}) {
@@ -334,6 +566,23 @@ async function loadDiagnostics() {
     $("diagnosticsBox").textContent = error.message;
   }
 }
+$("chooseEditorFileBtn").addEventListener("click", chooseEditorFile);
+$("loadEditorPathBtn").addEventListener("click", () => loadEditorPath());
+$("editorPreviewBtn").addEventListener("click", refreshEditorPreview);
+$("editorWaveformBtn").addEventListener("click", refreshEditorWaveform);
+$("chooseEditorOutputBtn").addEventListener("click", chooseEditorOutputFolder);
+$("editorExportBtn").addEventListener("click", startEditorExport);
+$("editorCancelExportBtn").addEventListener("click", cancelEditorExport);
+$("editorCrop").addEventListener("change", () => {
+  if (state.editorInfo?.has_video) $("editorStatus").textContent = "Crop changed. Click Preview frame to refresh.";
+});
+$("editorRotate").addEventListener("change", () => {
+  if (state.editorInfo?.has_video) $("editorStatus").textContent = "Rotation changed. Click Preview frame to refresh.";
+});
+$("editorMute").addEventListener("change", () => {
+  $("editorVolume").disabled = $("editorMute").checked || !state.editorInfo?.has_audio;
+});
+
 $("saveCoreSettingsBtn").addEventListener("click", async () => {
   try { await saveCoreSettings(); }
   catch (error) { $("settingsStatus").textContent = error.message; }
@@ -356,9 +605,14 @@ $("openDownloadsBtn").addEventListener("click", async () => {
 $("downloadsList").addEventListener("click", async (event) => {
   const cancel = event.target.closest("[data-cancel]");
   const retry = event.target.closest("[data-retry]");
+  const edit = event.target.closest("[data-edit-job]");
   try {
     if (cancel) await api(`/api/downloads/${cancel.dataset.cancel}`, {method:"DELETE"});
     if (retry) await api(`/api/downloads/${retry.dataset.retry}/retry`, {method:"POST"});
+    if (edit) {
+      const job = state.downloads[edit.dataset.editJob];
+      if (job?.result?.path) await loadEditorPath(job.result.path);
+    }
     await refreshDownloads();
   } catch (error) {
     $("analysisStatus").textContent = error.message;

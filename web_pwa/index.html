@@ -88,9 +88,80 @@
       </div>
     </section>
 
+    <section id="editorCard" class="card">
+      <div class="downloads-head">
+        <div class="section-head"><span>04 / EDITOR</span><h2>Local video & audio editor</h2></div>
+        <button id="chooseEditorFileBtn" class="primary">Choose local media</button>
+      </div>
+
+      <div class="editor-source-row">
+        <input id="editorSourcePath" placeholder="Choose a local video/audio file or edit a completed download" />
+        <button id="loadEditorPathBtn" class="secondary">Load path</button>
+      </div>
+
+      <div class="editor-layout">
+        <div class="editor-visual">
+          <div class="editor-preview-shell">
+            <img id="editorPreviewImage" alt="" class="hidden" />
+            <div id="editorPreviewPlaceholder">Choose media to preview a frame or waveform.</div>
+          </div>
+          <div class="editor-preview-actions">
+            <label>Preview position (sec)
+              <input id="editorPreviewPosition" type="number" min="0" step="0.1" value="0" />
+            </label>
+            <button id="editorPreviewBtn" class="secondary" disabled>Preview frame</button>
+            <button id="editorWaveformBtn" class="secondary" disabled>Waveform</button>
+          </div>
+          <p id="editorSourceMeta" class="status-text">No editor source loaded.</p>
+        </div>
+
+        <div class="editor-controls">
+          <div class="editor-control-grid">
+            <label>Trim start (sec)<input id="editorStart" type="number" min="0" step="0.1" value="0" /></label>
+            <label>Trim end (sec)<input id="editorEnd" type="number" min="0" step="0.1" value="0" /></label>
+            <label>Crop
+              <select id="editorCrop">
+                <option>Original</option><option>16:9</option><option>9:16</option><option>1:1</option><option>4:5</option>
+              </select>
+            </label>
+            <label>Rotate
+              <select id="editorRotate"><option>0°</option><option>90°</option><option>180°</option><option>270°</option></select>
+            </label>
+            <label>Speed
+              <select id="editorSpeed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select>
+            </label>
+            <label>Volume %<input id="editorVolume" type="number" min="0" max="200" step="5" value="100" /></label>
+            <label>Fade in (sec)<input id="editorFadeIn" type="number" min="0" max="60" step="0.1" value="0" /></label>
+            <label>Fade out (sec)<input id="editorFadeOut" type="number" min="0" max="60" step="0.1" value="0" /></label>
+            <label>Export quality
+              <select id="editorQuality"><option>High</option><option selected>Balanced</option><option>Small</option></select>
+            </label>
+          </div>
+
+          <label class="editor-check"><input id="editorMute" type="checkbox" /> Mute audio</label>
+
+          <label>Export filename</label>
+          <input id="editorOutputName" placeholder="edited_media" />
+
+          <label>Export folder</label>
+          <div class="folder-row">
+            <input id="editorOutputDir" />
+            <button id="chooseEditorOutputBtn" class="secondary">Choose folder</button>
+          </div>
+
+          <div class="editor-export-actions">
+            <button id="editorExportBtn" class="download-cta" disabled>Export media</button>
+            <button id="editorCancelExportBtn" class="secondary danger" disabled>Cancel export</button>
+          </div>
+          <div class="progress editor-export-progress"><span id="editorExportProgressBar" style="width:0%"></span></div>
+          <p id="editorStatus" class="status-text">Editor is ready.</p>
+        </div>
+      </div>
+    </section>
+
     <section class="card">
       <div class="downloads-head">
-        <div class="section-head"><span>04 / SETTINGS</span><h2>Local Core preferences</h2></div>
+        <div class="section-head"><span>05 / SETTINGS</span><h2>Local Core preferences</h2></div>
         <button id="saveCoreSettingsBtn" class="primary">Save settings</button>
       </div>
       <div class="core-settings-grid">
@@ -135,7 +206,7 @@
 
     <section class="card compact-card">
       <div class="downloads-head">
-        <div class="section-head"><span>05 / LOCAL CORE</span><h2>Diagnostics</h2></div>
+        <div class="section-head"><span>06 / LOCAL CORE</span><h2>Diagnostics</h2></div>
         <div class="diag-actions">
           <button id="refreshDiagnosticsBtn" class="secondary">Refresh</button>
           <button id="openLogBtn" class="secondary">Open log</button>

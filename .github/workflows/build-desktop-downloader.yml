@@ -48,6 +48,7 @@ jobs:
           python -m py_compile media_core/sources.py
           python -m py_compile media_core/browser_resolver.py
           python -m py_compile media_core/engine.py
+          python -m py_compile media_core/editor.py
           python -m py_compile desktop_downloader/app.py
           python -m py_compile desktop_downloader/app_logging.py
           python -m py_compile desktop_downloader/download_queue.py

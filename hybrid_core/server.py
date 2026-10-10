@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from imageio_ffmpeg import get_ffmpeg_exe
 
 from media_core.browser_resolver import find_browser
+from media_core.editor import extract_preview_frame, extract_waveform, probe_media, public_media_info, safe_export_name
 from media_core.network import safe_proxy_label
 
 from .core_updater import CoreUpdateService
@@ -84,6 +85,31 @@ class FolderPickerRequest(BaseModel):
     current_dir: str | None = None
 
 
+class EditorPathRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=5000)
+
+
+class EditorPreviewRequest(EditorPathRequest):
+    position: float = Field(default=0.0, ge=0)
+    crop_preset: str = "Original"
+    rotate: str = "0°"
+
+
+class EditorExportRequest(EditorPathRequest):
+    output_dir: str = Field(min_length=1, max_length=5000)
+    output_name: str = Field(default="edited_media", min_length=1, max_length=260)
+    start: float = Field(default=0.0, ge=0)
+    end: float = Field(gt=0)
+    crop_preset: str = "Original"
+    rotate: str = "0°"
+    speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    mute: bool = False
+    volume_percent: float = Field(default=100.0, ge=0, le=200)
+    fade_in: float = Field(default=0.0, ge=0, le=60)
+    fade_out: float = Field(default=0.0, ge=0, le=60)
+    quality: str = "Balanced"
+
+
 class SettingsPatch(BaseModel):
     download_dir: str | None = None
     default_mode: str | None = None
@@ -146,7 +172,7 @@ def bootstrap() -> dict[str, Any]:
             "cancel_download": True,
             "retry_download": True,
             "local_save": True,
-            "editor": False,
+            "editor": True,
         },
     }
 
@@ -284,6 +310,109 @@ def diagnostics() -> dict[str, Any]:
         "settings": settings,
         "update": UPDATER.snapshot(),
     }
+
+
+@app.post("/api/editor/choose-file", dependencies=[Depends(require_key)])
+def choose_editor_file() -> dict[str, Any]:
+    if os.name != "nt":
+        raise HTTPException(status_code=501, detail="Native media picker is currently implemented for Windows.")
+
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected = filedialog.askopenfilename(
+            parent=root,
+            title="Choose video or audio to edit",
+            filetypes=[
+                ("Media files", "*.mp4 *.mov *.mkv *.webm *.m4v *.avi *.mp3 *.m4a *.wav *.aac *.ogg *.opus *.flac"),
+                ("Video", "*.mp4 *.mov *.mkv *.webm *.m4v *.avi"),
+                ("Audio", "*.mp3 *.m4a *.wav *.aac *.ogg *.opus *.flac"),
+                ("All files", "*.*"),
+            ],
+        )
+        root.destroy()
+    except Exception as exc:
+        LOGGER.exception("editor_file_picker_failed")
+        raise HTTPException(status_code=500, detail=f"Could not open the media picker: {exc}") from exc
+
+    if not selected:
+        return {"selected": ""}
+    return _editor_probe_payload(Path(selected))
+
+
+def _editor_probe_payload(source: Path) -> dict[str, Any]:
+    source = source.expanduser()
+    if not source.is_file():
+        raise HTTPException(status_code=404, detail="Media file does not exist.")
+    try:
+        info = probe_media(source)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "selected": str(source),
+        "path": str(source),
+        "filename": source.name,
+        "stem": source.stem,
+        "output_name": safe_export_name(f"{source.stem}_edited"),
+        "output_dir": str(source.parent),
+        "info": public_media_info(info),
+    }
+
+
+@app.post("/api/editor/probe", dependencies=[Depends(require_key)])
+def editor_probe(payload: EditorPathRequest) -> dict[str, Any]:
+    return _editor_probe_payload(Path(payload.path))
+
+
+@app.post("/api/editor/preview", dependencies=[Depends(require_key)])
+def editor_preview(payload: EditorPreviewRequest) -> Response:
+    try:
+        image = extract_preview_frame(
+            Path(payload.path),
+            payload.position,
+            crop_preset=payload.crop_preset,
+            rotate=payload.rotate,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(content=image, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/editor/waveform", dependencies=[Depends(require_key)])
+def editor_waveform(payload: EditorPathRequest) -> Response:
+    try:
+        image = extract_waveform(Path(payload.path))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(content=image, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/editor/exports", dependencies=[Depends(require_key)])
+def editor_export(payload: EditorExportRequest) -> dict[str, Any]:
+    source = Path(payload.path).expanduser()
+    if not source.is_file():
+        raise HTTPException(status_code=404, detail="Media file does not exist.")
+
+    output_dir = Path(payload.output_dir).expanduser()
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Export folder is not writable: {exc}") from exc
+
+    request = payload.model_dump()
+    request["source_path"] = request.pop("path")
+    job = MANAGER.start_editor_export(request)
+    return {"job": job.snapshot()}
+
+
+@app.get("/api/editor/exports", dependencies=[Depends(require_key)])
+def editor_exports() -> dict[str, Any]:
+    return {"exports": MANAGER.list_kind("editor_export", limit=30)}
 
 
 @app.get("/api/settings", dependencies=[Depends(require_key)])

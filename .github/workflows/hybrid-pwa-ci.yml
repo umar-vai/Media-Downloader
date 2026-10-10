@@ -34,6 +34,7 @@ jobs:
           python -m py_compile media_core/sources.py
           python -m py_compile media_core/browser_resolver.py
           python -m py_compile media_core/engine.py
+          python -m py_compile media_core/editor.py
           python -m py_compile hybrid_core/engine.py
           python -m py_compile hybrid_core/paths.py
           python -m py_compile hybrid_core/settings_store.py
@@ -55,3 +56,4 @@ jobs:
         shell: pwsh
         run: |
           python -c "from pathlib import Path; required=['index.html','app.js','styles.css','manifest.webmanifest','sw.js','icon.svg']; missing=[x for x in required if not (Path('web_pwa')/x).exists()]; assert not missing, missing"
+          node --check web_pwa/app.js
