@@ -77,3 +77,12 @@ Version 3.9.0 separates link analysis from downloads. A completed or active down
 - The Analyze button is disabled while the same URL is already being analyzed; use **Cancel analysis** to stop it.
 - Added a 45-second watchdog so a blocked website cannot leave the app stuck in Analyzing forever.
 - Eporner's XHR metadata endpoint is rewritten from HTTP to HTTPS at runtime and Eporner extraction prefers yt-dlp's legacy urllib handler to avoid recurring Windows curl/BoringSSL failures.
+
+
+## v3.9.3 analyzed-media download reuse
+
+- Downloads now reuse the exact media-info snapshot produced by the successful **Analyze** step instead of immediately re-fetching the webpage and metadata API.
+- This fixes the common case where analysis succeeds but a second request made at download time is reset, rate-limited, or fails with SSL/EOF errors.
+- The requested Video/Audio quality is still selected at download time from the cached format list.
+- If cached direct media URLs fail or expire, the app automatically falls back to the normal URL extraction paths.
+- Download Activity now labels those retries as **URL fallback 1/N** so it is clear when the app had to re-contact the website.

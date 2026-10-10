@@ -54,6 +54,24 @@ class DownloadQueueTests(unittest.TestCase):
         self.assertEqual(queue.active().id, first.id)
         self.assertEqual(queue.queued_count(), 0)
 
+    def test_cached_analysis_payload_is_preserved_for_download_worker(self) -> None:
+        queue = DownloadQueue(max_concurrent=1)
+        cached = {
+            "id": "abc123",
+            "formats": [{"format_id": "720", "url": "https://cdn.example/video.mp4"}],
+        }
+        request = queue.enqueue({
+            "url": "https://example.com/watch/abc123",
+            "name": "Cached Video",
+            "cached_info": cached,
+        })
+        started = queue.start_available()
+        self.assertEqual(started[0].payload["cached_info"]["id"], "abc123")
+        self.assertEqual(
+            started[0].payload["cached_info"]["formats"][0]["url"],
+            "https://cdn.example/video.mp4",
+        )
+
     def test_progress_and_snapshot_include_display_name(self) -> None:
         queue = DownloadQueue(max_concurrent=1)
         request = queue.enqueue({"url": "https://example.com/1", "name": "My Video"})

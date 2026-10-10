@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import io
 import json
 import os
@@ -1643,6 +1644,7 @@ class DownloaderApp(ctk.CTk):
                 "name": name,
                 "download_dir": str(self.download_dir),
                 "request_settings": request_settings,
+                "cached_info": copy.deepcopy(info),
             },
             edit_after_download=bool(edit_after_download),
         )
@@ -1667,6 +1669,7 @@ class DownloaderApp(ctk.CTk):
         name: str,
         download_dir: Path,
         request_settings: dict[str, Any],
+        cached_info: dict[str, Any] | None = None,
     ) -> None:
         started_at = time.time()
 
@@ -1733,7 +1736,50 @@ class DownloaderApp(ctk.CTk):
             last_error: Exception | None = None
             attempt_errors: list[str] = []
             downloaded = False
+
+            # Fast/reliable path: the Analyze step already resolved this page and
+            # produced direct format URLs. Re-use that snapshot instead of
+            # contacting the webpage and metadata API a second time. This is
+            # especially important for sites such as Eporner that may allow the
+            # first metadata request and then reset/close subsequent requests.
+            if isinstance(cached_info, dict) and cached_info.get("formats"):
+                if cancel_event.is_set():
+                    self._put_download_event("download_cancelled", request_id, "Download cancelled.")
+                    return
+
+                self._put_download_event(
+                    "download_status",
+                    request_id,
+                    "Using analyzed media data…",
+                )
+                cached_network_options: dict[str, Any] = {}
+                if attempts:
+                    cached_network_options = dict(attempts[0][1] or {})
+                    cached_network_options.pop("_force_generic_extractor", None)
+
+                try:
+                    cached_opts = {**opts, **cached_network_options}
+                    with yt_dlp.YoutubeDL(cached_opts) as ydl:
+                        ydl.process_ie_result(copy.deepcopy(cached_info), download=True)
+                    downloaded = True
+                except Exception as exc:
+                    last_error = exc
+                    attempt_errors.append(f"Analyzed media: {str(exc).strip()}")
+                    LOGGER.warning(
+                        "Cached analyzed media download failed request=%s; falling back to URL extraction: %s",
+                        request_id,
+                        exc,
+                    )
+                    for partial in download_dir.glob(f"{name}.*"):
+                        if partial.suffix.lower() in {".part", ".ytdl", ".temp", ".tmp"}:
+                            try:
+                                partial.unlink()
+                            except OSError:
+                                pass
+
             for index, (attempt_url, network_options) in enumerate(attempts, start=1):
+                if downloaded:
+                    break
                 if cancel_event.is_set():
                     self._put_download_event("download_cancelled", request_id, "Download cancelled.")
                     return
@@ -1741,7 +1787,7 @@ class DownloaderApp(ctk.CTk):
                     self._put_download_event(
                         "download_status",
                         request_id,
-                        f"Connection {index}/{len(attempts)}…",
+                        f"URL fallback {index}/{len(attempts)}…",
                     )
                 attempt_network_options = dict(network_options)
                 force_generic = bool(attempt_network_options.pop("_force_generic_extractor", False))
@@ -2451,13 +2497,15 @@ class DownloaderApp(ctk.CTk):
             name = str(payload.get("name") or "media_download")
             download_dir = Path(str(payload.get("download_dir") or self.download_dir))
             request_settings = dict(payload.get("request_settings") or {})
+            cached_info = payload.get("cached_info")
+            cached_info = cached_info if isinstance(cached_info, dict) else None
             cancel_event = threading.Event()
             self.download_cancel_events[request.id] = cancel_event
 
             LOGGER.info("Starting download request=%s url=%s", request.id, url)
             threading.Thread(
                 target=self._download_worker,
-                args=(request.id, cancel_event, url, name, download_dir, request_settings),
+                args=(request.id, cancel_event, url, name, download_dir, request_settings, cached_info),
                 daemon=True,
                 name=f"link-download-{request.id[:8]}",
             ).start()
