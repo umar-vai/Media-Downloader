@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -368,15 +369,29 @@ class Agent:
 
 
 def run_server_child() -> int:
-    uvicorn.run(
-        "hybrid_core.server:app",
-        host=CORE_HOST,
-        port=CORE_PORT,
-        log_level="warning",
-        reload=False,
-        access_log=False,
-    )
-    return 0
+    try:
+        from .server import app as local_app
+
+        config = uvicorn.Config(
+            local_app,
+            host=CORE_HOST,
+            port=CORE_PORT,
+            log_level="warning",
+            access_log=False,
+            loop="asyncio",
+            http="h11",
+        )
+        server = uvicorn.Server(config)
+        server.run()
+        return 0
+    except Exception:
+        try:
+            error_path = Path(os.getenv("APPDATA") or Path.home()) / "MediaDownloader" / "MediaDownloaderCoreServerError.txt"
+            error_path.parent.mkdir(parents=True, exist_ok=True)
+            error_path.write_text(traceback.format_exc(), encoding="utf-8")
+        except OSError:
+            pass
+        return 1
 
 
 def self_test(report: str | None = None) -> int:

@@ -95,6 +95,16 @@ jobs:
           }
           finally {
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+            $serverError = Join-Path $env:APPDATA "MediaDownloader\MediaDownloaderCoreServerError.txt"
+            $coreLog = Join-Path $env:APPDATA "MediaDownloader\hybrid-core.log"
+            if (Test-Path $serverError) {
+              Write-Host "===== Packaged server startup error ====="
+              Get-Content $serverError
+            }
+            if (Test-Path $coreLog) {
+              Write-Host "===== Local Core log tail ====="
+              Get-Content $coreLog -Tail 120
+            }
           }
 
       - name: Build portable ZIP
