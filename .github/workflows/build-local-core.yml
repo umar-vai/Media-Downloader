@@ -36,6 +36,7 @@ jobs:
       - name: Compile and test
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m py_compile hybrid_core/agent.py
           python -m py_compile hybrid_core/agent_control.py
           python -m py_compile hybrid_core/windows_startup.py
@@ -59,7 +60,8 @@ jobs:
       - name: Build Local Core agent
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name MediaDownloaderCore --distpath "dist/core" --workpath "build/core-agent" --specpath "build/core-agent" --collect-all yt_dlp --collect-all curl_cffi --collect-all imageio_ffmpeg --collect-all uvicorn --collect-all fastapi --collect-all pydantic --collect-all pystray --collect-all PIL --collect-submodules hybrid_core --collect-submodules media_core --hidden-import tkinter --hidden-import tkinter.filedialog --add-data "web_pwa;web_pwa" hybrid_core_agent.py
+          $webPwa = (Resolve-Path "web_pwa").Path
+          pyinstaller --noconfirm --clean --onefile --windowed --name MediaDownloaderCore --distpath "dist/core" --workpath "build/core-agent" --specpath "build/core-agent" --collect-all yt_dlp --collect-all curl_cffi --collect-all imageio_ffmpeg --collect-all uvicorn --collect-all fastapi --collect-all pydantic --collect-all pystray --collect-all PIL --collect-submodules hybrid_core --collect-submodules media_core --hidden-import tkinter --hidden-import tkinter.filedialog --add-data "$webPwa;web_pwa" hybrid_core_agent.py
 
       - name: Packaged self-tests
         shell: pwsh

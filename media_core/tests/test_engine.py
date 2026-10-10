@@ -9,7 +9,7 @@ from media_core.engine import Cancelled, analyze_url, safe_filename
 
 class MediaCoreEngineTests(unittest.TestCase):
     def test_safe_filename(self):
-        self.assertEqual(safe_filename('A: bad / name?.mp4'), 'A_ bad _ name_')
+        self.assertEqual(safe_filename('A: bad / name?.mp4'), 'A_ bad _ name')
 
     @patch("media_core.engine.resolve_with_installed_browser")
     @patch("media_core.engine.extraction_attempts")

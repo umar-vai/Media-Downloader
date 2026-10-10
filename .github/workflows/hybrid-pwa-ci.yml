@@ -30,6 +30,7 @@ jobs:
       - name: Compile local core
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m py_compile media_core/network.py
           python -m py_compile media_core/sources.py
           python -m py_compile media_core/browser_resolver.py
@@ -54,11 +55,13 @@ jobs:
       - name: Run unit tests
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m unittest discover -s media_core/tests -p "test_*.py" -v
           python -m unittest discover -s hybrid_core/tests -p "test_*.py" -v
 
       - name: Validate PWA shell
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -c "from pathlib import Path; required=['index.html','app.js','styles.css','manifest.webmanifest','sw.js','icon.svg']; missing=[x for x in required if not (Path('web_pwa')/x).exists()]; assert not missing, missing"
           node --check web_pwa/app.js
