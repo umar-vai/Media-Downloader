@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 import time
 import uuid
@@ -30,6 +31,8 @@ class Job:
     updated_at: float = field(default_factory=time.time)
     request: dict[str, Any] = field(default_factory=dict)
     result: dict[str, Any] = field(default_factory=dict)
+    metrics: dict[str, Any] = field(default_factory=dict)
+    meta: dict[str, Any] = field(default_factory=dict)
     private: dict[str, Any] = field(default_factory=dict)
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
@@ -49,6 +52,8 @@ class Job:
                 if key not in {"cached_info"}
             },
             "result": self.result,
+            "metrics": self.metrics,
+            "meta": self.meta,
         }
 
 
@@ -76,18 +81,32 @@ class JobManager:
         if self._store is None:
             return
         restored = 0
+        recovered_downloads: list[Job] = []
         for item in self._store.load():
             kind = str(item.get("kind") or "")
             if kind not in {"download", "editor_export"}:
                 continue
             status = str(item.get("status") or "failed")
-            if status in {"queued", "running", "cancelling"}:
+            meta = dict(item.get("meta") or {})
+
+            if kind == "download" and status in {"queued", "running", "cancelling"}:
+                status = "queued"
+                meta["recovery_count"] = int(meta.get("recovery_count") or 0) + 1
+                meta["recovered_at"] = time.time()
+                item["detail"] = "Recovered after Local Core restart; refreshing media information"
+                item["error"] = ""
+            elif kind == "editor_export" and status in {"queued", "running", "cancelling"}:
                 status = "failed"
                 item["detail"] = "Interrupted by Local Core restart"
                 item["error"] = (
-                    "The previous Local Core session ended before this job finished. "
+                    "The previous Local Core session ended before this export finished. "
                     "Press Retry to run it again."
                 )
+
+            restored_metrics = dict(item.get("metrics") or {})
+            if kind == "download" and status == "queued":
+                restored_metrics = {}
+
             job = Job(
                 id=str(item.get("id") or uuid.uuid4().hex),
                 kind=kind,
@@ -99,12 +118,24 @@ class JobManager:
                 updated_at=float(item.get("updated_at") or time.time()),
                 request=dict(item.get("request") or {}),
                 result=dict(item.get("result") or {}),
+                metrics=restored_metrics,
+                meta=meta,
             )
             self._jobs[job.id] = job
+            if kind == "download" and status == "queued":
+                recovered_downloads.append(job)
             restored += 1
+
         if restored:
-            self._logger.info("restored_persistent_jobs count=%s", restored)
+            self._logger.info(
+                "restored_persistent_jobs count=%s recovered_downloads=%s",
+                restored,
+                len(recovered_downloads),
+            )
             self._persist()
+
+        for job in recovered_downloads:
+            self._download_pool.submit(self._run_download, job)
 
     def _persist(self) -> None:
         if self._store is None:
@@ -154,6 +185,8 @@ class JobManager:
         detail: str | None = None,
         error: str | None = None,
         result: dict[str, Any] | None = None,
+        metrics: dict[str, Any] | None = None,
+        meta_patch: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             if status is not None:
@@ -166,9 +199,45 @@ class JobManager:
                 job.error = error
             if result is not None:
                 job.result = result
+            if metrics is not None:
+                job.metrics.update(metrics)
+            if meta_patch is not None:
+                job.meta.update(meta_patch)
             job.updated_at = time.time()
         if job.kind in {"download", "editor_export"}:
             self._persist()
+
+    @staticmethod
+    def _estimated_download_bytes(cached_info: dict[str, Any] | None) -> int:
+        sizes: list[int] = []
+        for item in (cached_info or {}).get("formats") or []:
+            if not isinstance(item, dict):
+                continue
+            raw = item.get("filesize") or item.get("filesize_approx") or 0
+            try:
+                size = int(raw or 0)
+            except (TypeError, ValueError):
+                size = 0
+            if size > 0:
+                sizes.append(size)
+        if not sizes:
+            return 0
+        # Separate video/audio streams can be merged, so reserve more than one format.
+        return int(max(sizes) * 2.2)
+
+    @classmethod
+    def _ensure_disk_space(cls, directory: Path, cached_info: dict[str, Any] | None = None) -> None:
+        directory = Path(directory).expanduser()
+        directory.mkdir(parents=True, exist_ok=True)
+        free = int(shutil.disk_usage(directory).free)
+        estimate = cls._estimated_download_bytes(cached_info)
+        reserve = 256 * 1024 * 1024
+        required = max(reserve, estimate + reserve)
+        if free < required:
+            raise RuntimeError(
+                f"Not enough free disk space. Available {free / 1024 / 1024:.0f} MB; "
+                f"need about {required / 1024 / 1024:.0f} MB."
+            )
 
     def start_analysis(self, url: str) -> Job:
         job = self._new("analysis", {"url": url})
@@ -220,11 +289,19 @@ class JobManager:
         }
         job = self._new("download", request)
         job.private["cached_info"] = cached_info
+        job.meta["attempt_count"] = 0
+        job.meta["retry_count"] = 0
         self._download_pool.submit(self._run_download, job)
         return job
 
     def _run_download(self, job: Job) -> None:
-        self._set(job, status="running", detail="Starting download")
+        attempt = int(job.meta.get("attempt_count") or 0) + 1
+        self._set(
+            job,
+            status="running",
+            detail="Starting download",
+            meta_patch={"attempt_count": attempt, "last_attempt_at": time.time()},
+        )
         try:
             cached_info = job.private.get("cached_info")
             if not isinstance(cached_info, dict) or not cached_info:
@@ -236,10 +313,13 @@ class JobManager:
                 )
                 job.private["cached_info"] = cached_info
 
+            download_dir = Path(str(job.request.get("download_dir") or ""))
+            self._ensure_disk_space(download_dir, cached_info)
+
             output = download_from_analysis(
                 url=str(job.request.get("url") or ""),
                 cached_info=dict(cached_info or {}),
-                download_dir=Path(str(job.request.get("download_dir") or "")),
+                download_dir=download_dir,
                 filename=str(job.request.get("filename") or "media_download"),
                 mode=str(job.request.get("mode") or "Video"),
                 video_quality=str(job.request.get("video_quality") or "Best available"),
@@ -248,6 +328,7 @@ class JobManager:
                 cancel_event=job.cancel_event,
                 on_status=lambda text: self._set(job, detail=text),
                 on_progress=lambda value, text: self._set(job, progress=value, detail=text),
+                on_metrics=lambda values: self._set(job, metrics=values),
             )
             self._set(
                 job,
@@ -348,6 +429,18 @@ class JobManager:
             raise ValueError("Only failed downloads can be retried.")
 
         job.cancel_event = threading.Event()
-        self._set(job, status="queued", progress=0.0, detail="Retry queued", error="", result={})
+        job.private.pop("cached_info", None)
+        job.metrics.clear()
+        retry_count = int(job.meta.get("retry_count") or 0) + 1
+        self._set(
+            job,
+            status="queued",
+            progress=0.0,
+            detail="Retry queued; refreshing signed media URLs",
+            error="",
+            result={},
+            metrics={},
+            meta_patch={"retry_count": retry_count, "last_retry_at": time.time()},
+        )
         self._download_pool.submit(self._run_download, job)
         return job

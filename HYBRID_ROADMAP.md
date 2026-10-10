@@ -192,16 +192,32 @@ The local Web/PWA editor now covers the core workflow from source selection thro
 
 The lightweight Windows agent now has installation, supervision, startup control, verified self-update, unattended policy, health validation and rollback. The next major block is Phase 5 production hardening.
 
-## Phase 5 — Production hardening
+## Phase 5 — Production hardening 🟡
 
-- Resume/recover queued downloads after restart.
-- Persistent retry metadata.
-- Better signed-URL refresh.
-- Download speed / ETA metrics.
-- Rate limiting and disk-space checks.
-- Integration tests for Analyze → Download → Retry → Cancel.
-- Crash recovery.
-- Signed release artifacts.
+### Phase 5A — Download resilience, crash recovery + diagnostics ✅
+
+- Downloads that were queued/running when the Local Core exits unexpectedly are restored as queued work and automatically resumed after restart.
+- Recovery and retry counters/timestamps are persisted with each download.
+- Manual retry discards stale analyzed format data and forces a fresh analysis so expired signed media URLs are refreshed.
+- The shared download engine now performs one explicit fresh-analysis attempt (including installed-browser fallback) before legacy URL fallbacks.
+- yt-dlp partial files are preserved for continuation across retry/restart instead of being deleted on every extraction-path failure.
+- Download activity now exposes persistent speed, ETA, downloaded/total byte metrics and retry/recovery counts.
+- Added pre-download free-disk checks using known/approximate media sizes plus a safety reserve.
+- Added local API rate limits for analysis, download/retry, editor export, updater actions and diagnostics bundle creation.
+- Added Trusted Host validation, CSP, Permissions-Policy and existing per-process key protection for localhost API hardening.
+- Job-state writes now keep a validated backup. Corrupt primary state is quarantined and recovered from the backup automatically.
+- Added a sanitized diagnostics ZIP containing system/core summary, recent job state, rotating logs and startup/update error files.
+- Added PWA **Export diagnostics** and disk-free reporting.
+- Added integration/unit coverage for restart recovery, fresh retry, cancel, state corruption recovery and diagnostics redaction.
+- Release builds now publish GitHub-signed build provenance attestations for Core EXE, updater, portable ZIP and installer.
+- Local Core bumped to v0.9.0.
+
+### Remaining Phase 5 work
+
+- Long-running real-site regression matrix and soak tests on installed Windows builds.
+- Optional bandwidth limit / scheduled download controls.
+- Windows Authenticode signing when a code-signing certificate is available. GitHub provenance is cryptographically signed, but it does not replace Authenticode/SmartScreen reputation.
+- Final legacy-desktop deprecation gate after installed PWA/Core field testing.
 
 ## Phase 6 — Optional remote UI channel
 

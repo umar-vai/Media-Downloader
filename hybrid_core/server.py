@@ -3,15 +3,18 @@ from __future__ import annotations
 import os
 import platform
 import secrets
+import shutil
 import sys
 import threading
 import time
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
 from imageio_ffmpeg import get_ffmpeg_exe
@@ -22,12 +25,14 @@ from media_core.network import safe_proxy_label
 
 from .agent_control import can_self_update, send_control
 from .core_updater import CoreUpdateService
+from .diagnostics import create_diagnostics_bundle
 from .editor_library import EditorLibrary
 from .jobs import JobManager
 from .logging_setup import configure_logging
 from .paths import (
     APP_DATA_DIR,
     DEFAULT_DOWNLOAD_DIR,
+    DIAGNOSTICS_DIR,
     EDITOR_LIBRARY_FILE,
     LOG_FILE,
     SETTINGS_FILE,
@@ -69,6 +74,7 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
 
 class AnalyzeRequest(BaseModel):
@@ -202,6 +208,31 @@ def _agent_connected() -> bool:
     return bool(_agent_snapshot()["connected"])
 
 
+class LocalRateLimiter:
+    def __init__(self) -> None:
+        self._events: dict[str, deque[float]] = defaultdict(deque)
+        self._lock = threading.RLock()
+
+    def check(self, action: str, *, limit: int, window_seconds: float) -> None:
+        now = time.monotonic()
+        cutoff = now - float(window_seconds)
+        with self._lock:
+            events = self._events[action]
+            while events and events[0] < cutoff:
+                events.popleft()
+            if len(events) >= int(limit):
+                retry_after = max(1, int(window_seconds - (now - events[0])))
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Too many {action} requests. Try again in about {retry_after}s.",
+                    headers={"Retry-After": str(retry_after)},
+                )
+            events.append(now)
+
+
+RATE_LIMITER = LocalRateLimiter()
+
+
 def require_key(
     x_media_core_key: Annotated[str | None, Header()] = None,
 ) -> None:
@@ -216,6 +247,12 @@ async def security_headers(request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; img-src 'self' data: blob: https:; "
+        "media-src 'self' blob:; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+    )
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     return response
 
 
@@ -260,6 +297,7 @@ def bootstrap() -> dict[str, Any]:
 
 @app.post("/api/analyze", dependencies=[Depends(require_key)])
 def analyze(payload: AnalyzeRequest) -> dict[str, Any]:
+    RATE_LIMITER.check("analysis", limit=30, window_seconds=60)
     job = MANAGER.start_analysis(payload.url.strip())
     return {"job": job.snapshot()}
 
@@ -281,6 +319,7 @@ def cancel_job(job_id: str) -> dict[str, Any]:
 
 @app.post("/api/downloads", dependencies=[Depends(require_key)])
 def create_download(payload: DownloadRequest) -> dict[str, Any]:
+    RATE_LIMITER.check("download", limit=60, window_seconds=60)
     settings = SETTINGS.get()
     directory = Path(payload.download_dir or str(settings["download_dir"])).expanduser()
     try:
@@ -310,6 +349,7 @@ def downloads() -> dict[str, Any]:
 
 @app.post("/api/downloads/{job_id}/retry", dependencies=[Depends(require_key)])
 def retry_download(job_id: str) -> dict[str, Any]:
+    RATE_LIMITER.check("download-retry", limit=30, window_seconds=60)
     try:
         job = MANAGER.retry_download(job_id)
     except ValueError as exc:
@@ -365,8 +405,7 @@ def choose_folder(payload: FolderPickerRequest) -> dict[str, Any]:
     return {"selected": str(selected or "")}
 
 
-@app.get("/api/diagnostics", dependencies=[Depends(require_key)])
-def diagnostics() -> dict[str, Any]:
+def _diagnostics_snapshot() -> dict[str, Any]:
     downloads = MANAGER.list_kind("download", limit=120)
     counts: dict[str, int] = {}
     for item in downloads:
@@ -375,6 +414,15 @@ def diagnostics() -> dict[str, Any]:
 
     browser = find_browser()
     settings = SETTINGS.get()
+    download_dir = Path(str(settings["download_dir"])).expanduser()
+    try:
+        disk = shutil.disk_usage(download_dir if download_dir.exists() else download_dir.parent)
+        disk_free = int(disk.free)
+        disk_total = int(disk.total)
+    except OSError:
+        disk_free = 0
+        disk_total = 0
+
     return {
         "version": CORE_VERSION,
         "python": sys.version.split()[0],
@@ -385,15 +433,42 @@ def diagnostics() -> dict[str, Any]:
         "editor_library_file": str(EDITOR_LIBRARY_FILE),
         "log_file": str(LOG_FILE),
         "update_dir": str(UPDATE_DIR),
+        "diagnostics_dir": str(DIAGNOSTICS_DIR),
         "browser": str(browser) if browser else "",
         "ffmpeg": str(get_ffmpeg_exe()),
         "network": safe_proxy_label(),
+        "disk_free_bytes": disk_free,
+        "disk_total_bytes": disk_total,
         "download_counts": counts,
         "settings": settings,
         "update": UPDATER.snapshot(),
         "agent": _agent_snapshot(),
         "active_work": MANAGER.active_summary(),
     }
+
+
+@app.get("/api/diagnostics", dependencies=[Depends(require_key)])
+def diagnostics() -> dict[str, Any]:
+    return _diagnostics_snapshot()
+
+
+@app.get("/api/diagnostics/bundle", dependencies=[Depends(require_key)])
+def diagnostics_bundle() -> FileResponse:
+    RATE_LIMITER.check("diagnostics-bundle", limit=4, window_seconds=60)
+    bundle = create_diagnostics_bundle(
+        output_dir=DIAGNOSTICS_DIR,
+        log_file=LOG_FILE,
+        settings=SETTINGS.get(),
+        jobs=MANAGER.list_kind("download", limit=120) + MANAGER.list_kind("editor_export", limit=80),
+        diagnostics=_diagnostics_snapshot(),
+        app_data_dir=APP_DATA_DIR,
+    )
+    return FileResponse(
+        bundle,
+        media_type="application/zip",
+        filename=bundle.name,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post("/api/editor/choose-file", dependencies=[Depends(require_key)])
@@ -500,6 +575,7 @@ def editor_waveform(payload: EditorPathRequest) -> Response:
 
 @app.post("/api/editor/exports", dependencies=[Depends(require_key)])
 def editor_export(payload: EditorExportRequest) -> dict[str, Any]:
+    RATE_LIMITER.check("editor-export", limit=20, window_seconds=60)
     source = Path(payload.path).expanduser()
     if not source.is_file():
         raise HTTPException(status_code=404, detail="Media file does not exist.")
@@ -657,6 +733,7 @@ def update_status() -> dict[str, Any]:
 
 @app.post("/api/update/check", dependencies=[Depends(require_key)])
 def check_update() -> dict[str, Any]:
+    RATE_LIMITER.check("update-check", limit=10, window_seconds=60)
     settings = SETTINGS.get()
     UPDATER.set_channel(str(settings.get("update_channel") or "stable"))
     return {"update": UPDATER.start_check()}
@@ -664,6 +741,7 @@ def check_update() -> dict[str, Any]:
 
 @app.post("/api/update/download", dependencies=[Depends(require_key)])
 def download_update() -> dict[str, Any]:
+    RATE_LIMITER.check("update-download", limit=5, window_seconds=60)
     try:
         return {"update": UPDATER.start_download()}
     except ValueError as exc:
@@ -672,6 +750,7 @@ def download_update() -> dict[str, Any]:
 
 @app.post("/api/update/apply", dependencies=[Depends(require_key)])
 def apply_update() -> dict[str, Any]:
+    RATE_LIMITER.check("update-apply", limit=3, window_seconds=60)
     state = UPDATER.snapshot()
     staged = str(state.get("staged_path") or "")
     if state.get("status") != "ready" or not staged:

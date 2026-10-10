@@ -18,6 +18,8 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +47,8 @@ jobs:
           python -m py_compile hybrid_core/core_updater.py
           python -m py_compile hybrid_core/settings_store.py
           python -m py_compile hybrid_core/editor_library.py
+          python -m py_compile hybrid_core/diagnostics.py
+          python -m py_compile hybrid_core/state_store.py
           python -m py_compile hybrid_core/jobs.py
           python -m py_compile media_core/engine.py
           python -m py_compile media_core/editor.py
@@ -160,6 +164,15 @@ jobs:
             $hash = (Get-FileHash $item -Algorithm SHA256).Hash.ToLower()
             "$hash  $name" | Out-File "dist\$name.sha256" -Encoding ascii
           }
+
+      - name: Attest Local Core build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/MediaDownloaderCore.exe
+            dist/MediaDownloaderCoreUpdater.exe
+            dist/MediaDownloaderCorePortable.zip
+            dist/MediaDownloaderCoreSetup.exe
 
       - name: Upload Local Core artifact
         uses: actions/upload-artifact@v4

@@ -63,3 +63,5 @@ button{border:0;border-radius:11px;padding:11px 15px;color:var(--text);cursor:po
 @media(max-width:760px){.agent-panel{align-items:flex-start;flex-direction:column}}
 
 #updatePolicySelect,#updateInstallHourSelect{min-width:0}
+
+.download-row .row-bottom>span{min-width:0;overflow-wrap:anywhere}

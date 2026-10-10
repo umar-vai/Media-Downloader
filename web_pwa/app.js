@@ -180,13 +180,20 @@ function jobRow(job) {
     actions.push(`<button data-edit-job="${job.id}" class="mini retry">Edit</button>`);
   }
 
+  const metricParts = [];
+  if (Number(job.metrics?.speed_bps || 0) > 0) metricParts.push(`${(Number(job.metrics.speed_bps) / 1024 / 1024).toFixed(1)} MB/s`);
+  if (job.metrics?.eta_seconds != null) metricParts.push(`ETA ${formatDuration(job.metrics.eta_seconds)}`);
+  if (Number(job.meta?.retry_count || 0) > 0) metricParts.push(`Retries ${job.meta.retry_count}`);
+  if (Number(job.meta?.recovery_count || 0) > 0) metricParts.push(`Recovered ${job.meta.recovery_count}×`);
+  const statusDetail = [job.error || job.detail || "", metricParts.join(" • ")].filter(Boolean).join(" • ");
+
   row.innerHTML = `
     <div class="row-top">
       <strong>${escapeHtml(job.request?.filename || "Media download")}</strong>
       <span class="job-status ${job.status}">${job.status.toUpperCase()}</span>
     </div>
     <div class="progress"><span style="width:${job.status === "completed" ? 100 : percent}%"></span></div>
-    <div class="row-bottom"><span>${escapeHtml(job.error || job.detail || "")}</span><div class="row-actions">${actions.join("")}</div></div>
+    <div class="row-bottom"><span>${escapeHtml(statusDetail)}</span><div class="row-actions">${actions.join("")}</div></div>
   `;
   return row;
 }
@@ -1067,6 +1074,24 @@ $("chooseFolderBtn").addEventListener("click", async () => {
   }
 });
 
+async function exportDiagnostics() {
+  try {
+    const blob = await apiBlob("/api/diagnostics/bundle");
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    link.href = url;
+    link.download = `MediaDownloaderDiagnostics-${stamp}.zip`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    $("settingsStatus").textContent = "Diagnostics bundle exported.";
+  } catch (error) {
+    $("settingsStatus").textContent = error.message;
+  }
+}
+
 async function loadDiagnostics() {
   try {
     const data = await api("/api/diagnostics");
@@ -1082,6 +1107,7 @@ async function loadDiagnostics() {
       `Editor library: ${data.editor_library_file}`,
       `Log: ${data.log_file}`,
       `Updates: ${data.update_dir}`,
+      `Disk free: ${data.disk_free_bytes ? (Number(data.disk_free_bytes) / 1024 / 1024 / 1024).toFixed(1) + " GB" : "unknown"}`,
       `Agent: ${data.agent?.connected ? "connected" : "not connected"}`,
       `Self-update: ${data.agent?.self_update ? "ready" : "unavailable"}`,
       `Rollback: ${data.agent?.rollback_available ? "available" : "none"}`,
@@ -1179,6 +1205,7 @@ $("quitAgentBtn").addEventListener("click", () => {
   }
 });
 $("refreshDiagnosticsBtn").addEventListener("click", loadDiagnostics);
+$("exportDiagnosticsBtn").addEventListener("click", exportDiagnostics);
 $("openLogBtn").addEventListener("click", async () => {
   try { await api("/api/system/open-log", {method:"POST"}); }
   catch (error) { $("analysisStatus").textContent = error.message; }

@@ -16,6 +16,7 @@ from .sources import detect_platform, extraction_attempts, platform_name, video_
 
 StatusCallback = Callable[[str], None]
 ProgressCallback = Callable[[float, str], None]
+MetricsCallback = Callable[[dict[str, Any]], None]
 
 
 class Cancelled(RuntimeError):
@@ -152,6 +153,7 @@ def download_from_analysis(
     cancel_event: threading.Event,
     on_status: StatusCallback | None = None,
     on_progress: ProgressCallback | None = None,
+    on_metrics: MetricsCallback | None = None,
 ) -> Path:
     download_dir = Path(download_dir).expanduser()
     download_dir.mkdir(parents=True, exist_ok=True)
@@ -172,6 +174,15 @@ def download_from_analysis(
                 bits.append(f"{float(speed) / 1024 / 1024:.1f} MB/s")
             if eta is not None:
                 bits.append(f"ETA {int(eta)}s")
+            if on_metrics:
+                on_metrics(
+                    {
+                        "downloaded_bytes": downloaded,
+                        "total_bytes": total,
+                        "speed_bps": float(speed or 0.0),
+                        "eta_seconds": int(eta) if eta is not None else None,
+                    }
+                )
             if on_progress:
                 on_progress(max(0.0, min(1.0, progress)), " • ".join(bits) or "Downloading")
         elif status == "finished" and on_status:
@@ -189,6 +200,7 @@ def download_from_analysis(
         "concurrent_fragment_downloads": 4,
         "progress_hooks": [hook],
         "overwrites": False,
+        "continuedl": True,
         "ffmpeg_location": get_ffmpeg_exe(),
     }
 
@@ -214,9 +226,10 @@ def download_from_analysis(
 
     attempts = extraction_attempts(url)
 
-    def cleanup_partial_files() -> None:
+    def cleanup_transient_files() -> None:
+        # Keep .part/.ytdl so yt-dlp can resume after a retry or process restart.
         for partial in download_dir.glob(f"{name}.*"):
-            if partial.suffix.lower() in {".part", ".ytdl", ".tmp", ".temp"}:
+            if partial.suffix.lower() in {".tmp", ".temp"}:
                 try:
                     partial.unlink()
                 except OSError:
@@ -238,7 +251,34 @@ def download_from_analysis(
             raise
         except Exception as exc:
             errors.append(f"Analyzed media: {str(exc).strip()}")
-            cleanup_partial_files()
+            cleanup_transient_files()
+
+    if not downloaded_ok:
+        _check_cancel(cancel_event)
+        try:
+            if on_status:
+                on_status("Refreshing media information")
+            _summary, refreshed_info = analyze_url(
+                url,
+                cancel_event=cancel_event,
+                on_status=(
+                    (lambda text: on_status(f"Refresh: {text}"))
+                    if on_status
+                    else None
+                ),
+            )
+            refreshed_network_options: dict[str, Any] = {}
+            if attempts:
+                refreshed_network_options = dict(attempts[0][1] or {})
+                refreshed_network_options.pop("_force_generic_extractor", None)
+            with yt_dlp.YoutubeDL({**opts, **refreshed_network_options}) as ydl:
+                ydl.process_ie_result(copy.deepcopy(refreshed_info), download=True)
+            downloaded_ok = True
+        except Cancelled:
+            raise
+        except Exception as exc:
+            errors.append(f"Fresh media info: {str(exc).strip()}")
+            cleanup_transient_files()
 
     if not downloaded_ok:
         for index, (attempt_url, network_options) in enumerate(attempts, start=1):
@@ -260,7 +300,7 @@ def download_from_analysis(
                 raise
             except Exception as exc:
                 errors.append(f"Fallback {index}: {str(exc).strip()}")
-                cleanup_partial_files()
+                cleanup_transient_files()
 
     _check_cancel(cancel_event)
     if not downloaded_ok:
