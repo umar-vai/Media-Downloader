@@ -380,6 +380,7 @@ def run_server_child() -> int:
             access_log=False,
             loop="asyncio",
             http="h11",
+            log_config=None,
         )
         server = uvicorn.Server(config)
         server.run()
