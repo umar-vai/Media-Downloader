@@ -10,25 +10,17 @@ SUPPORTED_PLATFORMS = {
     "youtube": "YouTube",
     "facebook": "Facebook",
     "instagram": "Instagram",
+    "web": "Website",
 }
 
 
 def _disable_instagram_auto_impersonation() -> None:
-    """Keep Instagram off curl_cffi/BoringSSL on affected Windows networks.
-
-    Recent yt-dlp Instagram extractors automatically enable browser
-    impersonation whenever an impersonation-capable request handler is
-    available. Media Downloader bundles curl_cffi for Facebook compatibility,
-    so Instagram can otherwise select BoringSSL even when we do not request
-    impersonation ourselves. The standard yt-dlp transport is more reliable on
-    the tested network, so disable Instagram's automatic opt-in only.
-    """
+    """Keep Instagram off automatic curl_cffi/BoringSSL impersonation."""
     try:
         from yt_dlp.extractor.instagram import InstagramBaseIE
 
         InstagramBaseIE._can_impersonate = False
     except Exception:
-        # Do not make app startup dependent on yt-dlp's internal class layout.
         pass
 
 
@@ -46,14 +38,33 @@ def _hostname(url: str) -> str:
 
 
 def detect_platform(url: str) -> str | None:
+    """Classify known sites but accept any valid HTTP(S) website as 'web'."""
     host = _hostname(url)
-    if host in {"youtu.be", "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtube-nocookie.com", "www.youtube-nocookie.com"}:
+    if not host:
+        return None
+    if host in {
+        "youtu.be",
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "music.youtube.com",
+        "youtube-nocookie.com",
+        "www.youtube-nocookie.com",
+    }:
         return "youtube"
-    if host in {"facebook.com", "www.facebook.com", "m.facebook.com", "mbasic.facebook.com", "web.facebook.com", "fb.watch", "www.fb.watch"}:
+    if host in {
+        "facebook.com",
+        "www.facebook.com",
+        "m.facebook.com",
+        "mbasic.facebook.com",
+        "web.facebook.com",
+        "fb.watch",
+        "www.fb.watch",
+    }:
         return "facebook"
     if host in {"instagram.com", "www.instagram.com", "m.instagram.com"}:
         return "instagram"
-    return None
+    return "web"
 
 
 def is_supported_media_url(url: str) -> bool:
@@ -62,7 +73,11 @@ def is_supported_media_url(url: str) -> bool:
 
 def platform_name(url_or_platform: str) -> str:
     platform = url_or_platform if url_or_platform in SUPPORTED_PLATFORMS else detect_platform(url_or_platform)
-    return SUPPORTED_PLATFORMS.get(platform or "", "Media")
+    if platform == "web":
+        host = _hostname(url_or_platform)
+        if host:
+            return host.removeprefix("www.")
+    return SUPPORTED_PLATFORMS.get(platform or "", "Website")
 
 
 def browser_headers() -> dict[str, str]:
@@ -70,34 +85,25 @@ def browser_headers() -> dict[str, str]:
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
+            "Chrome/155.0.0.0 Safari/537.36"
         ),
         "Accept-Language": "en-US,en;q=0.9",
     }
 
 
-def request_options(url: str) -> dict:
-    """Return yt-dlp request options appropriate for the detected platform.
+def _base_request_options() -> dict:
+    return {"http_headers": browser_headers(), **yt_dlp_proxy_options()}
 
-    Facebook uses curl_cffi-backed Chrome impersonation as one of its fallback
-    transports. Instagram's extractor-level automatic impersonation is disabled
-    above so Instagram stays on the standard yt-dlp request path. YouTube also
-    uses the standard path.
-    """
-    options = {"http_headers": browser_headers(), **yt_dlp_proxy_options()}
+
+def request_options(url: str) -> dict:
+    """Return a conservative first-choice yt-dlp transport."""
+    options = _base_request_options()
     if detect_platform(url) == "facebook":
         options["impersonate"] = ImpersonateTarget("chrome")
     return options
 
 
 def facebook_mobile_watch_url(url: str) -> str:
-    """Convert common Facebook video/Reel links to the mobile watch endpoint.
-
-    yt-dlp's own Facebook extractor uses m.facebook.com/watch for some Facebook
-    URL forms. On networks where www.facebook.com terminates TLS early, the
-    mobile watch endpoint can take a different edge/CDN path while preserving
-    the same public video id.
-    """
     if detect_platform(url) != "facebook":
         return url
     parsed = urlparse((url or "").strip())
@@ -121,15 +127,6 @@ def facebook_mobile_watch_url(url: str) -> str:
 
 
 def facebook_share_variants(url: str) -> list[str]:
-    """Return alternate mobile hosts for Facebook share/short links.
-
-    Facebook's /share/v/, /share/r/ and /share/p/ URLs are redirect-style links
-    and are often handled by yt-dlp's generic extractor before they resolve to a
-    canonical Facebook video/Reel URL. Some Windows/ISP combinations terminate
-    TLS on www.facebook.com while the mobile/basic endpoints still resolve. Try
-    those endpoints first and let yt-dlp follow the redirect to the final public
-    media URL.
-    """
     if detect_platform(url) != "facebook":
         return []
     parsed = urlparse((url or "").strip())
@@ -139,69 +136,106 @@ def facebook_share_variants(url: str) -> list[str]:
 
     variants: list[str] = []
     for host in ("m.facebook.com", "mbasic.facebook.com"):
-        variants.append(urlunparse((parsed.scheme or "https", host, parsed.path, parsed.params, parsed.query, parsed.fragment)))
+        variants.append(
+            urlunparse(
+                (
+                    parsed.scheme or "https",
+                    host,
+                    parsed.path,
+                    parsed.params,
+                    parsed.query,
+                    parsed.fragment,
+                )
+            )
+        )
     return variants
 
 
+def _generic_transport_attempts(url: str, *, allow_impersonation: bool = True) -> list[tuple[str, dict]]:
+    """Try normal yt-dlp first, then browser-like and generic-page fallbacks."""
+    base = _base_request_options()
+    attempts: list[tuple[str, dict]] = [(url, dict(base))]
+
+    if allow_impersonation:
+        attempts.append((url, {**base, "impersonate": ImpersonateTarget("chrome")}))
+
+    attempts.append((url, {**base, "force_generic_extractor": True}))
+    if allow_impersonation:
+        attempts.append(
+            (
+                url,
+                {
+                    **base,
+                    "impersonate": ImpersonateTarget("chrome"),
+                    "force_generic_extractor": True,
+                },
+            )
+        )
+    return attempts
+
+
 def extraction_attempts(url: str) -> list[tuple[str, dict]]:
-    """Return ordered extraction/network fallbacks for a media URL.
+    """Return ordered extraction/network fallbacks for any HTTP(S) media page."""
+    platform = detect_platform(url)
+    if platform is None:
+        return []
 
-    Facebook is retried through share-link mobile variants (when applicable),
-    the mobile watch endpoint, IPv4, and both standard yt-dlp TLS and
-    Chrome/curl_cffi impersonation. Instagram and YouTube keep their standard
-    paths.
-    """
-    headers = {"http_headers": browser_headers(), **yt_dlp_proxy_options()}
-    if detect_platform(url) != "facebook":
-        return [(url, request_options(url))]
+    if platform == "facebook":
+        base = _base_request_options()
+        mobile_url = facebook_mobile_watch_url(url)
+        ordered_urls: list[str] = []
+        for candidate_url in (*facebook_share_variants(url), mobile_url, url):
+            if candidate_url not in ordered_urls:
+                ordered_urls.append(candidate_url)
 
-    mobile_url = facebook_mobile_watch_url(url)
-    ordered_urls: list[str] = []
-    for candidate_url in (*facebook_share_variants(url), mobile_url, url):
-        if candidate_url not in ordered_urls:
-            ordered_urls.append(candidate_url)
+        candidates: list[tuple[str, dict]] = []
+        for candidate_url in ordered_urls:
+            candidates.append((candidate_url, {**base, "source_address": "0.0.0.0"}))
+            candidates.append(
+                (
+                    candidate_url,
+                    {
+                        **base,
+                        "source_address": "0.0.0.0",
+                        "impersonate": ImpersonateTarget("chrome"),
+                    },
+                )
+            )
+        candidates.append((url, {**base, "force_generic_extractor": True}))
+        return candidates
 
-    candidates: list[tuple[str, dict]] = []
-    seen: set[tuple[str, bool]] = set()
-    for candidate_url in ordered_urls:
-        for impersonate in (False, True):
-            key = (candidate_url, impersonate)
-            if key in seen:
-                continue
-            seen.add(key)
-            options = {**headers, "source_address": "0.0.0.0"}
-            if impersonate:
-                options["impersonate"] = ImpersonateTarget("chrome")
-            candidates.append((candidate_url, options))
-    return candidates
+    if platform == "instagram":
+        return _generic_transport_attempts(url, allow_impersonation=False)
+
+    if platform == "youtube":
+        base = _base_request_options()
+        return [
+            (url, dict(base)),
+            (url, {**base, "source_address": "0.0.0.0"}),
+        ]
+
+    return _generic_transport_attempts(url, allow_impersonation=True)
 
 
 def video_format_selector(url: str, quality: str) -> str:
-    """Return a resilient yt-dlp video format selector.
-
-    Facebook and Instagram frequently expose only one combined Reel/video
-    format, or resolutions that do not exactly match the user's selected cap.
-    Prefer the requested quality where possible, then gracefully fall back to
-    the best combined MP4/combined stream before trying separate streams.
-    YouTube keeps the stricter quality-capped selector used previously.
-    """
+    """Return a resilient format selector for known and generic websites."""
     platform = detect_platform(url)
-    social = platform in {"facebook", "instagram"}
+    flexible = platform != "youtube"
 
     if quality == "Best available":
-        if social:
-            return "b[ext=mp4]/b/bv*[ext=mp4]+ba[ext=m4a]/bv*+ba"
+        if flexible:
+            return "b[ext=mp4]/b/bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/bv+ba"
         return "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
 
     height = int(quality.rstrip("p"))
-    if social:
+    if flexible:
         return (
             f"b[height<={height}][ext=mp4]/"
             f"b[height<={height}]/"
             "b[ext=mp4]/b/"
             f"bv*[height<={height}][ext=mp4]+ba[ext=m4a]/"
             f"bv*[height<={height}]+ba/"
-            "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba"
+            "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/bv+ba"
         )
 
     return (

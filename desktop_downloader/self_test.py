@@ -13,8 +13,7 @@ from typing import Any
 import yt_dlp
 from imageio_ffmpeg import get_ffmpeg_exe
 
-from browser_capture import BrowserCaptureBridge, CaptureStore, generate_capture_token
-from install_mode import executable_dir, install_mode_name
+from install_mode import install_mode_name
 from media_player import _mpv_executable
 from version import APP_VERSION
 
@@ -94,27 +93,6 @@ def run_self_test() -> dict[str, Any]:
         checks.append(_run_version_check("mpv", mpv, ["--version"]))
     except Exception as exc:
         checks.append(CheckResult("mpv", False, str(exc)))
-
-    bridge: BrowserCaptureBridge | None = None
-    try:
-        bridge = BrowserCaptureBridge(CaptureStore(), generate_capture_token(), port=0)
-        bridge_port = bridge.start()
-        checks.append(CheckResult("browser_capture_bridge", bridge_port > 0, f"127.0.0.1:{bridge_port}"))
-    except Exception as exc:
-        checks.append(CheckResult("browser_capture_bridge", False, str(exc)))
-    finally:
-        if bridge is not None:
-            bridge.stop()
-
-    if install_mode_name() == "installer":
-        extension_manifest = executable_dir() / "browser_extension" / "manifest.json"
-        checks.append(
-            CheckResult(
-                "browser_capture_extension",
-                extension_manifest.exists(),
-                str(extension_manifest) if extension_manifest.exists() else "Bundled browser extension is missing.",
-            )
-        )
 
     updater = _resource_path("MediaDownloaderUpdater.exe")
     if getattr(sys, "frozen", False):

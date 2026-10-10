@@ -44,11 +44,6 @@ jobs:
         run: |
           python -m py_compile desktop_downloader/app.py
           python -m py_compile desktop_downloader/app_logging.py
-          python -m py_compile desktop_downloader/browser_capture.py
-          python -m py_compile desktop_downloader/capture_quality.py
-          python -m py_compile desktop_downloader/browser_capture_panel.py
-          python -m py_compile desktop_downloader/browser_capture_window.py
-          python -m py_compile desktop_downloader/captured_media_engine.py
           python -m py_compile desktop_downloader/download_queue.py
           python -m py_compile desktop_downloader/diagnostics_window.py
           python -m py_compile desktop_downloader/history_store.py
@@ -69,10 +64,6 @@ jobs:
           python -m py_compile desktop_downloader/version.py
           python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from version import APP_VERSION; parts=APP_VERSION.split('.'); assert len(parts)==3 and all(part.isdigit() for part in parts), APP_VERSION; print('APP_VERSION=' + APP_VERSION)"
           python -m unittest discover -s desktop_downloader/tests -v
-          python -c "import json, pathlib; json.loads(pathlib.Path('desktop_downloader/browser_extension/manifest.json').read_text(encoding='utf-8')); print('Browser extension manifest OK')"
-          node --check desktop_downloader/browser_extension/service_worker.js
-          node --check desktop_downloader/browser_extension/content_probe.js
-          node --check desktop_downloader/browser_extension/popup.js
           python desktop_downloader/tests/smoke_editor_export.py
           python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from yt_dlp import YoutubeDL; from yt_dlp.networking.impersonate import ImpersonateTarget; y=YoutubeDL({'quiet': True}); assert y._impersonate_target_available(ImpersonateTarget('chrome')), 'Chrome impersonation target unavailable'"
 
@@ -171,21 +162,6 @@ jobs:
             --add-binary "$updater;." `
             --add-binary "$mpv;." `
             desktop_downloader/launcher.py
-
-      - name: Package Browser Capture extension
-        shell: pwsh
-        run: |
-          $extensionSource = "desktop_downloader\browser_extension"
-          $extensionInstalled = "dist\installed\MediaDownloader\browser_extension"
-          New-Item -ItemType Directory -Force -Path $extensionInstalled | Out-Null
-          Copy-Item "$extensionSource\*" $extensionInstalled -Recurse -Force
-          if (Test-Path "dist\MediaDownloaderBrowserCaptureExtension.zip") {
-            Remove-Item "dist\MediaDownloaderBrowserCaptureExtension.zip" -Force
-          }
-          Compress-Archive -Path "$extensionSource\*" -DestinationPath "dist\MediaDownloaderBrowserCaptureExtension.zip" -CompressionLevel Optimal
-          if (-not (Test-Path "dist\MediaDownloaderBrowserCaptureExtension.zip")) {
-            throw "Browser Capture extension archive was not created."
-          }
 
       - name: Run onedir packaged self-test
         shell: pwsh
@@ -326,7 +302,6 @@ jobs:
             dist/MediaDownloaderSetup.exe.sha256
             dist/MediaDownloaderPortable.zip
             dist/MediaDownloaderPortable.zip.sha256
-            dist/MediaDownloaderBrowserCaptureExtension.zip
             dist/TeamFahadYouTubeDownloader.exe
             dist/TeamFahadYouTubeDownloader.exe.sha256
             dist/portable-self-test.json
@@ -369,7 +344,6 @@ jobs:
             "dist/MediaDownloaderSetup.exe.sha256" `
             "dist/MediaDownloaderPortable.zip" `
             "dist/MediaDownloaderPortable.zip.sha256" `
-            "dist/MediaDownloaderBrowserCaptureExtension.zip" `
             "dist/TeamFahadYouTubeDownloader.exe" `
             "dist/TeamFahadYouTubeDownloader.exe.sha256" `
             --repo $repo --target "${{ github.sha }}" --title "Media Downloader $tag" --generate-notes
@@ -386,6 +360,5 @@ jobs:
             dist/MediaDownloaderSetup.exe.sha256
             dist/MediaDownloaderPortable.zip
             dist/MediaDownloaderPortable.zip.sha256
-            dist/MediaDownloaderBrowserCaptureExtension.zip
             dist/TeamFahadYouTubeDownloader.exe
             dist/TeamFahadYouTubeDownloader.exe.sha256

@@ -1,180 +1,50 @@
 # Media Downloader — Desktop App
 
-A portable Windows desktop media downloader for public YouTube, Facebook and Instagram videos/reels. By default, downloaded media is saved to:
+A Windows desktop app focused on one workflow:
+
+1. Paste a public media URL.
+2. Analyze it with yt-dlp.
+3. Download video or audio.
+4. Optionally open the downloaded file in the built-in editor.
+
+Downloaded files are saved to:
 
 `Downloads/Media Downloader`
 
-The desktop app includes a **Save Location** control. Use **Choose folder** to select any folder or drive. The selected folder is stored in `%APPDATA%\MediaDownloader\settings.json` and is preserved across app updates.
+You can change the save location from Settings.
 
-## Supported platforms
+## Link support
 
-- YouTube videos and Shorts
-- Facebook public videos and Reels
-- Instagram public videos and Reels
+Any valid `http://` or `https://` URL is accepted by the extraction engine. The app tries:
 
-The app automatically detects the platform from the pasted URL. Facebook and Instagram requests use yt-dlp browser impersonation via curl_cffi for more reliable TLS/network compatibility. Private, friends-only, login-required, DRM-protected or otherwise access-restricted media is not bypassed. Platform changes can occasionally require a newer `yt-dlp` release.
+- the normal yt-dlp extractor;
+- browser-like Chrome impersonation when appropriate;
+- yt-dlp's generic webpage extractor as a fallback;
+- existing Facebook mobile/share transport fallbacks;
+- direct media/HLS/DASH URLs when yt-dlp can resolve them.
 
-## Auto-update system
+This broadens compatibility beyond YouTube, Facebook and Instagram.
 
-Starting with **v2.2.0**, the Windows EXE can update itself through GitHub Releases.
+It is not technically possible to guarantee every website. DRM-protected media, login-only/private media, anti-bot challenges, unsupported JavaScript-only players, expired signed URLs, or sites that yt-dlp does not currently understand can still fail. The app does not bypass DRM or access controls.
 
-Update flow:
+## Editing
 
-1. The app checks the repository's latest GitHub Release in the background.
-2. If the release version is newer than the installed version, an in-app update notice appears.
-3. **Update Now** downloads `MediaDownloader.exe`.
-4. The matching `.sha256` release asset is downloaded and verified before installation.
-5. The bundled `MediaDownloaderUpdater.exe` is copied to the local update folder and launched.
-6. The main app closes.
-7. The updater stages the new EXE, backs up the current EXE, replaces it, and launches the new build.
-8. If the new build exits immediately, the updater restores and relaunches the previous executable.
+After download, choose **Edit downloaded media**, or use **Edit local media** to open an existing audio/video file. The editor remains fully local.
 
-Update logs are written to:
-
-`%APPDATA%\MediaDownloader\update.log`
-
-Temporary update downloads are written under:
-
-`%LOCALAPPDATA%\MediaDownloader\updates\`
-
-User settings and downloaded media are not stored inside the EXE, so an update does not reset the selected download folder or other update preferences.
-
-### Update preferences
-
-The app includes:
-
-- **Automatically check for updates** — enabled by default.
-- **Automatically download updates** — disabled by default.
-- **Check for updates** — manual check at any time.
-- **Later** — snoozes the update reminder for 24 hours.
-- **View changes** — opens the current GitHub Release page.
-
-Automatic installation is only enabled in the packaged Windows EXE. Running `app.py` directly can check/download an update, but it will not replace source files.
-
-## Versioning
-
-The single source of truth is:
-
-`desktop_downloader/version.py`
-
-Example:
-
-```python
-APP_VERSION = "2.2.3"
-```
-
-Use semantic versions such as:
-
-- `2.2.0` — feature release
-- `2.2.1` — bug-fix release
-- `3.0.0` — major release
-
-The release tag must match `APP_VERSION`. The GitHub Actions workflow checks this automatically.
-
-## Build locally
+## Build
 
 ```powershell
-py -3 -m venv .venv
-.venv\Scripts\activate
-pip install -r desktop_downloader\requirements.txt
-
-pyinstaller --noconfirm --clean --onefile --windowed `
-  --name MediaDownloaderUpdater `
-  desktop_downloader\updater.py
-
-pyinstaller --noconfirm --clean --onefile --windowed `
-  --name MediaDownloader `
-  --collect-all yt_dlp `
-  --collect-all imageio_ffmpeg `
-  --collect-all customtkinter `
-  --collect-all PIL `
-  --add-binary "dist/MediaDownloaderUpdater.exe;." `
-  desktop_downloader\app.py
+pip install -r desktop_downloader/requirements.txt
+python desktop_downloader/launcher.py
 ```
 
-The distributable EXE is:
+The GitHub Actions workflow builds:
 
-`dist/MediaDownloader.exe`
+- `MediaDownloader.exe`
+- `MediaDownloaderSetup.exe`
+- `MediaDownloaderPortable.zip`
+- SHA-256 checksum files
 
-The updater is embedded inside that main EXE, so users still receive one portable application file.
+## Updates
 
-## GitHub Actions build
-
-`.github/workflows/build-desktop-downloader.yml` now:
-
-- validates Python files;
-- runs updater unit tests;
-- builds the updater;
-- embeds it in the main EXE;
-- creates a SHA-256 checksum;
-- uploads a normal Actions artifact on pushes to `main`;
-- publishes the EXE + checksum as GitHub Release assets when a `v*` tag is pushed.
-
-## Publishing a future update
-
-### 1. Change the version
-
-Edit:
-
-`desktop_downloader/version.py`
-
-For example:
-
-```python
-APP_VERSION = "2.3.0"
-```
-
-### 2. Commit and push
-
-```powershell
-git add .
-git commit -m "Release v2.3.0"
-git push origin main
-```
-
-### 3. Tag the exact same version
-
-```powershell
-git tag v2.3.0
-git push origin v2.3.0
-```
-
-GitHub Actions will build the Windows EXE, generate the SHA-256 file, and publish both files to the `v2.3.0` GitHub Release.
-
-Installed copies of an older version will detect that release the next time they perform an update check.
-
-## First auto-update-enabled release
-
-Because builds before v2.2.0 do not contain the updater logic, users must install/download **v2.2.0 once**. After they are running v2.2.0 or newer, later GitHub Releases can be installed from inside the app.
-
-## Security and rollback
-
-The app will not install a release if:
-
-- the expected EXE asset is missing;
-- the SHA-256 asset is missing;
-- the download is empty;
-- SHA-256 verification fails;
-- the current process does not close;
-- the updater cannot safely stage/replace the executable.
-
-The old EXE is backed up before replacement. If the newly launched EXE exits immediately, the updater restores the backup.
-
-Use the downloader only for content you own or have permission to download.
-
-### Social format fallback
-
-Facebook and Instagram downloads prefer the selected quality, but if that exact resolution/stream is unavailable the app automatically falls back to the best compatible combined video or merged stream instead of failing with a requested-format error.
-
-### Facebook connection fallback
-
-Facebook public videos/Reels automatically retry through the mobile watch endpoint, IPv4, standard yt-dlp TLS, and Chrome/curl_cffi transport when a network terminates one Facebook TLS path early. Instagram keeps the standard transport that is more reliable on the tested Windows network.
-
-
-## Windows download recommendation
-
-For normal Windows use, prefer `MediaDownloaderSetup.exe`. For a no-install build, use
-`MediaDownloaderPortable.zip` and run `MediaDownloader.exe` from the extracted folder.
-The standalone one-file `MediaDownloader.exe` remains available for compatibility, but
-some antivirus/proxy/download environments can corrupt or interfere with PyInstaller's
-temporary extraction of embedded native modules.
+The app checks GitHub Releases and can download verified updates. Installer mode uses the installer package; portable mode uses the portable executable/update flow.

@@ -182,7 +182,7 @@ class SettingsWindow(ctk.CTkToplevel):
             1,
             "Automatically analyze valid links",
             self.auto_analyze_var,
-            "After a supported URL is pasted or typed, load its title, creator and duration automatically.",
+            "After a valid public http:// or https:// media URL is pasted or typed, try to load its title, creator and duration automatically.",
         )
         self._switch(
             tab,

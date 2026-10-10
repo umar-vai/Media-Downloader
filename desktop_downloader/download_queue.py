@@ -13,10 +13,8 @@ TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 @dataclass
 class DownloadRequest:
     id: str
-    source_type: str
     payload: dict[str, Any]
     edit_after_download: bool = False
-    capture_id: str = ""
     status: str = "queued"
     progress: float = 0.0
     detail: str = ""
@@ -28,9 +26,7 @@ class DownloadRequest:
     def snapshot(self, *, position: int = 0) -> dict[str, Any]:
         return {
             "id": self.id,
-            "source_type": self.source_type,
             "edit_after_download": self.edit_after_download,
-            "capture_id": self.capture_id,
             "status": self.status,
             "progress": self.progress,
             "detail": self.detail,
@@ -43,7 +39,7 @@ class DownloadRequest:
 
 
 class DownloadQueue:
-    """Single-worker FIFO queue for normal links and Browser Capture downloads."""
+    """Single-worker FIFO queue for pasted-link downloads."""
 
     def __init__(self, *, history_limit: int = 120) -> None:
         self.history_limit = max(20, int(history_limit))
@@ -53,18 +49,14 @@ class DownloadQueue:
 
     def enqueue(
         self,
-        source_type: str,
         payload: dict[str, Any],
         *,
         edit_after_download: bool = False,
-        capture_id: str = "",
     ) -> DownloadRequest:
         request = DownloadRequest(
             id=uuid.uuid4().hex,
-            source_type=str(source_type or "link"),
             payload=dict(payload or {}),
             edit_after_download=bool(edit_after_download),
-            capture_id=str(capture_id or ""),
         )
         self._items.append(request)
         self._pending.append(request.id)
@@ -114,22 +106,6 @@ class DownloadQueue:
                 pass
         self._finish(request.id, "cancelled", detail="Cancelled")
         return True
-
-    def cancel_capture(self, capture_id: str) -> str | None:
-        capture_id = str(capture_id or "")
-        for request in reversed(self._items):
-            if request.capture_id != capture_id or request.status in TERMINAL_STATUSES:
-                continue
-            self.cancel(request.id)
-            return request.id
-        return None
-
-    def latest_for_capture(self, capture_id: str) -> dict[str, Any] | None:
-        capture_id = str(capture_id or "")
-        for request in reversed(self._items):
-            if request.capture_id == capture_id:
-                return request.snapshot(position=self.position(request.id))
-        return None
 
     def position(self, request_id: str) -> int:
         try:

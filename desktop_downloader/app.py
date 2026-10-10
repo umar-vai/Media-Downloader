@@ -24,17 +24,13 @@ from imageio_ffmpeg import get_ffmpeg_exe
 from tkinter import filedialog, messagebox
 
 from app_logging import get_logger, log_path
-from browser_capture import BrowserCaptureBridge, CaptureStore, DEFAULT_CAPTURE_PORT, generate_capture_token
-from browser_capture_panel import BrowserCapturePanel
-from captured_media_engine import CaptureDownloadCancelled, capture_host, capture_media_mode, cleanup_failed_capture_parts, download_captured_media
-from capture_quality import inspect_capture_quality, related_capture_candidates, select_best_capture
 from diagnostics_window import DiagnosticsWindow
 from download_queue import DownloadQueue, DownloadRequest
 from history_store import HistoryStore, make_history_entry
 from history_window import HistoryWindow
 from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
-from media_sources import browser_headers, detect_platform, extraction_attempts, is_supported_media_url, platform_name, request_options, video_format_selector
+from media_sources import detect_platform, extraction_attempts, platform_name, video_format_selector
 from settings_window import SettingsWindow
 from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_installer_release, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
@@ -111,8 +107,6 @@ def default_settings() -> dict[str, Any]:
         "video_quality": "720p",
         "audio_format": "MP3",
         "audio_quality": "192",
-        "browser_capture_token": "",
-        "browser_capture_port": DEFAULT_CAPTURE_PORT,
         "snooze_version": "",
         "snooze_until": 0,
     }
@@ -151,13 +145,6 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
     ):
         value = settings.get(key, fallback)
         settings[key] = value if isinstance(value, bool) else fallback
-
-    settings["browser_capture_token"] = str(settings.get("browser_capture_token") or "").strip()
-    try:
-        capture_port = int(settings.get("browser_capture_port") or DEFAULT_CAPTURE_PORT)
-    except (TypeError, ValueError):
-        capture_port = DEFAULT_CAPTURE_PORT
-    settings["browser_capture_port"] = capture_port if 1 <= capture_port <= 65535 else DEFAULT_CAPTURE_PORT
 
     settings["snooze_version"] = str(settings.get("snooze_version") or "")
     try:
@@ -256,8 +243,6 @@ class DownloaderApp(ctk.CTk):
         self.diagnostics_window: DiagnosticsWindow | None = None
         self.settings_window: SettingsWindow | None = None
         self.history_window: HistoryWindow | None = None
-        self.browser_capture_panel: BrowserCapturePanel | None = None
-        self.current_view = "downloader"
         self.download_queue = DownloadQueue()
         self.active_download_request_id: str | None = None
         self.task_state = TaskState.IDLE
@@ -266,15 +251,8 @@ class DownloaderApp(ctk.CTk):
         self.active_job_cancel: threading.Event | None = None
         self._progress_event_lock = threading.Lock()
         self._latest_progress_by_job: dict[int, Any] = {}
-        self._capture_quality_inflight: set[str] = set()
-        self._capture_panel_refresh_after_id: str | None = None
 
         self.settings = load_settings()
-        if not str(self.settings.get("browser_capture_token") or "").strip():
-            self.settings["browser_capture_token"] = generate_capture_token()
-            save_settings(self.settings)
-        self.capture_store = CaptureStore()
-        self.capture_bridge: BrowserCaptureBridge | None = None
         self.history_store = HistoryStore(HISTORY_FILE)
         self.download_dir = Path(str(self.settings.get("download_dir") or DEFAULT_DOWNLOAD_DIR)).expanduser()
         self.latest_release: ReleaseInfo | None = None
@@ -300,9 +278,6 @@ class DownloaderApp(ctk.CTk):
         self._center_window()
         self._build_ui()
         self._sync_recent_file()
-        self._start_browser_capture_bridge()
-        self._build_browser_capture_panel()
-        self._sync_nav_buttons()
         LOGGER.info("App started version=%s executable=%s", APP_VERSION, sys.executable)
         self.after(120, self._drain_events)
         self.after(700, lambda: self._show_update_result(attempt=0))
@@ -323,11 +298,6 @@ class DownloaderApp(ctk.CTk):
                 self.active_job_cancel.set()
             if self.update_cancel_event is not None:
                 self.update_cancel_event.set()
-        if self.capture_bridge is not None:
-            try:
-                self.capture_bridge.stop()
-            except Exception:
-                LOGGER.exception("Could not stop browser capture bridge")
         LOGGER.info(
             "App closing task_state=%s update_downloading=%s",
             self.task_state.value,
@@ -383,7 +353,7 @@ class DownloaderApp(ctk.CTk):
         brand = ctk.CTkFrame(top, fg_color="transparent")
         brand.grid(row=0, column=1, sticky="w")
         ctk.CTkLabel(brand, text="MEDIA DOWNLOADER", text_color=TEXT, font=("Segoe UI Semibold", 13)).pack(anchor="w")
-        ctk.CTkLabel(brand, text="YOUTUBE • FACEBOOK • INSTAGRAM", text_color=MUTED, font=("Segoe UI", 9)).pack(anchor="w")
+        ctk.CTkLabel(brand, text="PASTE LINK • DOWNLOAD • EDIT", text_color=MUTED, font=("Segoe UI", 9)).pack(anchor="w")
 
         self.top_update_button = ctk.CTkButton(
             top,
@@ -400,38 +370,6 @@ class DownloaderApp(ctk.CTk):
         self.top_update_button.grid(row=0, column=2, padx=(12, 0))
         self.top_update_button.grid_remove()
 
-        self.downloader_nav_button = ctk.CTkButton(
-            top,
-            text="Downloader",
-            width=92,
-            height=30,
-            corner_radius=9,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 9),
-            command=self.show_downloader_view,
-        )
-        self.downloader_nav_button.grid(row=0, column=3, padx=(12, 0))
-
-        self.browser_capture_button = ctk.CTkButton(
-            top,
-            text="Capture",
-            width=82,
-            height=30,
-            corner_radius=9,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 9),
-            command=self.open_browser_capture,
-        )
-        self.browser_capture_button.grid(row=0, column=4, padx=(8, 0))
-
         ctk.CTkButton(
             top,
             text="History",
@@ -445,7 +383,7 @@ class DownloaderApp(ctk.CTk):
             text_color=TEXT,
             font=("Segoe UI Semibold", 9),
             command=self.open_history,
-        ).grid(row=0, column=5, padx=(8, 0))
+        ).grid(row=0, column=3, padx=(12, 0))
 
         ctk.CTkButton(
             top,
@@ -460,7 +398,7 @@ class DownloaderApp(ctk.CTk):
             text_color=TEXT,
             font=("Segoe UI Semibold", 9),
             command=self.open_settings,
-        ).grid(row=0, column=6, padx=(8, 0))
+        ).grid(row=0, column=4, padx=(8, 0))
 
         ctk.CTkLabel(
             top,
@@ -470,7 +408,7 @@ class DownloaderApp(ctk.CTk):
             fg_color=SURFACE_2,
             text_color=CYAN,
             font=("Segoe UI Semibold", 10),
-        ).grid(row=0, column=7, padx=(12, 24))
+        ).grid(row=0, column=5, padx=(12, 24))
 
     def _build_hero(self) -> None:
         hero = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -481,7 +419,7 @@ class DownloaderApp(ctk.CTk):
         )
         ctk.CTkLabel(
             hero,
-            text="Download public videos and audio from YouTube, Facebook and Instagram.",
+            text="Paste a public media link, download video or audio, then edit it locally.",
             text_color=MUTED,
             font=("Segoe UI", 13),
         ).grid(row=1, column=0, sticky="w", pady=(5, 0))
@@ -1261,7 +1199,6 @@ class DownloaderApp(ctk.CTk):
         self.active_job_cancel = None
         self.active_download_request_id = None
         self._set_busy(False)
-        self._refresh_capture_panel()
         self.after(40, self._start_next_queued_download)
 
     def cancel_current_job(self) -> None:
@@ -1317,7 +1254,7 @@ class DownloaderApp(ctk.CTk):
         url = self.url_var.get().strip()
         platform = detect_platform(url)
         if not platform:
-            messagebox.showerror(APP_NAME, "Please paste a valid YouTube, Facebook or Instagram URL.")
+            messagebox.showerror(APP_NAME, "Please paste a valid http:// or https:// media URL.")
             return
 
         job_id, cancel_event = self._begin_job(TaskState.ANALYZING)
@@ -1351,7 +1288,7 @@ class DownloaderApp(ctk.CTk):
                     self._put_job_event(
                         "status",
                         job_id,
-                        f"Facebook connection attempt {index}/{len(attempts)}…",
+                        f"Connection attempt {index}/{len(attempts)}…",
                     )
                 try:
                     with yt_dlp.YoutubeDL(
@@ -1411,8 +1348,8 @@ class DownloaderApp(ctk.CTk):
             self._put_job_event(
                 "error",
                 job_id,
-                "Could not read this media link after trying the available connection paths. "
-                "Public links work best; private or login-required content is not supported.\n\n"
+                "Could not extract media from this URL after trying the available connection paths. "
+                "The page may require login, use DRM, block automated access, or use a player yt-dlp does not support yet.\n\n"
                 + str(exc),
             )
         finally:
@@ -1471,7 +1408,6 @@ class DownloaderApp(ctk.CTk):
             "source_url": url,
         }
         request = self.download_queue.enqueue(
-            "link",
             {
                 "url": url,
                 "name": name,
@@ -1564,7 +1500,7 @@ class DownloaderApp(ctk.CTk):
                     self._put_job_event(
                         "status",
                         job_id,
-                        f"Facebook download connection {index}/{len(attempts)}…",
+                        f"Download connection {index}/{len(attempts)}…",
                     )
                 attempt_opts = {**opts, **network_options}
                 try:
@@ -1660,7 +1596,6 @@ class DownloaderApp(ctk.CTk):
                 percent / 100.0,
                 progress_detail,
             )
-            self._schedule_capture_panel_refresh(220)
         self._set_status(f"Downloading… {percent:.1f}%", "working")
 
     def _drain_events(self) -> None:
@@ -1771,7 +1706,6 @@ class DownloaderApp(ctk.CTk):
                             self.active_download_request_id,
                             detail=completed_path.name,
                         )
-                    self._refresh_capture_panel()
                     self._finish_job(job_id)
                     if should_edit:
                         self.after(200, lambda path=completed_path: self.open_editor(path))
@@ -1782,14 +1716,10 @@ class DownloaderApp(ctk.CTk):
                     self.speed_label.configure(text="")
                     self.edit_after_download = False
                     LOGGER.error("Job %s failed: %s", job_id, data)
-                    active_request = self.download_queue.active()
-                    is_capture_error = bool(active_request and active_request.source_type == "capture")
                     if self.active_download_request_id:
                         self.download_queue.fail(self.active_download_request_id, str(data or "Download failed"))
-                    self._refresh_capture_panel()
                     self._finish_job(job_id)
-                    if not is_capture_error:
-                        messagebox.showerror(APP_NAME, str(data))
+                    messagebox.showerror(APP_NAME, str(data))
 
                 elif kind == "cancelled":
                     self.task_state = TaskState.CANCELLED
@@ -1798,51 +1728,12 @@ class DownloaderApp(ctk.CTk):
                     self._set_status(str(data or "Task cancelled"), "cancelled")
                     if self.active_download_request_id:
                         self.download_queue.cancel(self.active_download_request_id)
-                    self._refresh_capture_panel()
                     self._finish_job(job_id)
 
                 elif kind in {"analysis_finished", "download_finished"}:
                     # Safety net only. Success/error/cancel normally finish the
                     # job first; stale final events are ignored by job_id.
                     self._finish_job(job_id)
-
-                elif kind == "browser_capture":
-                    capture = dict(payload or {})
-                    browser_action = str(capture.pop("_browser_action", "") or "")
-                    self._sync_browser_capture_button()
-                    self._start_capture_quality_probe(capture)
-                    self._schedule_capture_panel_refresh(80)
-
-                    if browser_action == "download":
-                        host = capture_host(capture) or "browser"
-                        self.show_browser_capture_view()
-                        self.start_captured_download(capture)
-                        self._set_status(
-                            f"Browser download queued • {str(capture.get('quality_label') or capture.get('kind') or 'media')} • {host}",
-                            "working" if self.is_busy else "ready",
-                        )
-                    elif not self.is_busy:
-                        host = capture_host(capture) or "browser"
-                        self._set_status(
-                            f"Browser media captured • {str(capture.get('kind') or 'media').upper()} • {host}",
-                            "ready",
-                        )
-
-                elif kind == "capture_quality":
-                    result = dict(payload or {})
-                    capture_id = str(result.get("capture_id") or "")
-                    metadata = dict(result.get("metadata") or {})
-                    self._capture_quality_inflight.discard(capture_id)
-                    if capture_id:
-                        self.capture_store.update_metadata(capture_id, metadata)
-                    self._sync_browser_capture_button()
-                    self._schedule_capture_panel_refresh(80)
-
-                elif kind == "browser_capture_error":
-                    self._sync_browser_capture_button()
-                    LOGGER.error("Browser capture bridge error: %s", payload)
-                    if not self.is_busy:
-                        self._set_status("Browser Capture is offline", "error")
 
                 elif kind == "update_available":
                     self._handle_update_available(payload)
@@ -2273,243 +2164,14 @@ class DownloaderApp(ctk.CTk):
         self.top_update_button.grid_remove()
         self.update_detail_label.configure(text="Update reminder snoozed for 24 hours.")
 
-    def _browser_extension_dir(self) -> Path | None:
-        if getattr(sys, "frozen", False):
-            candidate = Path(sys.executable).resolve().parent / "browser_extension"
-        else:
-            candidate = Path(__file__).resolve().parent / "browser_extension"
-        return candidate if candidate.exists() else None
-
-    def _start_browser_capture_bridge(self) -> None:
-        token = str(self.settings.get("browser_capture_token") or "").strip()
-        if not token:
-            token = generate_capture_token()
-            self.settings["browser_capture_token"] = token
-            save_settings(self.settings)
-
-        try:
-            requested_port = int(self.settings.get("browser_capture_port") or DEFAULT_CAPTURE_PORT)
-        except (TypeError, ValueError):
-            requested_port = DEFAULT_CAPTURE_PORT
-
-        try:
-            bridge = BrowserCaptureBridge(
-                self.capture_store,
-                token,
-                port=requested_port,
-                on_capture=lambda item: self.events.put(("browser_capture", item)),
-            )
-            actual_port = bridge.start()
-            self.capture_bridge = bridge
-            if actual_port != requested_port:
-                self.settings["browser_capture_port"] = actual_port
-                save_settings(self.settings)
-            LOGGER.info("Browser capture bridge started on 127.0.0.1:%s", actual_port)
-        except Exception as exc:
-            self.capture_bridge = None
-            LOGGER.exception("Browser capture bridge could not start")
-            self.events.put(("browser_capture_error", str(exc)))
-        self._sync_browser_capture_button()
-
-    def _sync_browser_capture_button(self) -> None:
-        if not hasattr(self, "browser_capture_button"):
-            return
-        count = len(self.capture_store.list())
-        running = bool(self.capture_bridge and self.capture_bridge.running)
-        label = f"Capture ({count})" if count else "Capture"
-        self.browser_capture_button.configure(
-            text=label,
-            text_color=TEXT if running else WARNING,
-            border_color=PURPLE if self.current_view == "capture" else (BORDER if running else "#5B4616"),
-        )
-        self._sync_nav_buttons()
-
-    def _regenerate_browser_capture_token(self) -> str:
-        token = generate_capture_token()
-        self.settings["browser_capture_token"] = token
-        save_settings(self.settings)
-        if self.capture_bridge is not None:
-            self.capture_bridge.token = token
-        LOGGER.info("Browser capture pairing token regenerated")
-        return token
-
-    def _build_browser_capture_panel(self) -> None:
-        if self.browser_capture_panel is not None:
-            return
-        self.browser_capture_panel = BrowserCapturePanel(
-            self,
-            store=self.capture_store,
-            get_bridge=lambda: self.capture_bridge,
-            get_pairing=self._browser_capture_pairing,
-            extension_dir=self._browser_extension_dir(),
-            on_download=self.start_captured_download,
-            on_cancel=self.cancel_capture_download,
-            on_remove=self._remove_browser_capture,
-            on_clear=self._clear_browser_captures,
-            get_job_state=self._capture_job_state,
-            get_queue_summary=self._queue_summary,
-            on_regenerate_token=self._regenerate_browser_capture_token,
-            on_open_release=self.open_release_page,
-        )
-        self.browser_capture_panel.grid(row=1, column=0, sticky="nsew")
-        self.browser_capture_panel.grid_remove()
-        self.browser_capture_panel.refresh()
-
-    def _browser_capture_pairing(self) -> str:
-        bridge = self.capture_bridge
-        if bridge is None or not bridge.running:
-            return ""
-        token = str(self.settings.get("browser_capture_token") or "")
-        return f"{bridge.port}|{token}" if token else ""
-
-    def show_downloader_view(self) -> None:
-        self.current_view = "downloader"
-        if self.browser_capture_panel is not None:
-            self.browser_capture_panel.grid_remove()
-        self.content.grid()
-        self._sync_nav_buttons()
-        try:
-            self.url_entry.focus_set()
-        except Exception:
-            pass
-
-    def show_browser_capture_view(self) -> None:
-        self.current_view = "capture"
-        self.content.grid_remove()
-        if self.browser_capture_panel is not None:
-            self.browser_capture_panel.grid()
-            self.browser_capture_panel.refresh()
-        self._sync_nav_buttons()
-
-    def _sync_nav_buttons(self) -> None:
-        selected_bg = PURPLE
-        normal_bg = SURFACE_2
-        if hasattr(self, "downloader_nav_button"):
-            active = self.current_view == "downloader"
-            self.downloader_nav_button.configure(
-                fg_color=selected_bg if active else normal_bg,
-                border_color=PURPLE if active else BORDER,
-            )
-        if hasattr(self, "browser_capture_button"):
-            active = self.current_view == "capture"
-            self.browser_capture_button.configure(
-                fg_color=selected_bg if active else normal_bg,
-                border_color=PURPLE if active else BORDER,
-            )
-
-    def open_browser_capture(self) -> None:
-        self.show_browser_capture_view()
-
-    def _capture_job_state(self, capture_id: str) -> dict[str, Any] | None:
-        return self.download_queue.latest_for_capture(capture_id)
-
-    def _queue_summary(self) -> tuple[int, int]:
-        return self.download_queue.queued_count(), self.download_queue.running_count()
-
-    def _refresh_capture_panel(self) -> None:
-        if self._capture_panel_refresh_after_id is not None:
-            try:
-                self.after_cancel(self._capture_panel_refresh_after_id)
-            except Exception:
-                pass
-            self._capture_panel_refresh_after_id = None
-
-        panel = self.browser_capture_panel
-        if panel is None:
-            return
-        try:
-            if panel.winfo_exists():
-                panel.refresh()
-        except Exception:
-            LOGGER.exception("Could not refresh Browser Capture panel")
-
-    def _schedule_capture_panel_refresh(self, delay_ms: int = 220) -> None:
-        if self._capture_panel_refresh_after_id is not None:
-            return
-
-        def run() -> None:
-            self._capture_panel_refresh_after_id = None
-            self._refresh_capture_panel()
-
-        self._capture_panel_refresh_after_id = self.after(max(40, int(delay_ms)), run)
-
-    def _start_capture_quality_probe(self, capture: dict[str, Any]) -> None:
-        capture_id = str(capture.get("id") or "")
-        kind = str(capture.get("kind") or "").lower()
-        if not capture_id or kind == "page" or capture_id in self._capture_quality_inflight:
-            return
-        existing = self.capture_store.get(capture_id) or capture
-        if str(existing.get("quality_status") or "") == "ready":
-            return
-
-        self._capture_quality_inflight.add(capture_id)
-        self.capture_store.update_metadata(
-            capture_id,
-            {"quality_status": "checking", "quality_label": "Checking…"},
-        )
-        threading.Thread(
-            target=self._capture_quality_worker,
-            args=(capture_id, dict(existing)),
-            daemon=True,
-            name=f"capture-quality-{capture_id[:8]}",
-        ).start()
-
-    def _capture_quality_worker(self, capture_id: str, capture: dict[str, Any]) -> None:
-        metadata = inspect_capture_quality(capture)
-        self.events.put(
-            (
-                "capture_quality",
-                {"capture_id": capture_id, "metadata": metadata},
-            )
-        )
-
-    def _remove_browser_capture(self, capture_id: str) -> None:
-        state = self._capture_job_state(capture_id) or {}
-        if state.get("status") in {"queued", "running"}:
-            return
-        self.capture_store.remove(capture_id)
-        self._sync_browser_capture_button()
-        self._refresh_capture_panel()
-
-    def _clear_browser_captures(self) -> None:
-        active_capture_ids = {
-            str(item.get("capture_id") or "")
-            for item in self.download_queue.snapshot()
-            if item.get("status") in {"queued", "running"} and item.get("capture_id")
-        }
-        for item in self.capture_store.list():
-            capture_id = str(item.get("id") or "")
-            if capture_id and capture_id not in active_capture_ids:
-                self.capture_store.remove(capture_id)
-        self._sync_browser_capture_button()
-        self._refresh_capture_panel()
-
-    def cancel_capture_download(self, capture_id: str) -> None:
-        state = self._capture_job_state(capture_id) or {}
-        request_id = str(state.get("id") or "")
-        if not request_id:
-            return
-        if state.get("status") == "running" and request_id == self.active_download_request_id:
-            self.cancel_current_job()
-            return
-        if state.get("status") == "queued":
-            self.download_queue.cancel(request_id)
-            self._refresh_capture_panel()
-            self._set_status("Queued captured download cancelled", "cancelled")
-
     def _start_next_queued_download(self) -> None:
         if self.is_busy or self.active_job_id is not None:
             return
         request = self.download_queue.start_next()
         if request is None:
-            self._refresh_capture_panel()
             return
         self.active_download_request_id = request.id
-        if request.source_type == "capture":
-            self._start_captured_request(request)
-        else:
-            self._start_link_request(request)
-        self._refresh_capture_panel()
+        self._start_link_request(request)
 
     def _start_link_request(self, request: DownloadRequest) -> None:
         payload = dict(request.payload or {})
@@ -2538,171 +2200,6 @@ class DownloaderApp(ctk.CTk):
             daemon=True,
             name=f"link-download-{job_id}",
         ).start()
-
-    def _start_captured_request(self, request: DownloadRequest) -> None:
-        payload = dict(request.payload or {})
-        item = dict(payload.get("capture") or {})
-        raw_candidates = payload.get("fallback_captures")
-        candidates = [
-            dict(candidate)
-            for candidate in raw_candidates
-            if isinstance(candidate, dict)
-        ] if isinstance(raw_candidates, list) else [item]
-        if not candidates:
-            candidates = [item]
-        title = str(payload.get("title") or item.get("title") or "Captured media")
-        host = capture_host(item) or "media host"
-
-        job_id, cancel_event = self._begin_job(TaskState.DOWNLOADING)
-        self.active_download_request_id = request.id
-        self.edit_after_download = bool(request.edit_after_download)
-        self.progress.set(0)
-        self.progress_label.configure(text="0%")
-        quality = str(item.get("quality_label") or item.get("height") or str(item.get("kind") or "media").upper())
-        self.speed_label.configure(text=f"{quality} • {host}")
-        self._set_status(f"Downloading best available capture from {host}…", "working")
-        self._set_busy(True)
-        threading.Thread(
-            target=self._captured_download_worker,
-            args=(job_id, cancel_event, candidates, title),
-            daemon=True,
-            name=f"captured-download-{job_id}",
-        ).start()
-
-    def start_captured_download(self, capture: dict[str, Any], edit_after_download: bool = False) -> None:
-        clicked_item = dict(capture or {})
-        all_captures = self.capture_store.list()
-        candidates = related_capture_candidates(all_captures, clicked_item)
-        item = dict(candidates[0]) if candidates else select_best_capture(all_captures, clicked_item)
-        capture_id = str(item.get("id") or clicked_item.get("id") or "")
-        title = str(clicked_item.get("title") or item.get("title") or "Captured media")
-        if str(item.get("id") or "") != str(clicked_item.get("id") or ""):
-            LOGGER.info(
-                "Auto-selected higher quality capture clicked=%s selected=%s quality=%s",
-                clicked_item.get("id"),
-                item.get("id"),
-                item.get("quality_label") or item.get("height") or "auto",
-            )
-        request = self.download_queue.enqueue(
-            "capture",
-            {
-                "capture": item,
-                "fallback_captures": candidates,
-                "title": title,
-            },
-            edit_after_download=bool(edit_after_download),
-            capture_id=capture_id,
-        )
-        LOGGER.info("Queued captured download request=%s capture=%s", request.id, capture_id)
-        self._refresh_capture_panel()
-        if self.is_busy:
-            position = self.download_queue.position(request.id)
-            self._set_status(f"Captured video queued • position {position}", "ready")
-        self._start_next_queued_download()
-
-    def _captured_download_worker(
-        self,
-        job_id: int,
-        cancel_event: threading.Event,
-        captures: list[dict[str, Any]],
-        title: str,
-    ) -> None:
-        candidates = [dict(item) for item in captures if isinstance(item, dict)]
-        if not candidates:
-            self._put_job_event("error", job_id, "No usable captured stream is available.")
-            self._put_job_event("download_finished", job_id, None)
-            return
-
-        last_error: Exception | None = None
-        used_capture: dict[str, Any] | None = None
-        path: Path | None = None
-
-        for index, capture in enumerate(candidates, start=1):
-            if cancel_event.is_set():
-                self._put_job_event("cancelled", job_id, "Captured media download cancelled")
-                self._put_job_event("download_finished", job_id, None)
-                return
-
-            quality = str(capture.get("quality_label") or "")
-            if not quality:
-                height = int(capture.get("height") or 0)
-                quality = f"{height}p" if height else str(capture.get("kind") or "media").upper()
-            prefix = f"Trying {quality} ({index}/{len(candidates)})"
-
-            def progress(ratio: float, detail: str, *, _prefix: str = prefix) -> None:
-                message = _prefix
-                if detail:
-                    message += f" • {detail}"
-                self._put_job_event(
-                    "progress",
-                    job_id,
-                    {
-                        "percent": max(0.0, min(100.0, float(ratio) * 100.0)),
-                        "detail": message,
-                    },
-                )
-
-            attempt_started = time.time()
-            try:
-                self._put_job_event("status", job_id, prefix)
-                path = download_captured_media(
-                    capture,
-                    self.download_dir,
-                    base_name=title,
-                    cancel_event=cancel_event,
-                    on_progress=progress,
-                )
-                used_capture = capture
-                break
-            except CaptureDownloadCancelled:
-                self._put_job_event("cancelled", job_id, "Captured media download cancelled")
-                self._put_job_event("download_finished", job_id, None)
-                return
-            except Exception as exc:
-                last_error = exc
-                LOGGER.warning(
-                    "Captured candidate failed job=%s attempt=%s/%s kind=%s quality=%s error=%s",
-                    job_id,
-                    index,
-                    len(candidates),
-                    capture.get("kind"),
-                    quality,
-                    str(exc),
-                )
-                cleanup_failed_capture_parts(self.download_dir, title, attempt_started)
-                continue
-
-        try:
-            if path is None or used_capture is None:
-                raise last_error or RuntimeError("No captured stream candidate could be downloaded.")
-            if cancel_event.is_set():
-                raise CaptureDownloadCancelled("Captured media download cancelled.")
-
-            self._put_job_event(
-                "done",
-                job_id,
-                {
-                    "path": str(path),
-                    "title": title,
-                    # Store the page URL in History, never the signed media URL.
-                    "source_url": str(used_capture.get("page_url") or ""),
-                    "platform": capture_host(used_capture, prefer_page=True) or capture_host(used_capture) or "browser",
-                    "creator": "",
-                    "mode": capture_media_mode(used_capture),
-                    "quality": str(used_capture.get("quality_label") or used_capture.get("kind") or "captured"),
-                    "duration_seconds": int(used_capture.get("duration_seconds") or 0),
-                },
-            )
-        except CaptureDownloadCancelled:
-            self._put_job_event("cancelled", job_id, "Captured media download cancelled")
-        except Exception as exc:
-            self._put_job_event(
-                "error",
-                job_id,
-                f"All detected stream candidates failed.\n\n{str(exc) or exc.__class__.__name__}",
-            )
-        finally:
-            self._put_job_event("download_finished", job_id, None)
 
     def _sync_recent_file(self) -> None:
         recent = self.history_store.most_recent_existing()
