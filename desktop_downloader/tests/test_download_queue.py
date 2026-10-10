@@ -43,6 +43,36 @@ class DownloadQueueTests(unittest.TestCase):
         self.assertEqual(queue.get(request.id)["status"], "cancelled")
         self.assertEqual(queue.running_count(), 0)
 
+    def test_failed_download_can_be_retried_with_same_payload(self) -> None:
+        queue = DownloadQueue(max_concurrent=1)
+        request = queue.enqueue({
+            "url": "https://example.com/failed",
+            "name": "Retry Me",
+            "cached_info": {"id": "abc", "formats": [{"url": "https://cdn.example/video.mp4"}]},
+        })
+        queue.start_available()
+        queue.fail(request.id, "temporary network error")
+
+        failed = queue.get(request.id)
+        self.assertEqual(failed["status"], "failed")
+        self.assertTrue(failed["error"])
+
+        self.assertTrue(queue.retry(request.id))
+        queued = queue.get(request.id)
+        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(queued["progress"], 0.0)
+        self.assertEqual(queued["error"], "")
+        self.assertEqual(queue.queued_count(), 1)
+
+        restarted = queue.start_available()
+        self.assertEqual(restarted[0].id, request.id)
+        self.assertEqual(restarted[0].payload["cached_info"]["id"], "abc")
+
+    def test_retry_rejects_non_failed_download(self) -> None:
+        queue = DownloadQueue(max_concurrent=1)
+        request = queue.enqueue({"url": "https://example.com/1", "name": "Queued"})
+        self.assertFalse(queue.retry(request.id))
+
     def test_queued_download_can_be_cancelled_immediately(self) -> None:
         queue = DownloadQueue(max_concurrent=1)
         first = queue.enqueue({"url": "https://example.com/1", "name": "One"})

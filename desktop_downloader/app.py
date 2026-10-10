@@ -1429,6 +1429,19 @@ class DownloaderApp(ctk.CTk):
                     state="disabled" if status == "cancelling" else "normal",
                 )
                 button.grid(row=1, column=1, rowspan=2, sticky="e", padx=(0, 12), pady=(0, 8))
+            elif status == "failed":
+                button = ctk.CTkButton(
+                    row,
+                    text="Retry",
+                    width=72,
+                    height=29,
+                    corner_radius=8,
+                    fg_color=PURPLE,
+                    hover_color=PURPLE_HOVER,
+                    text_color="#FFFFFF",
+                    command=lambda rid=request_id: self.retry_download(rid),
+                )
+                button.grid(row=1, column=1, rowspan=2, sticky="e", padx=(0, 12), pady=(0, 8))
 
     def analyze_media(self) -> None:
         self._cancel_auto_analyze()
@@ -2528,6 +2541,17 @@ class DownloaderApp(ctk.CTk):
             ).start()
 
         self._schedule_download_activity_refresh(20)
+
+    def retry_download(self, request_id: str) -> None:
+        if not self.download_queue.retry(request_id):
+            self._set_status("This failed download could not be retried.", "error")
+            self._schedule_download_activity_refresh(20)
+            return
+
+        LOGGER.info("Retry queued request=%s", request_id)
+        self._set_status("Retry added to download queue", "ready")
+        self._schedule_download_activity_refresh(20)
+        self._start_available_downloads()
 
     def cancel_download(self, request_id: str) -> None:
         state = self.download_queue.request_cancel(request_id)

@@ -95,3 +95,10 @@ When normal yt-dlp extraction fails because a site resets Python/OpenSSL connect
 The fallback launches a temporary headless browser session for the pasted URL, watches network responses for direct video/audio, HLS and DASH media, and returns those media URLs to the normal download queue. The temporary browser profile is deleted when analysis finishes.
 
 This keeps the product workflow unchanged: **paste link → analyze → download → edit**. It does not reintroduce the removed browser extension or overlay system, and it does not bypass DRM.
+
+
+## v3.9.5 retry failed downloads
+
+Failed items in **Download Activity** now show a **Retry** button.
+
+Retry keeps the original URL, filename, output folder, selected video/audio settings, and cached analyzed media data. The failed item is reset to queued state and immediately starts again when a download slot is available. Existing successful or active downloads are not affected.

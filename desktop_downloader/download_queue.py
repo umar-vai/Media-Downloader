@@ -122,6 +122,24 @@ class DownloadQueue:
         with self._lock:
             self._finish_locked(request_id, "failed", error=error, detail="Download failed")
 
+    def retry(self, request_id: str) -> bool:
+        """Move a failed download back to the queue using its original payload."""
+        with self._lock:
+            request = self._find_locked(request_id)
+            if request is None or request.status != "failed":
+                return False
+            if request.id in self._active_ids or request.id in self._pending:
+                return False
+
+            request.status = "queued"
+            request.progress = 0.0
+            request.detail = "Retry queued"
+            request.error = ""
+            request.started_at = 0.0
+            request.finished_at = 0.0
+            self._pending.append(request.id)
+            return True
+
     def request_cancel(self, request_id: str) -> str:
         with self._lock:
             request = self._find_locked(request_id)
