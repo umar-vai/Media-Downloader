@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -34,6 +36,52 @@ class JobManagerTests(unittest.TestCase):
         self.assertEqual(state["result"]["title"], "Demo")
         self.assertNotIn("cached_info", state)
 
+
+    @patch("hybrid_core.jobs.download_from_analysis")
+    def test_completed_download_history_survives_restart(self, mocked_download):
+        with tempfile.TemporaryDirectory() as folder:
+            state_file = Path(folder) / "jobs.json"
+            output = Path(folder) / "video.mp4"
+            output.write_bytes(b"demo")
+            mocked_download.return_value = output
+
+            manager = JobManager(max_downloads=1, state_path=state_file)
+            analysis = manager._new("analysis", {"url": "https://example.com/video"})
+            analysis.status = "completed"
+            analysis.private["cached_info"] = {"formats": [{"url": "https://cdn.example/video.mp4"}]}
+
+            download = manager.start_download(
+                analysis_id=analysis.id,
+                mode="Video",
+                video_quality="720p",
+                audio_format="MP3",
+                audio_quality="192",
+                filename="video",
+                download_dir=folder,
+            )
+
+            for _ in range(100):
+                state = manager.snapshot(download.id)
+                if state and state["status"] == "completed":
+                    break
+                time.sleep(0.01)
+
+            restored = JobManager(max_downloads=1, state_path=state_file)
+            items = restored.list_kind("download")
+            self.assertEqual(items[0]["status"], "completed")
+            self.assertEqual(items[0]["result"]["filename"], "video.mp4")
+
+    def test_interrupted_download_is_restored_as_retryable_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state_file = Path(folder) / "jobs.json"
+            state_file.write_text(
+                '{"version":1,"jobs":[{"id":"abc","kind":"download","status":"running","progress":0.4,"detail":"Downloading","error":"","created_at":1,"updated_at":2,"request":{"url":"https://example.com/a","filename":"a"},"result":{}}]}',
+                encoding="utf-8",
+            )
+            restored = JobManager(max_downloads=1, state_path=state_file)
+            state = restored.snapshot("abc")
+            self.assertEqual(state["status"], "failed")
+            self.assertIn("Retry", state["error"])
 
 if __name__ == "__main__":
     unittest.main()

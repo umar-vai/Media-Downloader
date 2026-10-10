@@ -83,12 +83,19 @@ The browser UI never uploads the user's media to a cloud server in local mode.
 - Desktop compatibility modules are thin import shims; extraction logic has one source of truth.
 - Shared engine has its own CI/unit tests.
 
+### Phase 2B — Persistence + local system integration ✅
+
+- Download activity/history is persisted to an atomic JSON state file across Local Core restarts.
+- Interrupted queued/running downloads are restored as failed/retryable items instead of disappearing.
+- Retry after restart refreshes media information when the old signed/cached format data is no longer in memory.
+- Added a native Windows folder picker endpoint and PWA **Choose folder** control.
+- Added structured rotating JSONL logs and a diagnostics API/PWA panel.
+- Diagnostics expose core version, Python/platform, proxy route, installed-browser resolver, FFmpeg, state path and job counts.
+
 ### Remaining Phase 2 work
 
-- Persist download queue/history across core restarts.
-- Native folder picker endpoint.
-- Agent diagnostics and structured logs.
 - Auto-update only the local core when engine changes.
+- Package/refine persistent settings separately from the legacy desktop settings.
 
 ## Phase 3 — Web editor
 

@@ -35,6 +35,9 @@ jobs:
           python -m py_compile media_core/browser_resolver.py
           python -m py_compile media_core/engine.py
           python -m py_compile hybrid_core/engine.py
+          python -m py_compile hybrid_core/state_store.py
+          python -m py_compile hybrid_core/logging_setup.py
+          python -m py_compile hybrid_core/version.py
           python -m py_compile hybrid_core/jobs.py
           python -m py_compile hybrid_core/server.py
           python -m py_compile hybrid_core/launcher.py

@@ -62,7 +62,10 @@
           <label>Custom filename</label>
           <input id="filenameInput" placeholder="media_download" />
           <label>Save location</label>
-          <input id="downloadDirInput" />
+          <div class="folder-row">
+            <input id="downloadDirInput" />
+            <button id="chooseFolderBtn" class="secondary">Choose folder</button>
+          </div>
         </div>
         <div class="settings-panel">
           <label>Video quality</label>
@@ -83,6 +86,17 @@
       <div id="downloadsList" class="downloads-list">
         <div class="empty">No downloads yet.</div>
       </div>
+    </section>
+
+    <section class="card compact-card">
+      <div class="downloads-head">
+        <div class="section-head"><span>04 / LOCAL CORE</span><h2>Diagnostics</h2></div>
+        <div class="diag-actions">
+          <button id="refreshDiagnosticsBtn" class="secondary">Refresh</button>
+          <button id="openLogBtn" class="secondary">Open log</button>
+        </div>
+      </div>
+      <pre id="diagnosticsBox" class="diagnostics-box">Diagnostics not loaded yet.</pre>
     </section>
 
     <footer>Media stays local. No browser extension is required.</footer>

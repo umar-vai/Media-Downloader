@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .engine import Cancelled, analyze_url, download_from_analysis
+from .state_store import JsonStateStore
 
 
 TERMINAL = {"completed", "failed", "cancelled"}
@@ -49,7 +51,13 @@ class Job:
 
 
 class JobManager:
-    def __init__(self, *, max_downloads: int = 3) -> None:
+    def __init__(
+        self,
+        *,
+        max_downloads: int = 3,
+        state_path: Path | None = None,
+        logger: logging.Logger | None = None,
+    ) -> None:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.RLock()
         self._analysis_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hybrid-analysis")
@@ -57,11 +65,63 @@ class JobManager:
             max_workers=max(1, min(6, int(max_downloads))),
             thread_name_prefix="hybrid-download",
         )
+        self._store = JsonStateStore(state_path) if state_path is not None else None
+        self._logger = logger or logging.getLogger("media_downloader.hybrid")
+        self._restore()
+
+    def _restore(self) -> None:
+        if self._store is None:
+            return
+        restored = 0
+        for item in self._store.load():
+            kind = str(item.get("kind") or "")
+            if kind != "download":
+                continue
+            status = str(item.get("status") or "failed")
+            if status in {"queued", "running", "cancelling"}:
+                status = "failed"
+                item["detail"] = "Interrupted by Local Core restart"
+                item["error"] = (
+                    "The previous Local Core session ended before this download finished. "
+                    "Press Retry to continue."
+                )
+            job = Job(
+                id=str(item.get("id") or uuid.uuid4().hex),
+                kind="download",
+                status=status,
+                progress=float(item.get("progress") or 0.0),
+                detail=str(item.get("detail") or ""),
+                error=str(item.get("error") or ""),
+                created_at=float(item.get("created_at") or time.time()),
+                updated_at=float(item.get("updated_at") or time.time()),
+                request=dict(item.get("request") or {}),
+                result=dict(item.get("result") or {}),
+            )
+            self._jobs[job.id] = job
+            restored += 1
+        if restored:
+            self._logger.info("restored_download_jobs count=%s", restored)
+            self._persist()
+
+    def _persist(self) -> None:
+        if self._store is None:
+            return
+        with self._lock:
+            downloads = [
+                job.snapshot()
+                for job in sorted(self._jobs.values(), key=lambda item: item.created_at)[-120:]
+                if job.kind == "download"
+            ]
+        try:
+            self._store.save(downloads)
+        except Exception:
+            self._logger.exception("could_not_persist_jobs")
 
     def _new(self, kind: str, request: dict[str, Any]) -> Job:
         job = Job(id=uuid.uuid4().hex, kind=kind, request=dict(request))
         with self._lock:
             self._jobs[job.id] = job
+        self._persist()
         return job
 
     def get(self, job_id: str) -> Job | None:
@@ -103,6 +163,7 @@ class JobManager:
             if result is not None:
                 job.result = result
             job.updated_at = time.time()
+        self._persist()
 
     def start_analysis(self, url: str) -> Job:
         job = self._new("analysis", {"url": url})
@@ -160,9 +221,19 @@ class JobManager:
     def _run_download(self, job: Job) -> None:
         self._set(job, status="running", detail="Starting download")
         try:
+            cached_info = job.private.get("cached_info")
+            if not isinstance(cached_info, dict) or not cached_info:
+                self._set(job, detail="Refreshing media information")
+                _public, cached_info = analyze_url(
+                    str(job.request.get("url") or ""),
+                    cancel_event=job.cancel_event,
+                    on_status=lambda text: self._set(job, detail=f"Refresh: {text}"),
+                )
+                job.private["cached_info"] = cached_info
+
             output = download_from_analysis(
                 url=str(job.request.get("url") or ""),
-                cached_info=dict(job.private.get("cached_info") or {}),
+                cached_info=dict(cached_info or {}),
                 download_dir=Path(str(job.request.get("download_dir") or "")),
                 filename=str(job.request.get("filename") or "media_download"),
                 mode=str(job.request.get("mode") or "Video"),

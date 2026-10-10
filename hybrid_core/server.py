@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import platform
 import secrets
+import sys
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -10,14 +12,26 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from imageio_ffmpeg import get_ffmpeg_exe
+
+from media_core.browser_resolver import find_browser
+from media_core.network import safe_proxy_label
+
 from .jobs import JobManager
+from .logging_setup import configure_logging
+from .version import CORE_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB_DIR = ROOT / "web_pwa"
 DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "Media Downloader"
+APP_DATA_DIR = Path(os.getenv("APPDATA") or Path.home()) / "MediaDownloader"
+STATE_FILE = APP_DATA_DIR / "hybrid-jobs.json"
+LOG_FILE = APP_DATA_DIR / "hybrid-core.log"
 CORE_KEY = secrets.token_urlsafe(32)
-MANAGER = JobManager(max_downloads=3)
+LOGGER = configure_logging(LOG_FILE)
+MANAGER = JobManager(max_downloads=3, state_path=STATE_FILE, logger=LOGGER)
+LOGGER.info("local_core_started version=%s", CORE_VERSION)
 
 app = FastAPI(
     title="Media Downloader Local Core",
@@ -45,6 +59,10 @@ class ConfigRequest(BaseModel):
     download_dir: str
 
 
+class FolderPickerRequest(BaseModel):
+    current_dir: str | None = None
+
+
 def require_key(
     x_media_core_key: Annotated[str | None, Header()] = None,
 ) -> None:
@@ -68,6 +86,7 @@ def health() -> dict[str, Any]:
         "ok": True,
         "service": "Media Downloader Local Core",
         "mode": "local-pwa",
+        "version": CORE_VERSION,
     }
 
 
@@ -77,6 +96,7 @@ def bootstrap() -> dict[str, Any]:
     return {
         "ok": True,
         "core_key": CORE_KEY,
+        "core_version": CORE_VERSION,
         "download_dir": str(DEFAULT_DOWNLOAD_DIR),
         "max_concurrent_downloads": 3,
         "capabilities": {
@@ -164,6 +184,66 @@ def open_downloads(payload: ConfigRequest) -> dict[str, Any]:
         os.startfile(str(directory))
         return {"ok": True}
     raise HTTPException(status_code=501, detail="Open folder is currently implemented for Windows.")
+
+
+@app.post("/api/system/choose-folder", dependencies=[Depends(require_key)])
+def choose_folder(payload: FolderPickerRequest) -> dict[str, Any]:
+    if os.name != "nt":
+        raise HTTPException(status_code=501, detail="Native folder picker is currently implemented for Windows.")
+
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        initial = str(Path(payload.current_dir).expanduser()) if payload.current_dir else str(DEFAULT_DOWNLOAD_DIR)
+        selected = filedialog.askdirectory(
+            parent=root,
+            initialdir=initial if Path(initial).exists() else str(Path.home()),
+            title="Choose Media Downloader save folder",
+            mustexist=True,
+        )
+        root.destroy()
+    except Exception as exc:
+        LOGGER.exception("folder_picker_failed")
+        raise HTTPException(status_code=500, detail=f"Could not open the folder picker: {exc}") from exc
+
+    return {"selected": str(selected or "")}
+
+
+@app.get("/api/diagnostics", dependencies=[Depends(require_key)])
+def diagnostics() -> dict[str, Any]:
+    downloads = MANAGER.list_kind("download", limit=120)
+    counts: dict[str, int] = {}
+    for item in downloads:
+        status = str(item.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+
+    browser = find_browser()
+    return {
+        "version": CORE_VERSION,
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "download_dir": str(DEFAULT_DOWNLOAD_DIR),
+        "state_file": str(STATE_FILE),
+        "log_file": str(LOG_FILE),
+        "browser": str(browser) if browser else "",
+        "ffmpeg": str(get_ffmpeg_exe()),
+        "network": safe_proxy_label(),
+        "download_counts": counts,
+    }
+
+
+@app.post("/api/system/open-log", dependencies=[Depends(require_key)])
+def open_log() -> dict[str, Any]:
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LOG_FILE.touch(exist_ok=True)
+    if os.name == "nt":
+        os.startfile(str(LOG_FILE))
+        return {"ok": True}
+    raise HTTPException(status_code=501, detail="Open log is currently implemented for Windows.")
 
 
 @app.get("/")

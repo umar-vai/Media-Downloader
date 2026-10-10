@@ -187,12 +187,13 @@ async function bootstrap() {
     const data = await api("/api/bootstrap");
     state.key = data.core_key;
     $("downloadDirInput").value = localStorage.getItem("media-download-dir") || data.download_dir;
-    $("coreBadge").textContent = "LOCAL CORE • READY";
+    $("coreBadge").textContent = `LOCAL CORE • v${data.core_version || "?"}`;
     $("coreBadge").classList.remove("offline");
     $("coreBadge").classList.add("ready");
     $("analysisStatus").textContent = "Ready for a media link.";
     setInterval(refreshDownloads, 900);
     refreshDownloads();
+    loadDiagnostics();
   } catch (error) {
     $("coreBadge").textContent = "CORE OFFLINE";
     $("analysisStatus").textContent = "Local Core is not available. Start Media Downloader Core.";
@@ -208,6 +209,44 @@ $("pasteBtn").addEventListener("click", async () => {
   try { $("urlInput").value = await navigator.clipboard.readText(); } catch {}
 });
 $("downloadDirInput").addEventListener("change", () => localStorage.setItem("media-download-dir", $("downloadDirInput").value.trim()));
+$("chooseFolderBtn").addEventListener("click", async () => {
+  try {
+    const data = await api("/api/system/choose-folder", {
+      method:"POST",
+      body:JSON.stringify({current_dir:$("downloadDirInput").value.trim() || null}),
+    });
+    if (data.selected) {
+      $("downloadDirInput").value = data.selected;
+      localStorage.setItem("media-download-dir", data.selected);
+    }
+  } catch (error) {
+    $("analysisStatus").textContent = error.message;
+  }
+});
+
+async function loadDiagnostics() {
+  try {
+    const data = await api("/api/diagnostics");
+    $("diagnosticsBox").textContent = [
+      `Core: v${data.version}`,
+      `Python: ${data.python}`,
+      `Platform: ${data.platform}`,
+      `Network: ${data.network}`,
+      `Browser resolver: ${data.browser || "Not found"}`,
+      `FFmpeg: ${data.ffmpeg}`,
+      `State: ${data.state_file}`,
+      `Log: ${data.log_file}`,
+      `Downloads: ${JSON.stringify(data.download_counts || {})}`,
+    ].join("\n");
+  } catch (error) {
+    $("diagnosticsBox").textContent = error.message;
+  }
+}
+$("refreshDiagnosticsBtn").addEventListener("click", loadDiagnostics);
+$("openLogBtn").addEventListener("click", async () => {
+  try { await api("/api/system/open-log", {method:"POST"}); }
+  catch (error) { $("analysisStatus").textContent = error.message; }
+});
 $("openDownloadsBtn").addEventListener("click", async () => {
   try {
     await api("/api/system/open-downloads", {
