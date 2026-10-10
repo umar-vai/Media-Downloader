@@ -32,6 +32,7 @@ from history_window import HistoryWindow
 from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
 from media_sources import detect_platform, extraction_attempts, platform_name, video_format_selector
+from browser_resolver import resolve_with_installed_browser
 from settings_window import SettingsWindow
 from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_installer_release, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
@@ -1289,7 +1290,7 @@ class DownloaderApp(ctk.CTk):
         self.media_badge.configure(text="ANALYSIS TIMEOUT", fg_color="#351722", text_color=DANGER)
         self.media_action_hint.configure(text="Press Analyze to retry, or paste another link.")
         self.task_state = TaskState.ERROR
-        self._set_status("Analysis timed out after 45 seconds", "error")
+        self._set_status("Analysis timed out after 60 seconds", "error")
         self._finish_analysis(job_id)
         LOGGER.warning("Analysis %s timed out url=%s", job_id, url)
 
@@ -1470,7 +1471,7 @@ class DownloaderApp(ctk.CTk):
             daemon=True,
             name=f"media-analysis-{job_id}",
         ).start()
-        self.after(45_000, lambda jid=job_id, source=url: self._analysis_watchdog(jid, source))
+        self.after(60_000, lambda jid=job_id, source=url: self._analysis_watchdog(jid, source))
 
     def _analyze_media_worker(self, job_id: int, cancel_event: threading.Event, url: str) -> None:
         try:
@@ -1518,9 +1519,25 @@ class DownloaderApp(ctk.CTk):
             if cancel_event.is_set():
                 self._put_analysis_event("analysis_cancelled", job_id, "Analysis cancelled.")
                 return
+            if not info and not cancel_event.is_set():
+                try:
+                    self._put_analysis_event(
+                        "analysis_status",
+                        job_id,
+                        "Trying installed-browser fallback…",
+                    )
+                    info = resolve_with_installed_browser(
+                        url,
+                        cancel_event=cancel_event,
+                        capture_seconds=12.0,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    attempt_errors.append(f"Installed browser: {str(exc).strip()}")
+
             if not info:
                 if attempt_errors:
-                    detail = "\n".join(attempt_errors[-4:])
+                    detail = "\n".join(attempt_errors[-5:])
                     raise RuntimeError("No compatible connection path succeeded.\n" + detail) from last_error
                 raise last_error or RuntimeError("No compatible connection path succeeded.")
 

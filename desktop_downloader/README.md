@@ -86,3 +86,12 @@ Version 3.9.0 separates link analysis from downloads. A completed or active down
 - The requested Video/Audio quality is still selected at download time from the cached format list.
 - If cached direct media URLs fail or expire, the app automatically falls back to the normal URL extraction paths.
 - Download Activity now labels those retries as **URL fallback 1/N** so it is clear when the app had to re-contact the website.
+
+
+## v3.9.4 installed-browser fallback
+
+When normal yt-dlp extraction fails because a site resets Python/OpenSSL connections, the app can now fall back internally to an installed Chromium browser (Chrome, Edge or Brave) without any browser extension.
+
+The fallback launches a temporary headless browser session for the pasted URL, watches network responses for direct video/audio, HLS and DASH media, and returns those media URLs to the normal download queue. The temporary browser profile is deleted when analysis finishes.
+
+This keeps the product workflow unchanged: **paste link → analyze → download → edit**. It does not reintroduce the removed browser extension or overlay system, and it does not bypass DRM.
