@@ -21,6 +21,20 @@ class CoreUpdaterTests(unittest.TestCase):
         self.assertEqual(stable["tag_name"], "core-v0.3.0")
         self.assertEqual(beta["tag_name"], "core-v0.4.0")
 
+    def test_can_apply_is_recorded_when_enabled(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from hybrid_core.core_updater import CoreUpdateService
+
+        with TemporaryDirectory() as folder:
+            service = CoreUpdateService(
+                current_version="0.7.0",
+                update_dir=Path(folder),
+                can_apply=True,
+            )
+            service._set(status="ready", staged_path="MediaDownloaderCore.exe", can_apply=service.can_apply)
+            self.assertTrue(service.snapshot()["can_apply"])
+
     def test_checksum_parser_matches_asset(self):
         digest = "a" * 64
         text = f"{digest}  MediaDownloaderCore.exe\n"

@@ -257,8 +257,22 @@
       <div class="toggle-row">
         <label><input id="autoUpdateCheck" type="checkbox" /> Check Local Core updates automatically</label>
         <label><input id="openBrowserCheck" type="checkbox" /> Open PWA when Local Core starts</label>
+        <label><input id="trayIconCheck" type="checkbox" /> Show Local Core tray icon</label>
+        <label><input id="launchAtLoginCheck" type="checkbox" /> Launch Local Core at Windows sign-in</label>
       </div>
       <p id="settingsStatus" class="status-text">Settings are stored locally on this computer.</p>
+
+      <div class="agent-panel">
+        <div>
+          <strong>Windows Local Core agent</strong>
+          <p id="agentStatus">Checking agent status…</p>
+        </div>
+        <div class="diag-actions">
+          <button id="openAgentAppBtn" class="secondary">Open app</button>
+          <button id="restartAgentBtn" class="secondary">Restart Core</button>
+          <button id="quitAgentBtn" class="secondary danger">Quit Core</button>
+        </div>
+      </div>
 
       <div class="update-panel">
         <div>
@@ -268,6 +282,7 @@
         <div class="diag-actions">
           <button id="checkCoreUpdateBtn" class="secondary">Check updates</button>
           <button id="downloadCoreUpdateBtn" class="secondary" disabled>Download update</button>
+          <button id="applyCoreUpdateBtn" class="primary" disabled>Apply & restart</button>
         </div>
       </div>
     </section>

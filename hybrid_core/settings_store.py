@@ -23,6 +23,8 @@ def default_settings(default_download_dir: Path) -> dict[str, Any]:
         "auto_check_core_updates": True,
         "update_channel": "stable",
         "open_browser_on_start": True,
+        "tray_icon_enabled": True,
+        "launch_at_login": False,
     }
 
 
@@ -54,6 +56,8 @@ def normalize_settings(payload: dict[str, Any] | None, default_download_dir: Pat
 
     settings["auto_check_core_updates"] = bool(settings.get("auto_check_core_updates", True))
     settings["open_browser_on_start"] = bool(settings.get("open_browser_on_start", True))
+    settings["tray_icon_enabled"] = bool(settings.get("tray_icon_enabled", True))
+    settings["launch_at_login"] = bool(settings.get("launch_at_login", False))
 
     channel = str(settings.get("update_channel") or "stable").lower()
     settings["update_channel"] = channel if channel in ALLOWED_UPDATE_CHANNELS else "stable"
@@ -90,7 +94,7 @@ class SettingsStore:
 
         restart_required = any(
             before.get(key) != normalized.get(key)
-            for key in ("max_concurrent_downloads", "open_browser_on_start")
+            for key in ("max_concurrent_downloads", "open_browser_on_start", "tray_icon_enabled")
         )
         return dict(normalized), restart_required
 

@@ -6,6 +6,7 @@ const state = {
   installPrompt: null,
   settings: {},
   updatePoll: null,
+  agent: {},
   downloads: {},
   editorInfo: null,
   editorExportId: "",
@@ -891,6 +892,8 @@ function renderSettings(settings = {}) {
   $("updateChannelSelect").value = settings.update_channel || "stable";
   $("autoUpdateCheck").checked = Boolean(settings.auto_check_core_updates);
   $("openBrowserCheck").checked = settings.open_browser_on_start !== false;
+  $("trayIconCheck").checked = settings.tray_icon_enabled !== false;
+  $("launchAtLoginCheck").checked = Boolean(settings.launch_at_login);
 
   $("audioFormatSelect").value = settings.audio_format || "MP3";
   $("audioQualitySelect").value = settings.audio_quality || "192";
@@ -908,6 +911,8 @@ async function saveCoreSettings(extra = {}) {
     auto_check_core_updates: $("autoUpdateCheck").checked,
     update_channel: $("updateChannelSelect").value,
     open_browser_on_start: $("openBrowserCheck").checked,
+    tray_icon_enabled: $("trayIconCheck").checked,
+    launch_at_login: $("launchAtLoginCheck").checked,
     ...extra,
   };
   const data = await api("/api/settings", {method:"PUT", body:JSON.stringify(payload)});
@@ -918,6 +923,38 @@ async function saveCoreSettings(extra = {}) {
   return data;
 }
 
+function renderAgent(agent = {}) {
+  state.agent = {...agent};
+  const connected = Boolean(agent.connected);
+  const selfUpdate = Boolean(agent.self_update);
+  $("agentStatus").textContent = connected
+    ? `Agent connected • self-update ${selfUpdate ? "ready" : "unavailable"}`
+    : "Agent supervisor is not connected. Developer launcher mode may be active.";
+  $("restartAgentBtn").disabled = !connected;
+  $("quitAgentBtn").disabled = !connected;
+  $("openAgentAppBtn").disabled = !connected;
+  $("launchAtLoginCheck").disabled = !Boolean(agent.startup_management);
+  if ("launch_at_login" in agent) $("launchAtLoginCheck").checked = Boolean(agent.launch_at_login);
+}
+
+async function refreshAgentStatus() {
+  if (!state.key) return;
+  try {
+    renderAgent(await api("/api/agent/status"));
+  } catch (error) {
+    renderAgent({connected:false});
+  }
+}
+
+async function agentCommand(path, message) {
+  try {
+    await api(path, {method:"POST"});
+    $("agentStatus").textContent = message;
+  } catch (error) {
+    $("agentStatus").textContent = error.message;
+  }
+}
+
 function renderUpdate(update = {}) {
   const status = update.status || "idle";
   const progress = Math.round(Number(update.progress || 0) * 100);
@@ -926,6 +963,7 @@ function renderUpdate(update = {}) {
   $("coreUpdateStatus").textContent = text;
   $("checkCoreUpdateBtn").disabled = ["checking","downloading"].includes(status);
   $("downloadCoreUpdateBtn").disabled = !(status === "available" && update.asset_name);
+  $("applyCoreUpdateBtn").disabled = !(status === "ready" && update.can_apply);
 }
 
 async function pollCoreUpdate() {
@@ -959,12 +997,24 @@ async function downloadCoreUpdate() {
   }
 }
 
+async function applyCoreUpdate() {
+  if (!window.confirm("Apply the verified Local Core update and restart now?")) return;
+  try {
+    const data = await api("/api/update/apply", {method:"POST"});
+    $("coreUpdateStatus").textContent = data.detail || "Applying update…";
+    $("applyCoreUpdateBtn").disabled = true;
+  } catch (error) {
+    $("coreUpdateStatus").textContent = error.message;
+  }
+}
+
 async function bootstrap() {
   try {
     const data = await api("/api/bootstrap");
     state.key = data.core_key;
     renderSettings(data.settings || {download_dir:data.download_dir});
     renderUpdate(data.update || {});
+    renderAgent(data.agent || {});
     $("coreBadge").textContent = `LOCAL CORE • v${data.core_version || "?"}`;
     $("coreBadge").classList.remove("offline");
     $("coreBadge").classList.add("ready");
@@ -973,6 +1023,7 @@ async function bootstrap() {
     refreshDownloads();
     refreshEditorExports();
     refreshEditorLibrary();
+    refreshAgentStatus();
     loadDiagnostics();
     if (["checking","downloading"].includes((data.update || {}).status)) {
       state.updatePoll = setTimeout(pollCoreUpdate, 500);
@@ -1025,6 +1076,9 @@ async function loadDiagnostics() {
       `Editor library: ${data.editor_library_file}`,
       `Log: ${data.log_file}`,
       `Updates: ${data.update_dir}`,
+      `Agent: ${data.agent?.connected ? "connected" : "not connected"}`,
+      `Self-update: ${data.agent?.self_update ? "ready" : "unavailable"}`,
+      `Launch at sign-in: ${data.agent?.launch_at_login ? "enabled" : "disabled"}`,
       `Downloads: ${JSON.stringify(data.download_counts || {})}`,
     ].join("\n");
   } catch (error) {
@@ -1099,6 +1153,18 @@ $("saveCoreSettingsBtn").addEventListener("click", async () => {
 });
 $("checkCoreUpdateBtn").addEventListener("click", checkCoreUpdate);
 $("downloadCoreUpdateBtn").addEventListener("click", downloadCoreUpdate);
+$("applyCoreUpdateBtn").addEventListener("click", applyCoreUpdate);
+$("openAgentAppBtn").addEventListener("click", () => agentCommand("/api/agent/open", "Opening Media Downloader…"));
+$("restartAgentBtn").addEventListener("click", () => {
+  if (window.confirm("Restart the Local Core now? Active analysis/download/export work will be interrupted.")) {
+    agentCommand("/api/agent/restart", "Restarting Local Core…");
+  }
+});
+$("quitAgentBtn").addEventListener("click", () => {
+  if (window.confirm("Quit Media Downloader Core? This page will go offline until you start it again.")) {
+    agentCommand("/api/agent/quit", "Quitting Local Core…");
+  }
+});
 $("refreshDiagnosticsBtn").addEventListener("click", loadDiagnostics);
 $("openLogBtn").addEventListener("click", async () => {
   try { await api("/api/system/open-log", {method:"POST"}); }

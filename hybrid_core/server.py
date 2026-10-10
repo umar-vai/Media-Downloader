@@ -18,6 +18,7 @@ from media_core.browser_resolver import find_browser
 from media_core.editor import extract_preview_frame, extract_waveform, probe_media, public_media_info, render_proxy_clip, safe_export_name
 from media_core.network import safe_proxy_label
 
+from .agent_control import can_self_update, send_control
 from .core_updater import CoreUpdateService
 from .editor_library import EditorLibrary
 from .jobs import JobManager
@@ -34,6 +35,7 @@ from .paths import (
 )
 from .settings_store import SettingsStore
 from .version import CORE_VERSION
+from .windows_startup import can_manage_startup, launch_at_login_enabled, set_launch_at_login
 
 
 CORE_KEY = secrets.token_urlsafe(32)
@@ -50,6 +52,7 @@ UPDATER = CoreUpdateService(
     current_version=CORE_VERSION,
     update_dir=UPDATE_DIR,
     channel=str(CURRENT_SETTINGS["update_channel"]),
+    can_apply=can_self_update(),
 )
 LOGGER.info(
     "local_core_started version=%s max_downloads=%s update_channel=%s",
@@ -148,6 +151,8 @@ class SettingsPatch(BaseModel):
     auto_check_core_updates: bool | None = None
     update_channel: str | None = None
     open_browser_on_start: bool | None = None
+    tray_icon_enabled: bool | None = None
+    launch_at_login: bool | None = None
 
 
 def _custom_crop(payload: Any) -> tuple[int, int, int, int] | None:
@@ -163,6 +168,14 @@ def _custom_crop(payload: Any) -> tuple[int, int, int, int] | None:
         width,
         height,
     )
+
+
+def _agent_connected() -> bool:
+    try:
+        send_control("ping")
+        return True
+    except Exception:
+        return False
 
 
 def require_key(
@@ -208,6 +221,12 @@ def bootstrap() -> dict[str, Any]:
         "max_concurrent_downloads": int(settings["max_concurrent_downloads"]),
         "settings": settings,
         "update": UPDATER.snapshot(),
+        "agent": {
+            "connected": _agent_connected(),
+            "self_update": can_self_update(),
+            "startup_management": can_manage_startup(),
+            "launch_at_login": launch_at_login_enabled(),
+        },
         "capabilities": {
             "analyze": True,
             "cancel_analysis": True,
@@ -353,6 +372,12 @@ def diagnostics() -> dict[str, Any]:
         "download_counts": counts,
         "settings": settings,
         "update": UPDATER.snapshot(),
+        "agent": {
+            "connected": _agent_connected(),
+            "self_update": can_self_update(),
+            "startup_management": can_manage_startup(),
+            "launch_at_login": launch_at_login_enabled(),
+        },
     }
 
 
@@ -544,6 +569,21 @@ def update_settings(payload: SettingsPatch) -> dict[str, Any]:
         SETTINGS.update({"download_dir": before["download_dir"]})
         raise HTTPException(status_code=400, detail=f"Download folder is not writable: {exc}") from exc
 
+    if "launch_at_login" in patch:
+        requested_startup = bool(settings.get("launch_at_login"))
+        if can_manage_startup():
+            try:
+                set_launch_at_login(requested_startup)
+            except Exception as exc:
+                SETTINGS.update({"launch_at_login": before.get("launch_at_login", False)})
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        elif requested_startup:
+            SETTINGS.update({"launch_at_login": before.get("launch_at_login", False)})
+            raise HTTPException(
+                status_code=409,
+                detail="Launch at Windows sign-in is available after installing Media Downloader Core.",
+            )
+
     UPDATER.set_channel(str(settings.get("update_channel") or "stable"))
     LOGGER.info("settings_updated keys=%s restart_required=%s", sorted(patch.keys()), restart_required)
     return {
@@ -551,6 +591,40 @@ def update_settings(payload: SettingsPatch) -> dict[str, Any]:
         "restart_required": restart_required,
         "active_max_concurrent_downloads": int(CURRENT_SETTINGS["max_concurrent_downloads"]),
     }
+
+
+@app.get("/api/agent/status", dependencies=[Depends(require_key)])
+def agent_status() -> dict[str, Any]:
+    return {
+        "connected": _agent_connected(),
+        "self_update": can_self_update(),
+        "startup_management": can_manage_startup(),
+        "launch_at_login": launch_at_login_enabled(),
+    }
+
+
+@app.post("/api/agent/open", dependencies=[Depends(require_key)])
+def agent_open() -> dict[str, Any]:
+    try:
+        return send_control("open_app")
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/agent/restart", dependencies=[Depends(require_key)])
+def agent_restart() -> dict[str, Any]:
+    try:
+        return send_control("restart")
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/agent/quit", dependencies=[Depends(require_key)])
+def agent_quit() -> dict[str, Any]:
+    try:
+        return send_control("quit")
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/update/status", dependencies=[Depends(require_key)])
@@ -571,6 +645,21 @@ def download_update() -> dict[str, Any]:
         return {"update": UPDATER.start_download()}
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/update/apply", dependencies=[Depends(require_key)])
+def apply_update() -> dict[str, Any]:
+    state = UPDATER.snapshot()
+    staged = str(state.get("staged_path") or "")
+    if state.get("status") != "ready" or not staged:
+        raise HTTPException(status_code=409, detail="No verified Local Core update is ready to apply.")
+    if not can_self_update():
+        raise HTTPException(status_code=409, detail="Update apply requires the installed Local Core agent.")
+    try:
+        send_control("apply_update", path=staged)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True, "detail": "Applying verified update. Local Core will restart."}
 
 
 @app.post("/api/system/open-log", dependencies=[Depends(require_key)])

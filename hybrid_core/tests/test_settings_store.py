@@ -23,6 +23,8 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(settings["video_quality"], "720p")
         self.assertEqual(settings["audio_format"], "MP3")
         self.assertEqual(settings["update_channel"], "stable")
+        self.assertTrue(settings["tray_icon_enabled"])
+        self.assertFalse(settings["launch_at_login"])
 
     def test_persists_separately_from_legacy_settings(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -1,0 +1,179 @@
+name: Build Local Core
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hybrid_core/**"
+      - "media_core/**"
+      - "web_pwa/**"
+      - "hybrid_core_agent.py"
+      - "hybrid_core_update_helper.py"
+      - "Start_Hybrid_Media_Downloader.bat"
+      - ".github/workflows/build-local-core.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r hybrid_core/requirements.txt
+          pip install "pyinstaller>=6.16,<7.0"
+
+      - name: Compile and test
+        shell: pwsh
+        run: |
+          python -m py_compile hybrid_core/agent.py
+          python -m py_compile hybrid_core/agent_control.py
+          python -m py_compile hybrid_core/windows_startup.py
+          python -m py_compile hybrid_core/update_helper.py
+          python -m py_compile hybrid_core/server.py
+          python -m py_compile hybrid_core/core_updater.py
+          python -m py_compile hybrid_core/settings_store.py
+          python -m py_compile hybrid_core/editor_library.py
+          python -m py_compile hybrid_core/jobs.py
+          python -m py_compile media_core/engine.py
+          python -m py_compile media_core/editor.py
+          python -m unittest discover -s media_core/tests -p "test_*.py" -v
+          python -m unittest discover -s hybrid_core/tests -p "test_*.py" -v
+          node --check web_pwa/app.js
+
+      - name: Build update helper
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name MediaDownloaderCoreUpdater --distpath "dist/core" --workpath "build/core-updater" --specpath "build/core-updater" hybrid_core_update_helper.py
+
+      - name: Build Local Core agent
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name MediaDownloaderCore --distpath "dist/core" --workpath "build/core-agent" --specpath "build/core-agent" --collect-all yt_dlp --collect-all curl_cffi --collect-all imageio_ffmpeg --collect-all uvicorn --collect-all fastapi --collect-all pydantic --collect-all pystray --collect-all PIL --collect-submodules hybrid_core --collect-submodules media_core --hidden-import tkinter --hidden-import tkinter.filedialog --add-data "web_pwa;web_pwa" hybrid_core_agent.py
+
+      - name: Packaged self-tests
+        shell: pwsh
+        run: |
+          $core = (Resolve-Path "dist\core\MediaDownloaderCore.exe").Path
+          $helper = (Resolve-Path "dist\core\MediaDownloaderCoreUpdater.exe").Path
+          $coreReport = Join-Path $env:RUNNER_TEMP "core-self-test.json"
+          $helperReport = Join-Path $env:RUNNER_TEMP "core-updater-self-test.json"
+          $p = Start-Process -FilePath $core -ArgumentList @("--self-test", "--report", $coreReport) -Wait -PassThru
+          if ($p.ExitCode -ne 0 -or -not (Test-Path $coreReport)) { throw "MediaDownloaderCore packaged self-test failed." }
+          Get-Content $coreReport
+          $u = Start-Process -FilePath $helper -ArgumentList @("--self-test", "--report", $helperReport) -Wait -PassThru
+          if ($u.ExitCode -ne 0 -or -not (Test-Path $helperReport)) { throw "MediaDownloaderCoreUpdater packaged self-test failed." }
+          Get-Content $helperReport
+
+      - name: Smoke test packaged server child
+        shell: pwsh
+        run: |
+          $core = (Resolve-Path "dist\core\MediaDownloaderCore.exe").Path
+          $process = Start-Process -FilePath $core -ArgumentList @("--server-child") -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 90; $i++) {
+              Start-Sleep -Milliseconds 300
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:38477/api/health" -TimeoutSec 1
+                if ($health.ok -eq $true) { $ready = $true; break }
+              } catch {}
+            }
+            if (-not $ready) { throw "Packaged Local Core server did not become ready." }
+          }
+          finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
+
+      - name: Build portable ZIP
+        shell: pwsh
+        run: |
+          $portable = "dist\MediaDownloaderCorePortable.zip"
+          if (Test-Path $portable) { Remove-Item $portable -Force }
+          Compress-Archive -Path "dist\core\MediaDownloaderCore.exe","dist\core\MediaDownloaderCoreUpdater.exe" -DestinationPath $portable -CompressionLevel Optimal
+
+      - name: Build per-user installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $isccPath = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup*" -Recurse -File -Filter "ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $isccPath) {
+            $isccCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($isccCommand) { $isccPath = $isccCommand.Source }
+          }
+          if (-not $isccPath) { throw "Inno Setup compiler was not found." }
+          $coreVersion = python -c "from hybrid_core.version import CORE_VERSION; print(CORE_VERSION)"
+          $sourceDir = (Resolve-Path "dist\core").Path
+          $outputDir = (Resolve-Path "dist").Path
+          & $isccPath "/DAppVersion=$coreVersion" "/DSourceDir=$sourceDir" "/DOutputDir=$outputDir" "hybrid_core\installer\MediaDownloaderCore.iss"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path "dist\MediaDownloaderCoreSetup.exe")) { throw "Local Core installer build failed." }
+
+      - name: Installer smoke test
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP "MediaDownloaderCoreInstalled"
+          if (Test-Path $installDir) { Remove-Item $installDir -Recurse -Force }
+          $setup = (Resolve-Path "dist\MediaDownloaderCoreSetup.exe").Path
+          $install = Start-Process -FilePath $setup -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir") -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Local Core installer failed." }
+          $installedCore = Join-Path $installDir "MediaDownloaderCore.exe"
+          $installedUpdater = Join-Path $installDir "MediaDownloaderCoreUpdater.exe"
+          if (-not (Test-Path $installedCore) -or -not (Test-Path $installedUpdater)) { throw "Installed Local Core files are incomplete." }
+          $report = Join-Path $env:RUNNER_TEMP "installed-core-self-test.json"
+          $test = Start-Process -FilePath $installedCore -ArgumentList @("--self-test", "--report", $report) -Wait -PassThru
+          if ($test.ExitCode -ne 0 -or -not (Test-Path $report)) { throw "Installed Local Core self-test failed." }
+          $uninstaller = Join-Path $installDir "unins000.exe"
+          if (-not (Test-Path $uninstaller)) { throw "Local Core uninstaller is missing." }
+          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "Local Core uninstall smoke test failed." }
+
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          Copy-Item "dist\core\MediaDownloaderCore.exe" "dist\MediaDownloaderCore.exe" -Force
+          Copy-Item "dist\core\MediaDownloaderCoreUpdater.exe" "dist\MediaDownloaderCoreUpdater.exe" -Force
+          $items = @("dist\MediaDownloaderCore.exe","dist\MediaDownloaderCoreUpdater.exe","dist\MediaDownloaderCorePortable.zip","dist\MediaDownloaderCoreSetup.exe")
+          foreach ($item in $items) {
+            $name = Split-Path $item -Leaf
+            $hash = (Get-FileHash $item -Algorithm SHA256).Hash.ToLower()
+            "$hash  $name" | Out-File "dist\$name.sha256" -Encoding ascii
+          }
+
+      - name: Upload Local Core artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MediaDownloader-Local-Core-Windows
+          path: |
+            dist/MediaDownloaderCore.exe
+            dist/MediaDownloaderCore.exe.sha256
+            dist/MediaDownloaderCoreUpdater.exe
+            dist/MediaDownloaderCoreUpdater.exe.sha256
+            dist/MediaDownloaderCorePortable.zip
+            dist/MediaDownloaderCorePortable.zip.sha256
+            dist/MediaDownloaderCoreSetup.exe
+            dist/MediaDownloaderCoreSetup.exe.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish Local Core release from main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $coreVersion = (python -c "from hybrid_core.version import CORE_VERSION; print(CORE_VERSION)").Trim()
+          $tag = "core-v$coreVersion"
+          $repo = "${{ github.repository }}"
+          gh release view $tag --repo $repo *> $null
+          if ($LASTEXITCODE -eq 0) { Write-Host "Release $tag already exists; skipping."; exit 0 }
+          gh release create $tag "dist/MediaDownloaderCore.exe" "dist/MediaDownloaderCore.exe.sha256" "dist/MediaDownloaderCoreUpdater.exe" "dist/MediaDownloaderCoreUpdater.exe.sha256" "dist/MediaDownloaderCorePortable.zip" "dist/MediaDownloaderCorePortable.zip.sha256" "dist/MediaDownloaderCoreSetup.exe" "dist/MediaDownloaderCoreSetup.exe.sha256" --repo $repo --target "${{ github.sha }}" --title "Media Downloader Local Core $tag" --generate-notes

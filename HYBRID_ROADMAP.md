@@ -155,15 +155,30 @@ All source and rendered files remain local. Editor work runs in a dedicated sing
 
 The local Web/PWA editor now covers the core workflow from source selection through reusable projects/presets, visual crop, audio processing, preview and export. The next major block is Phase 4: packaging the Local Core as the lightweight Windows agent.
 
-## Phase 4 — Lightweight Windows agent
+## Phase 4 — Lightweight Windows agent 🟡
 
-- Build `MediaDownloaderCore.exe` without the old CustomTkinter UI.
-- Optional tray icon: Open App / Open Downloads / Restart Core / Quit.
-- Start Menu shortcut.
-- Optional launch at Windows sign-in.
-- Single-instance lock.
-- Automatic local-core update.
-- Open the PWA automatically.
+### Phase 4A — Standalone agent, installer + safe self-update ✅
+
+- Added standalone `MediaDownloaderCore.exe` packaging without CustomTkinter or the legacy desktop UI.
+- Agent owns a Windows single-instance mutex and a local supervisor/control socket.
+- FastAPI Local Core runs as a supervised child process, allowing restart without closing the tray agent.
+- Tray menu: Open Media Downloader / Open Downloads / Restart Local Core / Quit.
+- Agent auto-recovers the Local Core child if it exits unexpectedly.
+- Added per-user Inno Setup installer under LocalAppData with Start Menu shortcut and optional desktop shortcut.
+- Added optional Windows sign-in startup through the current-user Run key.
+- PWA settings now control tray visibility and Windows sign-in startup.
+- Added dedicated `MediaDownloaderCoreUpdater.exe`; verified staged updates can replace the stopped Core executable and relaunch it safely.
+- The installer/portable package keeps the updater next to the Core executable so self-update is available.
+- Added PWA agent controls and **Apply & restart** for verified updates.
+- Added packaged self-test, live server-child smoke test, installer install/uninstall smoke test, SHA-256 assets and automatic `core-vX.Y.Z` release publishing.
+- Developer BAT launcher now uses the same parent-agent / child-core architecture.
+- Local Core bumped to v0.7.0.
+
+### Remaining Phase 4 work
+
+- unattended update policy (optional auto-download/apply window)
+- automatic rollback if the newly replaced Core cannot pass post-update health checks
+- expose previous-version rollback from the PWA
 
 ## Phase 5 — Production hardening
 

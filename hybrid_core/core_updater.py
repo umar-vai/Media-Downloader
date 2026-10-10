@@ -74,10 +74,12 @@ class CoreUpdateService:
         current_version: str,
         update_dir: Path,
         channel: str = "stable",
+        can_apply: bool = False,
     ) -> None:
         self.current_version = current_version
         self.update_dir = Path(update_dir)
         self.channel = channel if channel in {"stable", "beta"} else "stable"
+        self.can_apply = bool(can_apply)
         self._lock = threading.RLock()
         self._candidate: dict[str, Any] | None = None
         self._state: dict[str, Any] = {
@@ -258,7 +260,7 @@ class CoreUpdateService:
                 ),
                 progress=1.0,
                 staged_path=str(target),
-                can_apply=False,
+                can_apply=self.can_apply,
             )
         except Exception as exc:
             self._set(status="error", detail=f"Update download failed: {exc}", progress=0.0)

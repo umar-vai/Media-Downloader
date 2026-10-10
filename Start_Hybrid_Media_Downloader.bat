@@ -9,4 +9,4 @@ if not exist ".hybrid-venv\Scripts\python.exe" (
 
 call ".hybrid-venv\Scripts\activate.bat"
 python -m pip install --disable-pip-version-check -q -r hybrid_core\requirements.txt || exit /b 1
-python -m hybrid_core.launcher
+python -m hybrid_core.agent
