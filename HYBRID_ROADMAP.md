@@ -92,10 +92,19 @@ The browser UI never uploads the user's media to a cloud server in local mode.
 - Added structured rotating JSONL logs and a diagnostics API/PWA panel.
 - Diagnostics expose core version, Python/platform, proxy route, installed-browser resolver, FFmpeg, state path and job counts.
 
-### Remaining Phase 2 work
+### Phase 2C — Independent settings + updater framework ✅
 
-- Auto-update only the local core when engine changes.
-- Package/refine persistent settings separately from the legacy desktop settings.
+- Added `hybrid-settings.json`, fully separate from the legacy desktop settings file.
+- PWA defaults now persist for download folder, media defaults, concurrency, update channel and startup behavior.
+- Local Core v0.3.0 reads startup settings before opening the browser or creating its worker pool.
+- Added an independent `core-vX.Y.Z` GitHub release channel so desktop `vX.Y.Z` releases cannot be mistaken for Local Core updates.
+- Added background update check/download APIs and PWA controls.
+- Core update downloads require a matching SHA-256 asset and are staged under the Local Core update directory.
+- Automatic replacement/apply is intentionally deferred to Phase 4, where the standalone `MediaDownloaderCore.exe` agent can safely restart itself.
+
+### Phase 2 status
+
+Core extraction/refactor is functionally complete. The next major block is Phase 3 (Web editor), while Phase 4 will turn the Python Local Core into the small installable Windows agent.
 
 ## Phase 3 — Web editor
 

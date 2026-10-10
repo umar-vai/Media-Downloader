@@ -4,6 +4,8 @@ const state = {
   analysis: null,
   mode: "Video",
   installPrompt: null,
+  settings: {},
+  updatePoll: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -60,7 +62,9 @@ function showAnalysis(result) {
     option.textContent = quality;
     $("qualitySelect").appendChild(option);
   }
-  if (qualities.includes("720p")) $("qualitySelect").value = "720p";
+  const preferredQuality = state.settings.video_quality || "720p";
+  if (qualities.includes(preferredQuality)) $("qualitySelect").value = preferredQuality;
+  else if (qualities.includes("720p")) $("qualitySelect").value = "720p";
 
   const preview = $("preview");
   preview.innerHTML = "";
@@ -182,11 +186,91 @@ async function refreshDownloads() {
   } catch {}
 }
 
+function renderSettings(settings = {}) {
+  state.settings = {...settings};
+  $("downloadDirInput").value = settings.download_dir || "";
+  $("defaultModeSelect").value = settings.default_mode || "Video";
+  $("defaultVideoQualitySelect").value = settings.video_quality || "720p";
+  $("defaultAudioFormatSelect").value = settings.audio_format || "MP3";
+  $("defaultAudioQualitySelect").value = settings.audio_quality || "192";
+  $("maxDownloadsSelect").value = String(settings.max_concurrent_downloads || 3);
+  $("updateChannelSelect").value = settings.update_channel || "stable";
+  $("autoUpdateCheck").checked = Boolean(settings.auto_check_core_updates);
+  $("openBrowserCheck").checked = settings.open_browser_on_start !== false;
+
+  $("audioFormatSelect").value = settings.audio_format || "MP3";
+  $("audioQualitySelect").value = settings.audio_quality || "192";
+  setMode(settings.default_mode || "Video");
+}
+
+async function saveCoreSettings(extra = {}) {
+  const payload = {
+    download_dir: $("downloadDirInput").value.trim(),
+    default_mode: $("defaultModeSelect").value,
+    video_quality: $("defaultVideoQualitySelect").value,
+    audio_format: $("defaultAudioFormatSelect").value,
+    audio_quality: $("defaultAudioQualitySelect").value,
+    max_concurrent_downloads: Number($("maxDownloadsSelect").value || 3),
+    auto_check_core_updates: $("autoUpdateCheck").checked,
+    update_channel: $("updateChannelSelect").value,
+    open_browser_on_start: $("openBrowserCheck").checked,
+    ...extra,
+  };
+  const data = await api("/api/settings", {method:"PUT", body:JSON.stringify(payload)});
+  renderSettings(data.settings);
+  $("settingsStatus").textContent = data.restart_required
+    ? "Saved. Restart Local Core to apply concurrency/startup changes."
+    : "Settings saved.";
+  return data;
+}
+
+function renderUpdate(update = {}) {
+  const status = update.status || "idle";
+  const progress = Math.round(Number(update.progress || 0) * 100);
+  let text = update.detail || "Update check has not run yet.";
+  if (status === "downloading" && progress) text += ` (${progress}%)`;
+  $("coreUpdateStatus").textContent = text;
+  $("checkCoreUpdateBtn").disabled = ["checking","downloading"].includes(status);
+  $("downloadCoreUpdateBtn").disabled = !(status === "available" && update.asset_name);
+}
+
+async function pollCoreUpdate() {
+  clearTimeout(state.updatePoll);
+  try {
+    const {update} = await api("/api/update/status");
+    renderUpdate(update);
+    if (["checking","downloading"].includes(update.status)) {
+      state.updatePoll = setTimeout(pollCoreUpdate, 700);
+    }
+  } catch {}
+}
+
+async function checkCoreUpdate() {
+  try {
+    const {update} = await api("/api/update/check", {method:"POST"});
+    renderUpdate(update);
+    state.updatePoll = setTimeout(pollCoreUpdate, 500);
+  } catch (error) {
+    $("coreUpdateStatus").textContent = error.message;
+  }
+}
+
+async function downloadCoreUpdate() {
+  try {
+    const {update} = await api("/api/update/download", {method:"POST"});
+    renderUpdate(update);
+    state.updatePoll = setTimeout(pollCoreUpdate, 500);
+  } catch (error) {
+    $("coreUpdateStatus").textContent = error.message;
+  }
+}
+
 async function bootstrap() {
   try {
     const data = await api("/api/bootstrap");
     state.key = data.core_key;
-    $("downloadDirInput").value = localStorage.getItem("media-download-dir") || data.download_dir;
+    renderSettings(data.settings || {download_dir:data.download_dir});
+    renderUpdate(data.update || {});
     $("coreBadge").textContent = `LOCAL CORE • v${data.core_version || "?"}`;
     $("coreBadge").classList.remove("offline");
     $("coreBadge").classList.add("ready");
@@ -194,6 +278,9 @@ async function bootstrap() {
     setInterval(refreshDownloads, 900);
     refreshDownloads();
     loadDiagnostics();
+    if (["checking","downloading"].includes((data.update || {}).status)) {
+      state.updatePoll = setTimeout(pollCoreUpdate, 500);
+    }
   } catch (error) {
     $("coreBadge").textContent = "CORE OFFLINE";
     $("analysisStatus").textContent = "Local Core is not available. Start Media Downloader Core.";
@@ -208,7 +295,10 @@ $("audioMode").addEventListener("click", () => setMode("Audio"));
 $("pasteBtn").addEventListener("click", async () => {
   try { $("urlInput").value = await navigator.clipboard.readText(); } catch {}
 });
-$("downloadDirInput").addEventListener("change", () => localStorage.setItem("media-download-dir", $("downloadDirInput").value.trim()));
+$("downloadDirInput").addEventListener("change", async () => {
+  try { await saveCoreSettings({download_dir:$("downloadDirInput").value.trim()}); }
+  catch (error) { $("settingsStatus").textContent = error.message; }
+});
 $("chooseFolderBtn").addEventListener("click", async () => {
   try {
     const data = await api("/api/system/choose-folder", {
@@ -217,7 +307,7 @@ $("chooseFolderBtn").addEventListener("click", async () => {
     });
     if (data.selected) {
       $("downloadDirInput").value = data.selected;
-      localStorage.setItem("media-download-dir", data.selected);
+      await saveCoreSettings({download_dir:data.selected});
     }
   } catch (error) {
     $("analysisStatus").textContent = error.message;
@@ -235,13 +325,21 @@ async function loadDiagnostics() {
       `Browser resolver: ${data.browser || "Not found"}`,
       `FFmpeg: ${data.ffmpeg}`,
       `State: ${data.state_file}`,
+      `Settings: ${data.settings_file}`,
       `Log: ${data.log_file}`,
+      `Updates: ${data.update_dir}`,
       `Downloads: ${JSON.stringify(data.download_counts || {})}`,
     ].join("\n");
   } catch (error) {
     $("diagnosticsBox").textContent = error.message;
   }
 }
+$("saveCoreSettingsBtn").addEventListener("click", async () => {
+  try { await saveCoreSettings(); }
+  catch (error) { $("settingsStatus").textContent = error.message; }
+});
+$("checkCoreUpdateBtn").addEventListener("click", checkCoreUpdate);
+$("downloadCoreUpdateBtn").addEventListener("click", downloadCoreUpdate);
 $("refreshDiagnosticsBtn").addEventListener("click", loadDiagnostics);
 $("openLogBtn").addEventListener("click", async () => {
   try { await api("/api/system/open-log", {method:"POST"}); }

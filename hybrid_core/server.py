@@ -17,21 +17,42 @@ from imageio_ffmpeg import get_ffmpeg_exe
 from media_core.browser_resolver import find_browser
 from media_core.network import safe_proxy_label
 
+from .core_updater import CoreUpdateService
 from .jobs import JobManager
 from .logging_setup import configure_logging
+from .paths import (
+    APP_DATA_DIR,
+    DEFAULT_DOWNLOAD_DIR,
+    LOG_FILE,
+    SETTINGS_FILE,
+    STATE_FILE,
+    UPDATE_DIR,
+    WEB_DIR,
+)
+from .settings_store import SettingsStore
 from .version import CORE_VERSION
 
 
-ROOT = Path(__file__).resolve().parents[1]
-WEB_DIR = ROOT / "web_pwa"
-DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "Media Downloader"
-APP_DATA_DIR = Path(os.getenv("APPDATA") or Path.home()) / "MediaDownloader"
-STATE_FILE = APP_DATA_DIR / "hybrid-jobs.json"
-LOG_FILE = APP_DATA_DIR / "hybrid-core.log"
 CORE_KEY = secrets.token_urlsafe(32)
 LOGGER = configure_logging(LOG_FILE)
-MANAGER = JobManager(max_downloads=3, state_path=STATE_FILE, logger=LOGGER)
-LOGGER.info("local_core_started version=%s", CORE_VERSION)
+SETTINGS = SettingsStore(SETTINGS_FILE, default_download_dir=DEFAULT_DOWNLOAD_DIR)
+CURRENT_SETTINGS = SETTINGS.get()
+MANAGER = JobManager(
+    max_downloads=int(CURRENT_SETTINGS["max_concurrent_downloads"]),
+    state_path=STATE_FILE,
+    logger=LOGGER,
+)
+UPDATER = CoreUpdateService(
+    current_version=CORE_VERSION,
+    update_dir=UPDATE_DIR,
+    channel=str(CURRENT_SETTINGS["update_channel"]),
+)
+LOGGER.info(
+    "local_core_started version=%s max_downloads=%s update_channel=%s",
+    CORE_VERSION,
+    CURRENT_SETTINGS["max_concurrent_downloads"],
+    CURRENT_SETTINGS["update_channel"],
+)
 
 app = FastAPI(
     title="Media Downloader Local Core",
@@ -63,6 +84,18 @@ class FolderPickerRequest(BaseModel):
     current_dir: str | None = None
 
 
+class SettingsPatch(BaseModel):
+    download_dir: str | None = None
+    default_mode: str | None = None
+    video_quality: str | None = None
+    audio_format: str | None = None
+    audio_quality: str | None = None
+    max_concurrent_downloads: int | None = Field(default=None, ge=1, le=6)
+    auto_check_core_updates: bool | None = None
+    update_channel: str | None = None
+    open_browser_on_start: bool | None = None
+
+
 def require_key(
     x_media_core_key: Annotated[str | None, Header()] = None,
 ) -> None:
@@ -92,13 +125,20 @@ def health() -> dict[str, Any]:
 
 @app.get("/api/bootstrap")
 def bootstrap() -> dict[str, Any]:
-    DEFAULT_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    settings = SETTINGS.get()
+    download_dir = Path(str(settings["download_dir"])).expanduser()
+    download_dir.mkdir(parents=True, exist_ok=True)
+    if bool(settings.get("auto_check_core_updates")) and UPDATER.snapshot().get("status") == "idle":
+        UPDATER.set_channel(str(settings.get("update_channel") or "stable"))
+        UPDATER.start_check()
     return {
         "ok": True,
         "core_key": CORE_KEY,
         "core_version": CORE_VERSION,
-        "download_dir": str(DEFAULT_DOWNLOAD_DIR),
-        "max_concurrent_downloads": 3,
+        "download_dir": str(download_dir),
+        "max_concurrent_downloads": int(settings["max_concurrent_downloads"]),
+        "settings": settings,
+        "update": UPDATER.snapshot(),
         "capabilities": {
             "analyze": True,
             "cancel_analysis": True,
@@ -134,7 +174,8 @@ def cancel_job(job_id: str) -> dict[str, Any]:
 
 @app.post("/api/downloads", dependencies=[Depends(require_key)])
 def create_download(payload: DownloadRequest) -> dict[str, Any]:
-    directory = Path(payload.download_dir or DEFAULT_DOWNLOAD_DIR).expanduser()
+    settings = SETTINGS.get()
+    directory = Path(payload.download_dir or str(settings["download_dir"])).expanduser()
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -198,7 +239,11 @@ def choose_folder(payload: FolderPickerRequest) -> dict[str, Any]:
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
-        initial = str(Path(payload.current_dir).expanduser()) if payload.current_dir else str(DEFAULT_DOWNLOAD_DIR)
+        initial = (
+            str(Path(payload.current_dir).expanduser())
+            if payload.current_dir
+            else str(Path(str(SETTINGS.get()["download_dir"])).expanduser())
+        )
         selected = filedialog.askdirectory(
             parent=root,
             initialdir=initial if Path(initial).exists() else str(Path.home()),
@@ -222,18 +267,69 @@ def diagnostics() -> dict[str, Any]:
         counts[status] = counts.get(status, 0) + 1
 
     browser = find_browser()
+    settings = SETTINGS.get()
     return {
         "version": CORE_VERSION,
         "python": sys.version.split()[0],
         "platform": platform.platform(),
-        "download_dir": str(DEFAULT_DOWNLOAD_DIR),
+        "download_dir": str(settings["download_dir"]),
         "state_file": str(STATE_FILE),
+        "settings_file": str(SETTINGS_FILE),
         "log_file": str(LOG_FILE),
+        "update_dir": str(UPDATE_DIR),
         "browser": str(browser) if browser else "",
         "ffmpeg": str(get_ffmpeg_exe()),
         "network": safe_proxy_label(),
         "download_counts": counts,
+        "settings": settings,
+        "update": UPDATER.snapshot(),
     }
+
+
+@app.get("/api/settings", dependencies=[Depends(require_key)])
+def get_settings() -> dict[str, Any]:
+    return {"settings": SETTINGS.get()}
+
+
+@app.put("/api/settings", dependencies=[Depends(require_key)])
+def update_settings(payload: SettingsPatch) -> dict[str, Any]:
+    patch = payload.model_dump(exclude_none=True)
+    before = SETTINGS.get()
+    settings, restart_required = SETTINGS.update(patch)
+
+    try:
+        Path(str(settings["download_dir"])).expanduser().mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        SETTINGS.update({"download_dir": before["download_dir"]})
+        raise HTTPException(status_code=400, detail=f"Download folder is not writable: {exc}") from exc
+
+    UPDATER.set_channel(str(settings.get("update_channel") or "stable"))
+    LOGGER.info("settings_updated keys=%s restart_required=%s", sorted(patch.keys()), restart_required)
+    return {
+        "settings": settings,
+        "restart_required": restart_required,
+        "active_max_concurrent_downloads": int(CURRENT_SETTINGS["max_concurrent_downloads"]),
+    }
+
+
+@app.get("/api/update/status", dependencies=[Depends(require_key)])
+def update_status() -> dict[str, Any]:
+    return {"update": UPDATER.snapshot()}
+
+
+@app.post("/api/update/check", dependencies=[Depends(require_key)])
+def check_update() -> dict[str, Any]:
+    settings = SETTINGS.get()
+    UPDATER.set_channel(str(settings.get("update_channel") or "stable"))
+    return {"update": UPDATER.start_check()}
+
+
+@app.post("/api/update/download", dependencies=[Depends(require_key)])
+def download_update() -> dict[str, Any]:
+    try:
+        return {"update": UPDATER.start_download()}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/system/open-log", dependencies=[Depends(require_key)])

@@ -88,9 +88,54 @@
       </div>
     </section>
 
+    <section class="card">
+      <div class="downloads-head">
+        <div class="section-head"><span>04 / SETTINGS</span><h2>Local Core preferences</h2></div>
+        <button id="saveCoreSettingsBtn" class="primary">Save settings</button>
+      </div>
+      <div class="core-settings-grid">
+        <label>Default download type
+          <select id="defaultModeSelect"><option>Video</option><option>Audio</option></select>
+        </label>
+        <label>Default video quality
+          <select id="defaultVideoQualitySelect">
+            <option>Best available</option><option>1080p</option><option>720p</option><option>480p</option><option>360p</option>
+          </select>
+        </label>
+        <label>Default audio format
+          <select id="defaultAudioFormatSelect"><option>MP3</option><option>M4A</option><option>WAV</option></select>
+        </label>
+        <label>Default audio bitrate
+          <select id="defaultAudioQualitySelect"><option>128</option><option>192</option><option>256</option><option>320</option></select>
+        </label>
+        <label>Concurrent downloads
+          <select id="maxDownloadsSelect"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option></select>
+        </label>
+        <label>Update channel
+          <select id="updateChannelSelect"><option value="stable">Stable</option><option value="beta">Beta</option></select>
+        </label>
+      </div>
+      <div class="toggle-row">
+        <label><input id="autoUpdateCheck" type="checkbox" /> Check Local Core updates automatically</label>
+        <label><input id="openBrowserCheck" type="checkbox" /> Open PWA when Local Core starts</label>
+      </div>
+      <p id="settingsStatus" class="status-text">Settings are stored locally on this computer.</p>
+
+      <div class="update-panel">
+        <div>
+          <strong>Local Core updates</strong>
+          <p id="coreUpdateStatus">Update check has not run yet.</p>
+        </div>
+        <div class="diag-actions">
+          <button id="checkCoreUpdateBtn" class="secondary">Check updates</button>
+          <button id="downloadCoreUpdateBtn" class="secondary" disabled>Download update</button>
+        </div>
+      </div>
+    </section>
+
     <section class="card compact-card">
       <div class="downloads-head">
-        <div class="section-head"><span>04 / LOCAL CORE</span><h2>Diagnostics</h2></div>
+        <div class="section-head"><span>05 / LOCAL CORE</span><h2>Diagnostics</h2></div>
         <div class="diag-actions">
           <button id="refreshDiagnosticsBtn" class="secondary">Refresh</button>
           <button id="openLogBtn" class="secondary">Open log</button>
