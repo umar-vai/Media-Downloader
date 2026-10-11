@@ -151,9 +151,27 @@ All source and rendered files remain local. Editor work runs in a dedicated sing
 - Added persistent editor library diagnostics.
 - Local Core bumped to v0.6.0.
 
+### Phase 3D — Real source playback + proper timeline workspace ✅
+
+The editor UI has been rebuilt from a form-style FFmpeg panel into a lightweight NLE-style workspace:
+
+- Full local source playback streams directly from the Local Core with HTTP byte-range support, so seeking does not require loading the entire file into browser memory.
+- Local filesystem paths are never exposed through the playback URL; the browser receives a short-lived opaque media token.
+- Custom transport controls: play/pause, ±5s seek, previous/next frame, fullscreen and precise source timecode.
+- Keyboard editing shortcuts: **Space** play/pause, **I** set In, **O** set Out, **Left/Right** frame-step, **Shift+Left/Right** ±5s.
+- A single visual timeline replaces the two disconnected trim sliders. It includes a playhead, draggable In/Out handles, selected-range shading and an audio waveform lane.
+- In/Out buttons, Go In/Out and Reset trim are synchronized with precise numeric trim fields.
+- Source playback automatically stops at the Out point.
+- Crop presets now display live crop guides on the player; Custom crop retains draggable/resizable handles.
+- Speed, mute and normal volume changes preview immediately in the source player. FFmpeg-only audio processing and boosted volume remain available through the exact processed proxy preview.
+- **Processed frame** renders the exact FFmpeg transform at the current playhead; **Processed 6s** remains the exact short rendered preview for crop/rotate/audio processing.
+- Browser-incompatible codecs fail gracefully and direct users to the processed proxy while keeping FFmpeg export available.
+- Responsive inspector panels separate Transform, Sound and Export from the monitor/timeline.
+- Local Core bumped to v0.10.0.
+
 ### Phase 3 status
 
-The local Web/PWA editor now covers the core workflow from source selection through reusable projects/presets, visual crop, audio processing, preview and export. The next major block is Phase 4: packaging the Local Core as the lightweight Windows agent.
+The Web/PWA editor now has a proper monitor + transport + single timeline + inspector workflow, while keeping all source and render operations local.
 
 ## Phase 4 — Lightweight Windows agent 🟡
 

@@ -88,21 +88,25 @@
       </div>
     </section>
 
-    <section id="editorCard" class="card">
-      <div class="downloads-head">
-        <div class="section-head"><span>04 / EDITOR</span><h2>Local video & audio editor</h2></div>
+    <section id="editorCard" class="card editor-card">
+      <div class="downloads-head editor-titlebar">
+        <div class="section-head">
+          <span>04 / EDITOR</span>
+          <h2>Local timeline editor</h2>
+          <p class="editor-subtitle">Play the full local source, trim on a real timeline, preview transforms, then export with FFmpeg.</p>
+        </div>
         <button id="chooseEditorFileBtn" class="primary">Choose local media</button>
       </div>
 
       <div class="editor-source-row">
-        <input id="editorSourcePath" placeholder="Choose a local video/audio file or edit a completed download" />
+        <input id="editorSourcePath" placeholder="Local source path" />
         <button id="loadEditorPathBtn" class="secondary">Load path</button>
       </div>
 
       <div class="editor-library-bar">
         <div>
           <label>Preset</label>
-          <select id="editorPresetSelect"><option value="">No saved presets</option></select>
+          <select id="editorPresetSelect"><option value="">Choose preset…</option></select>
           <div class="library-actions">
             <button id="applyEditorPresetBtn" class="secondary">Apply</button>
             <button id="saveEditorPresetBtn" class="secondary">Save current</button>
@@ -111,7 +115,7 @@
         </div>
         <div>
           <label>Project</label>
-          <select id="editorProjectSelect"><option value="">No saved projects</option></select>
+          <select id="editorProjectSelect"><option value="">Choose project…</option></select>
           <div class="library-actions">
             <button id="loadEditorProjectBtn" class="secondary">Load</button>
             <button id="saveEditorProjectBtn" class="secondary">Save current</button>
@@ -120,99 +124,174 @@
         </div>
       </div>
 
-      <div class="editor-layout">
-        <div class="editor-visual">
-          <div id="editorPreviewShell" class="editor-preview-shell">
-            <img id="editorPreviewImage" alt="" class="hidden" />
-            <video id="editorPreviewVideo" class="hidden" controls playsinline preload="metadata"></video>
-            <div id="editorCropOverlay" class="crop-overlay hidden" aria-label="Custom crop selection">
-              <span class="crop-handle nw" data-crop-handle="nw"></span>
-              <span class="crop-handle ne" data-crop-handle="ne"></span>
-              <span class="crop-handle sw" data-crop-handle="sw"></span>
-              <span class="crop-handle se" data-crop-handle="se"></span>
+      <div class="editor-workspace">
+        <div class="editor-main">
+          <div class="editor-monitor">
+            <div class="editor-monitor-head">
+              <div>
+                <strong>Program monitor</strong>
+                <span id="editorPlayerModeBadge">NO SOURCE</span>
+              </div>
+              <button id="editorFullscreenBtn" class="secondary editor-icon-btn" disabled title="Fullscreen">Fullscreen</button>
             </div>
-            <div id="editorPreviewPlaceholder">Choose media to preview a frame, waveform or playable proxy.</div>
-          </div>
-          <div class="editor-preview-actions">
-            <label>Preview position (sec)
-              <input id="editorPreviewPosition" type="number" min="0" step="0.1" value="0" />
-            </label>
-            <button id="editorPreviewBtn" class="secondary" disabled>Preview frame</button>
-            <button id="editorProxyBtn" class="secondary" disabled>Play 6s proxy</button>
-            <button id="editorWaveformBtn" class="secondary" disabled>Waveform</button>
-          </div>
-          <p id="editorSourceMeta" class="status-text">No editor source loaded.</p>
-        </div>
 
-        <div class="editor-controls">
-          <div class="timeline-panel">
+            <div id="editorPreviewShell" class="editor-preview-shell editor-program-monitor">
+              <div id="editorMediaLayer" class="editor-media-layer">
+                <img id="editorPreviewImage" alt="" class="hidden" />
+                <video id="editorPreviewVideo" class="hidden" playsinline preload="metadata"></video>
+                <div id="editorCropOverlay" class="crop-overlay hidden" aria-label="Crop selection">
+                  <span class="crop-handle nw" data-crop-handle="nw"></span>
+                  <span class="crop-handle ne" data-crop-handle="ne"></span>
+                  <span class="crop-handle sw" data-crop-handle="sw"></span>
+                  <span class="crop-handle se" data-crop-handle="se"></span>
+                </div>
+              </div>
+              <div id="editorPreviewPlaceholder">Choose a local video or audio file to start editing.</div>
+            </div>
+
+            <div class="editor-transport">
+              <div class="editor-transport-group">
+                <button id="editorSeekBackBtn" class="secondary editor-icon-btn" disabled title="Back 5 seconds">−5s</button>
+                <button id="editorStepBackBtn" class="secondary editor-icon-btn" disabled title="Previous frame">◀│</button>
+                <button id="editorPlayPauseBtn" class="primary editor-play-btn" disabled title="Play / Pause (Space)">▶</button>
+                <button id="editorStepForwardBtn" class="secondary editor-icon-btn" disabled title="Next frame">│▶</button>
+                <button id="editorSeekForwardBtn" class="secondary editor-icon-btn" disabled title="Forward 5 seconds">+5s</button>
+              </div>
+              <div class="editor-timecode">
+                <strong id="editorCurrentTime">0:00.000</strong>
+                <span>/</span>
+                <span id="editorDurationTime">0:00.000</span>
+              </div>
+              <div class="editor-transport-group">
+                <button id="editorSourceViewBtn" class="secondary" disabled>Source</button>
+                <button id="editorPreviewBtn" class="secondary" disabled>Processed frame</button>
+                <button id="editorProxyBtn" class="secondary" disabled>Processed 6s</button>
+                <button id="editorWaveformBtn" class="secondary" disabled>Waveform</button>
+              </div>
+            </div>
+
+            <p id="editorSourceMeta" class="status-text">No editor source loaded.</p>
+          </div>
+
+          <div class="timeline-panel editor-timeline-panel">
             <div class="timeline-head">
-              <strong>Trim timeline</strong>
+              <div>
+                <strong>Timeline</strong>
+                <span class="shortcut-hint">Space play/pause · I set In · O set Out · ←/→ frame</span>
+              </div>
               <span id="editorTimelineSummary">0:00 → 0:00</span>
             </div>
-            <label>Start
-              <input id="editorStartRange" type="range" min="0" max="1" step="0.05" value="0" />
-            </label>
-            <label>End
-              <input id="editorEndRange" type="range" min="0" max="1" step="0.05" value="1" />
-            </label>
+
+            <div class="editor-timeline-tools">
+              <button id="editorGoInBtn" class="secondary" disabled>Go In</button>
+              <button id="editorSetInBtn" class="secondary" disabled>Set In</button>
+              <button id="editorSetOutBtn" class="secondary" disabled>Set Out</button>
+              <button id="editorGoOutBtn" class="secondary" disabled>Go Out</button>
+              <button id="editorResetTrimBtn" class="secondary" disabled>Reset trim</button>
+            </div>
+
+            <div id="editorTimeline" class="editor-timeline" aria-label="Editor timeline">
+              <div class="editor-timeline-base"></div>
+              <img id="editorTimelineWaveform" class="editor-timeline-waveform hidden" alt="" />
+              <div id="editorTimelineOutsideLeft" class="editor-timeline-outside"></div>
+              <div id="editorTimelineSelection" class="editor-timeline-selection"></div>
+              <div id="editorTimelineOutsideRight" class="editor-timeline-outside"></div>
+              <button id="editorTimelineInHandle" class="editor-trim-handle in" type="button" aria-label="Trim in"></button>
+              <button id="editorTimelineOutHandle" class="editor-trim-handle out" type="button" aria-label="Trim out"></button>
+              <div id="editorTimelinePlayhead" class="editor-playhead"><span></span></div>
+            </div>
+
+            <div class="editor-timeline-timebar">
+              <span>00:00</span>
+              <span id="editorTimelineMidTime">00:00</span>
+              <span id="editorTimelineEndTime">00:00</span>
+            </div>
+
+            <input id="editorStartRange" class="hidden" type="range" min="0" max="1" step="0.01" value="0" />
+            <input id="editorEndRange" class="hidden" type="range" min="0" max="1" step="0.01" value="1" />
+            <input id="editorPreviewPosition" class="hidden" type="number" min="0" step="0.01" value="0" />
+
+            <div class="editor-trim-fields">
+              <label>In point
+                <input id="editorStart" type="number" min="0" step="0.01" value="0" />
+              </label>
+              <label>Out point
+                <input id="editorEnd" type="number" min="0" step="0.01" value="0" />
+              </label>
+              <label>Selected
+                <input id="editorSelectedDuration" type="text" value="0:00" readonly />
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <aside class="editor-inspector">
+          <div class="editor-inspector-section">
+            <div class="editor-inspector-title"><span>VIDEO</span><strong>Transform</strong></div>
+            <div class="editor-control-grid editor-control-grid-2">
+              <label>Crop
+                <select id="editorCrop">
+                  <option>Original</option><option>16:9</option><option>9:16</option><option>1:1</option><option>4:5</option><option>Custom</option>
+                </select>
+              </label>
+              <label>Rotate
+                <select id="editorRotate"><option>0°</option><option>90°</option><option>180°</option><option>270°</option></select>
+              </label>
+              <label>Speed
+                <select id="editorSpeed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select>
+              </label>
+            </div>
+
+            <div id="editorCustomCropPanel" class="custom-crop-panel hidden">
+              <label>X<input id="editorCropX" type="number" min="0" step="2" value="0" /></label>
+              <label>Y<input id="editorCropY" type="number" min="0" step="2" value="0" /></label>
+              <label>Width<input id="editorCropWidth" type="number" min="2" step="2" value="2" /></label>
+              <label>Height<input id="editorCropHeight" type="number" min="2" step="2" value="2" /></label>
+            </div>
+            <p class="editor-help">Crop guides are live. Use “Processed frame” or “Processed 6s” for the exact FFmpeg result.</p>
           </div>
 
-          <div class="editor-control-grid">
-            <label>Trim start (sec)<input id="editorStart" type="number" min="0" step="0.1" value="0" /></label>
-            <label>Trim end (sec)<input id="editorEnd" type="number" min="0" step="0.1" value="0" /></label>
-            <label>Crop
-              <select id="editorCrop">
-                <option>Original</option><option>16:9</option><option>9:16</option><option>1:1</option><option>4:5</option><option>Custom</option>
-              </select>
-            </label>
-            <label>Rotate
-              <select id="editorRotate"><option>0°</option><option>90°</option><option>180°</option><option>270°</option></select>
-            </label>
-            <label>Speed
-              <select id="editorSpeed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select>
-            </label>
-            <label>Volume %<input id="editorVolume" type="number" min="0" max="200" step="5" value="100" /></label>
-            <label>Audio preset
-              <select id="editorAudioPreset">
-                <option>Flat</option><option>Voice Clarity</option><option>Bass Boost</option><option>Podcast</option><option>Music</option><option>Normalize</option>
-              </select>
-            </label>
-            <label>Fade in (sec)<input id="editorFadeIn" type="number" min="0" max="60" step="0.1" value="0" /></label>
-            <label>Fade out (sec)<input id="editorFadeOut" type="number" min="0" max="60" step="0.1" value="0" /></label>
-            <label>Export quality
+          <div class="editor-inspector-section">
+            <div class="editor-inspector-title"><span>AUDIO</span><strong>Sound</strong></div>
+            <div class="editor-control-grid editor-control-grid-2">
+              <label>Volume %
+                <input id="editorVolume" type="number" min="0" max="200" step="5" value="100" />
+              </label>
+              <label>Audio preset
+                <select id="editorAudioPreset">
+                  <option>Flat</option><option>Voice Clarity</option><option>Bass Boost</option><option>Podcast</option><option>Music</option><option>Normalize</option>
+                </select>
+              </label>
+              <label>Fade in (sec)<input id="editorFadeIn" type="number" min="0" max="60" step="0.1" value="0" /></label>
+              <label>Fade out (sec)<input id="editorFadeOut" type="number" min="0" max="60" step="0.1" value="0" /></label>
+            </div>
+            <div class="editor-check-row">
+              <label class="editor-check"><input id="editorMute" type="checkbox" /> Mute</label>
+              <label class="editor-check"><input id="editorNoiseReduction" type="checkbox" /> Noise reduction</label>
+            </div>
+          </div>
+
+          <div class="editor-inspector-section editor-export-section">
+            <div class="editor-inspector-title"><span>EXPORT</span><strong>Render</strong></div>
+            <label>Quality
               <select id="editorQuality"><option>High</option><option selected>Balanced</option><option>Small</option></select>
             </label>
-          </div>
+            <label>Filename</label>
+            <input id="editorOutputName" placeholder="edited_media" />
+            <label>Folder</label>
+            <div class="folder-row">
+              <input id="editorOutputDir" />
+              <button id="chooseEditorOutputBtn" class="secondary">Choose</button>
+            </div>
 
-          <div id="editorCustomCropPanel" class="custom-crop-panel hidden">
-            <label>X<input id="editorCropX" type="number" min="0" step="2" value="0" /></label>
-            <label>Y<input id="editorCropY" type="number" min="0" step="2" value="0" /></label>
-            <label>Width<input id="editorCropWidth" type="number" min="2" step="2" value="2" /></label>
-            <label>Height<input id="editorCropHeight" type="number" min="2" step="2" value="2" /></label>
+            <div class="editor-export-actions">
+              <button id="editorExportBtn" class="download-cta" disabled>Export selection</button>
+              <button id="editorCancelExportBtn" class="secondary danger" disabled>Cancel</button>
+            </div>
+            <div class="progress editor-export-progress"><span id="editorExportProgressBar" style="width:0%"></span></div>
+            <p id="editorStatus" class="status-text">Editor is ready.</p>
           </div>
-
-          <div class="editor-check-row">
-            <label class="editor-check"><input id="editorMute" type="checkbox" /> Mute audio</label>
-            <label class="editor-check"><input id="editorNoiseReduction" type="checkbox" /> Noise reduction</label>
-          </div>
-
-          <label>Export filename</label>
-          <input id="editorOutputName" placeholder="edited_media" />
-
-          <label>Export folder</label>
-          <div class="folder-row">
-            <input id="editorOutputDir" />
-            <button id="chooseEditorOutputBtn" class="secondary">Choose folder</button>
-          </div>
-
-          <div class="editor-export-actions">
-            <button id="editorExportBtn" class="download-cta" disabled>Export media</button>
-            <button id="editorCancelExportBtn" class="secondary danger" disabled>Cancel export</button>
-          </div>
-          <div class="progress editor-export-progress"><span id="editorExportProgressBar" style="width:0%"></span></div>
-          <p id="editorStatus" class="status-text">Editor is ready.</p>
-        </div>
+        </aside>
       </div>
 
       <div class="editor-history-head">

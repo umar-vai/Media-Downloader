@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 import os
 import platform
 import secrets
@@ -27,6 +28,7 @@ from .agent_control import can_self_update, send_control
 from .core_updater import CoreUpdateService
 from .diagnostics import create_diagnostics_bundle
 from .editor_library import EditorLibrary
+from .editor_media import EditorMediaRegistry
 from .jobs import JobManager
 from .logging_setup import configure_logging
 from .paths import (
@@ -50,6 +52,7 @@ LOGGER = configure_logging(LOG_FILE)
 SETTINGS = SettingsStore(SETTINGS_FILE, default_download_dir=DEFAULT_DOWNLOAD_DIR)
 CURRENT_SETTINGS = SETTINGS.get()
 EDITOR_LIBRARY = EditorLibrary(EDITOR_LIBRARY_FILE)
+EDITOR_MEDIA = EditorMediaRegistry()
 MANAGER = JobManager(
     max_downloads=int(CURRENT_SETTINGS["max_concurrent_downloads"]),
     state_path=STATE_FILE,
@@ -512,9 +515,12 @@ def _editor_probe_payload(source: Path) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    media_token = EDITOR_MEDIA.register(source)
     return {
         "selected": str(source),
         "path": str(source),
+        "media_token": media_token,
+        "media_url": f"/api/editor/media/{media_token}",
         "filename": source.name,
         "stem": source.stem,
         "output_name": safe_export_name(f"{source.stem}_edited"),
@@ -526,6 +532,23 @@ def _editor_probe_payload(source: Path) -> dict[str, Any]:
 @app.post("/api/editor/probe", dependencies=[Depends(require_key)])
 def editor_probe(payload: EditorPathRequest) -> dict[str, Any]:
     return _editor_probe_payload(Path(payload.path))
+
+
+@app.get("/api/editor/media/{media_token}")
+def editor_media(media_token: str) -> FileResponse:
+    source = EDITOR_MEDIA.resolve(media_token)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Editor media session expired. Reload the source file.")
+    media_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
+    return FileResponse(
+        source,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": "inline",
+        },
+    )
 
 
 @app.post("/api/editor/preview", dependencies=[Depends(require_key)])

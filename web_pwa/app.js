@@ -11,8 +11,13 @@ const state = {
   editorInfo: null,
   editorExportId: "",
   editorObjectUrl: "",
+  editorWaveformUrl: "",
+  editorMediaUrl: "",
+  editorMediaToken: "",
+  editorPlayerMode: "empty",
   editorLibrary: {presets: [], projects: []},
   cropDrag: null,
+  timelineDrag: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -46,6 +51,19 @@ function formatDuration(seconds) {
   const m = Math.floor((total % 3600) / 60);
   const s = total % 60;
   return h ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}` : `${m}:${String(s).padStart(2,"0")}`;
+}
+
+function formatEditorTime(seconds) {
+  const value = Math.max(0, Number(seconds || 0));
+  const whole = Math.floor(value);
+  const ms = Math.floor((value - whole) * 1000);
+  const h = Math.floor(whole / 3600);
+  const m = Math.floor((whole % 3600) / 60);
+  const s = whole % 60;
+  const base = h
+    ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`
+    : `${m}:${String(s).padStart(2,"0")}`;
+  return `${base}.${String(ms).padStart(3,"0")}`;
 }
 
 function setMode(mode) {
@@ -224,15 +242,96 @@ function clearEditorPreviewObjectUrl() {
   }
 }
 
+function clearEditorWaveformUrl() {
+  if (state.editorWaveformUrl) {
+    URL.revokeObjectURL(state.editorWaveformUrl);
+    state.editorWaveformUrl = "";
+  }
+}
+
+function setEditorPlayerMode(mode, label) {
+  state.editorPlayerMode = mode;
+  $("editorPlayerModeBadge").textContent = label || mode.toUpperCase();
+}
+
+function currentEditorPosition() {
+  const video = $("editorPreviewVideo");
+  if (state.editorPlayerMode === "source" && Number.isFinite(video.currentTime)) {
+    return Number(video.currentTime || 0);
+  }
+  return Number($("editorPreviewPosition").value || 0);
+}
+
+function applyLivePlaybackSettings() {
+  const video = $("editorPreviewVideo");
+  video.playbackRate = Number($("editorSpeed").value || 1);
+  video.muted = Boolean($("editorMute").checked);
+  const requestedVolume = Math.max(0, Number($("editorVolume").value || 100)) / 100;
+  video.volume = Math.min(1, requestedVolume);
+}
+
+function applyLiveVideoTransform() {
+  const layer = $("editorMediaLayer");
+  if (!["source","source-error"].includes(state.editorPlayerMode)) {
+    layer.style.transform = "none";
+    return;
+  }
+  const rotation = $("editorRotate").value || "0°";
+  const angle = Number.parseInt(rotation, 10) || 0;
+  let scale = 1;
+  if (Math.abs(angle) % 180 === 90) {
+    const shell = $("editorPreviewShell");
+    const width = Math.max(1, shell.clientWidth);
+    const height = Math.max(1, shell.clientHeight);
+    scale = Math.min(width / height, height / width);
+  }
+  layer.style.transform = `rotate(${angle}deg) scale(${scale})`;
+  layer.style.transformOrigin = "center center";
+}
+
+function showEditorSource({seek = null, autoplay = false} = {}) {
+  if (!state.editorMediaUrl) return;
+  clearEditorPreviewObjectUrl();
+  const video = $("editorPreviewVideo");
+  $("editorPreviewImage").classList.add("hidden");
+  $("editorPreviewPlaceholder").classList.add("hidden");
+
+  if (video.dataset.sourceUrl !== state.editorMediaUrl) {
+    video.pause();
+    video.src = state.editorMediaUrl;
+    video.dataset.sourceUrl = state.editorMediaUrl;
+    video.load();
+  }
+  video.classList.remove("hidden");
+  setEditorPlayerMode("source", state.editorInfo?.has_video ? "SOURCE" : "AUDIO SOURCE");
+  applyLivePlaybackSettings();
+  applyLiveVideoTransform();
+
+  const target = seek == null ? Number($("editorPreviewPosition").value || 0) : Number(seek);
+  if (Number.isFinite(target)) {
+    const setTime = () => {
+      try { video.currentTime = Math.max(0, Math.min(target, Number(state.editorInfo?.duration || target))); } catch {}
+      $("editorPreviewPosition").value = String(target);
+      updateTimelineVisual();
+      if (autoplay) video.play().catch(() => {});
+    };
+    if (video.readyState >= 1) setTime();
+    else video.addEventListener("loadedmetadata", setTime, {once:true});
+  }
+  updateCropOverlay();
+}
+
 function showEditorImage(blob, showCropOverlay = false) {
   clearEditorPreviewObjectUrl();
   state.editorObjectUrl = URL.createObjectURL(blob);
-  $("editorPreviewVideo").pause();
-  $("editorPreviewVideo").removeAttribute("src");
-  $("editorPreviewVideo").classList.add("hidden");
+  $("editorMediaLayer").style.transform = "none";
+  const video = $("editorPreviewVideo");
+  video.pause();
+  video.classList.add("hidden");
   $("editorPreviewImage").src = state.editorObjectUrl;
   $("editorPreviewImage").classList.remove("hidden");
   $("editorPreviewPlaceholder").classList.add("hidden");
+  setEditorPlayerMode("image", showCropOverlay ? "CROP GUIDE" : "PROCESSED FRAME");
   if (showCropOverlay) requestAnimationFrame(updateCropOverlay);
   else $("editorCropOverlay").classList.add("hidden");
 }
@@ -240,12 +339,20 @@ function showEditorImage(blob, showCropOverlay = false) {
 function showEditorVideo(blob) {
   clearEditorPreviewObjectUrl();
   state.editorObjectUrl = URL.createObjectURL(blob);
+  $("editorMediaLayer").style.transform = "none";
+  const video = $("editorPreviewVideo");
+  video.pause();
   $("editorCropOverlay").classList.add("hidden");
   $("editorPreviewImage").classList.add("hidden");
-  $("editorPreviewVideo").src = state.editorObjectUrl;
-  $("editorPreviewVideo").classList.remove("hidden");
+  video.dataset.sourceUrl = "";
+  video.src = state.editorObjectUrl;
+  video.classList.remove("hidden");
   $("editorPreviewPlaceholder").classList.add("hidden");
-  $("editorPreviewVideo").play().catch(() => {});
+  setEditorPlayerMode("proxy", "PROCESSED PROXY");
+  video.playbackRate = 1;
+  video.muted = false;
+  video.volume = 1;
+  video.play().catch(() => {});
 }
 
 function editorCustomCropPayload() {
@@ -307,19 +414,57 @@ function writeCropValues(values) {
   return crop;
 }
 
+function cropValuesForPreset() {
+  const preset = $("editorCrop").value || "Original";
+  const sourceWidth = Math.max(2, Number(state.editorInfo?.width || 2));
+  const sourceHeight = Math.max(2, Number(state.editorInfo?.height || 2));
+  if (preset === "Original") return null;
+  if (preset === "Custom") return normalizeCropValues(editorCustomCropPayload());
+
+  const ratios = {"16:9":[16,9], "9:16":[9,16], "1:1":[1,1], "4:5":[4,5]};
+  const ratio = ratios[preset];
+  if (!ratio) return null;
+  const target = ratio[0] / ratio[1];
+  const source = sourceWidth / sourceHeight;
+  let width;
+  let height;
+  if (source > target) {
+    height = sourceHeight;
+    width = Math.floor((height * target) / 2) * 2;
+  } else {
+    width = sourceWidth;
+    height = Math.floor((width / target) / 2) * 2;
+  }
+  return {
+    custom_x:Math.max(0, Math.floor((sourceWidth - width) / 2)),
+    custom_y:Math.max(0, Math.floor((sourceHeight - height) / 2)),
+    custom_width:Math.max(2, width),
+    custom_height:Math.max(2, height),
+  };
+}
+
 function updateCropOverlay() {
   const overlay = $("editorCropOverlay");
-  const imageVisible = !$("editorPreviewImage").classList.contains("hidden");
-  if ($("editorCrop").value !== "Custom" || !state.editorInfo?.has_video || !imageVisible) {
+  const preset = $("editorCrop").value || "Original";
+  const previewVisible =
+    !$("editorPreviewVideo").classList.contains("hidden") ||
+    !$("editorPreviewImage").classList.contains("hidden");
+
+  if (preset === "Original" || !state.editorInfo?.has_video || !previewVisible || state.editorPlayerMode === "proxy") {
     overlay.classList.add("hidden");
     return;
   }
+
   const geometry = cropGeometry();
-  if (!geometry) {
+  const crop = cropValuesForPreset();
+  if (!geometry || !crop) {
     overlay.classList.add("hidden");
     return;
   }
-  const crop = writeCropValues(editorCustomCropPayload());
+
+  if (preset === "Custom") writeCropValues(crop);
+  overlay.dataset.preset = preset === "Custom" ? "false" : "true";
+  overlay.dataset.label = preset === "Custom" ? "CUSTOM CROP" : `${preset} CROP`;
   overlay.style.left = `${geometry.left + crop.custom_x * geometry.scale}px`;
   overlay.style.top = `${geometry.top + crop.custom_y * geometry.scale}px`;
   overlay.style.width = `${crop.custom_width * geometry.scale}px`;
@@ -328,7 +473,7 @@ function updateCropOverlay() {
 }
 
 function beginCropDrag(event) {
-  if ($("editorCrop").value !== "Custom" || !state.editorInfo?.has_video) return;
+  if ($("editorCrop").value !== "Custom" || !state.editorInfo?.has_video || state.editorPlayerMode === "proxy") return;
   const geometry = cropGeometry();
   if (!geometry) return;
   const handle = event.target.closest("[data-crop-handle]")?.dataset.cropHandle || "move";
@@ -386,7 +531,7 @@ function moveCropDrag(event) {
 function endCropDrag() {
   if (!state.cropDrag) return;
   state.cropDrag = null;
-  $("editorStatus").textContent = "Custom crop updated. Play proxy to verify before export.";
+  $("editorStatus").textContent = "Crop updated. Use Processed frame/6s for an exact FFmpeg preview.";
 }
 
 function currentEditorSettings() {
@@ -445,7 +590,12 @@ function applyEditorSettings(data = {}) {
   $("editorVolume").disabled = $("editorMute").checked || !state.editorInfo?.has_audio;
   $("editorAudioPreset").disabled = !state.editorInfo?.has_audio;
   $("editorNoiseReduction").disabled = !state.editorInfo?.has_audio;
-  if (state.editorInfo) syncTimelineFromNumbers();
+  if (state.editorInfo) {
+    syncTimelineFromNumbers();
+    applyLivePlaybackSettings();
+    applyLiveVideoTransform();
+    if ("preview_position" in data) seekEditorTo(Number(data.preview_position || 0));
+  }
   updateCropOverlay();
 }
 
@@ -553,56 +703,235 @@ async function deleteEditorProject() {
   $("editorStatus").textContent = "Project deleted.";
 }
 
+function editorFrameDuration() {
+  const fps = Number(state.editorInfo?.fps || 0);
+  return fps > 0 ? 1 / fps : 1 / 30;
+}
+
+function clampEditorTime(value) {
+  const duration = Math.max(0, Number(state.editorInfo?.duration || 0));
+  return Math.max(0, Math.min(Number(value || 0), duration));
+}
+
+function updateTimelineVisual() {
+  const duration = Math.max(0.001, Number(state.editorInfo?.duration || 0));
+  const start = clampEditorTime($("editorStart").value);
+  const end = Math.max(start, clampEditorTime($("editorEnd").value));
+  const current = clampEditorTime(currentEditorPosition());
+  const startPct = (start / duration) * 100;
+  const endPct = (end / duration) * 100;
+  const currentPct = (current / duration) * 100;
+
+  $("editorTimelineSelection").style.left = `${startPct}%`;
+  $("editorTimelineSelection").style.width = `${Math.max(0, endPct - startPct)}%`;
+  $("editorTimelineOutsideLeft").style.left = "0";
+  $("editorTimelineOutsideLeft").style.width = `${startPct}%`;
+  $("editorTimelineOutsideRight").style.left = `${endPct}%`;
+  $("editorTimelineOutsideRight").style.width = `${Math.max(0, 100 - endPct)}%`;
+  $("editorTimelineInHandle").style.left = `${startPct}%`;
+  $("editorTimelineOutHandle").style.left = `${endPct}%`;
+  $("editorTimelinePlayhead").style.left = `${currentPct}%`;
+
+  $("editorCurrentTime").textContent = formatEditorTime(current);
+  $("editorDurationTime").textContent = formatEditorTime(duration);
+  $("editorTimelineMidTime").textContent = formatDuration(duration / 2);
+  $("editorTimelineEndTime").textContent = formatDuration(duration);
+  $("editorPreviewPosition").value = String(current);
+}
+
 function updateTimelineSummary() {
   const start = Number($("editorStart").value || 0);
   const end = Number($("editorEnd").value || 0);
   const duration = Math.max(0, end - start);
-  $("editorTimelineSummary").textContent = `${formatDuration(start)} → ${formatDuration(end)} • ${formatDuration(duration)} selected`;
+  $("editorTimelineSummary").textContent = `${formatEditorTime(start)} → ${formatEditorTime(end)} • ${formatDuration(duration)} selected`;
+  $("editorSelectedDuration").value = formatEditorTime(duration);
+  updateTimelineVisual();
 }
 
 function syncTimelineFromRanges(changed) {
   let start = Number($("editorStartRange").value || 0);
   let end = Number($("editorEndRange").value || 0);
-  const step = 0.05;
+  const step = editorFrameDuration();
   if (start >= end) {
     if (changed === "start") start = Math.max(0, end - step);
     else end = Math.min(Number($("editorEndRange").max || end + step), start + step);
   }
   $("editorStartRange").value = String(start);
   $("editorEndRange").value = String(end);
-  $("editorStart").value = start.toFixed(2);
-  $("editorEnd").value = end.toFixed(2);
+  $("editorStart").value = start.toFixed(3);
+  $("editorEnd").value = end.toFixed(3);
   updateTimelineSummary();
 }
 
 function syncTimelineFromNumbers() {
   const duration = Number(state.editorInfo?.duration || 0);
+  const frame = editorFrameDuration();
   let start = Math.max(0, Math.min(Number($("editorStart").value || 0), duration));
   let end = Math.max(0, Math.min(Number($("editorEnd").value || duration), duration));
-  if (end <= start) end = Math.min(duration, start + 0.05);
-  $("editorStart").value = String(start);
-  $("editorEnd").value = String(end);
+  if (end <= start) end = Math.min(duration, start + frame);
+  $("editorStart").value = start.toFixed(3);
+  $("editorEnd").value = end.toFixed(3);
   $("editorStartRange").value = String(start);
   $("editorEndRange").value = String(end);
   updateTimelineSummary();
 }
 
+function editorTimelineTime(clientX) {
+  const timeline = $("editorTimeline");
+  const rect = timeline.getBoundingClientRect();
+  if (!rect.width) return 0;
+  const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  return ratio * Number(state.editorInfo?.duration || 0);
+}
+
+function seekEditorTo(seconds, {restoreSource = true} = {}) {
+  if (!state.editorInfo) return;
+  const target = clampEditorTime(seconds);
+  $("editorPreviewPosition").value = String(target);
+  if (restoreSource && state.editorPlayerMode !== "source") showEditorSource({seek:target});
+  const video = $("editorPreviewVideo");
+  if (state.editorPlayerMode === "source" && video.readyState >= 1) {
+    try { video.currentTime = target; } catch {}
+  }
+  updateTimelineVisual();
+}
+
+function seekEditorBy(delta) {
+  seekEditorTo(currentEditorPosition() + Number(delta || 0));
+}
+
+function stepEditorFrame(direction) {
+  const video = $("editorPreviewVideo");
+  if (!video.paused) video.pause();
+  seekEditorTo(currentEditorPosition() + editorFrameDuration() * Number(direction || 1));
+}
+
+function toggleEditorPlayback() {
+  if (!state.editorInfo) return;
+  const video = $("editorPreviewVideo");
+  if (state.editorPlayerMode === "proxy") {
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+    return;
+  }
+  if (state.editorPlayerMode !== "source") {
+    showEditorSource({seek:currentEditorPosition()});
+  }
+  const start = Number($("editorStart").value || 0);
+  const end = Number($("editorEnd").value || state.editorInfo.duration || 0);
+  if (video.currentTime < start || video.currentTime >= end - editorFrameDuration()) {
+    video.currentTime = start;
+  }
+  if (video.paused) video.play().catch(() => {});
+  else video.pause();
+}
+
+function setEditorInPoint() {
+  const current = clampEditorTime(currentEditorPosition());
+  const out = Number($("editorEnd").value || state.editorInfo?.duration || 0);
+  const frame = editorFrameDuration();
+  $("editorStart").value = Math.min(current, Math.max(0, out - frame)).toFixed(3);
+  syncTimelineFromNumbers();
+}
+
+function setEditorOutPoint() {
+  const current = clampEditorTime(currentEditorPosition());
+  const start = Number($("editorStart").value || 0);
+  const frame = editorFrameDuration();
+  $("editorEnd").value = Math.max(current, start + frame).toFixed(3);
+  syncTimelineFromNumbers();
+}
+
+function resetEditorTrim() {
+  if (!state.editorInfo) return;
+  $("editorStart").value = "0";
+  $("editorEnd").value = Number(state.editorInfo.duration || 0).toFixed(3);
+  syncTimelineFromNumbers();
+}
+
+function beginTimelineDrag(event) {
+  if (!state.editorInfo) return;
+  const handle = event.target.closest("#editorTimelineInHandle,#editorTimelineOutHandle");
+  state.timelineDrag = handle
+    ? (handle.id === "editorTimelineInHandle" ? "in" : "out")
+    : "seek";
+  if (state.timelineDrag === "seek") seekEditorTo(editorTimelineTime(event.clientX));
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+}
+
+function moveTimelineDrag(event) {
+  if (!state.timelineDrag || !state.editorInfo) return;
+  const time = editorTimelineTime(event.clientX);
+  const frame = editorFrameDuration();
+  const start = Number($("editorStart").value || 0);
+  const end = Number($("editorEnd").value || state.editorInfo.duration || 0);
+
+  if (state.timelineDrag === "in") {
+    $("editorStart").value = Math.min(time, Math.max(0, end - frame)).toFixed(3);
+    syncTimelineFromNumbers();
+    seekEditorTo(Number($("editorStart").value), {restoreSource:false});
+  } else if (state.timelineDrag === "out") {
+    $("editorEnd").value = Math.max(time, start + frame).toFixed(3);
+    syncTimelineFromNumbers();
+    seekEditorTo(Number($("editorEnd").value), {restoreSource:false});
+  } else {
+    seekEditorTo(time);
+  }
+}
+
+function endTimelineDrag(event) {
+  if (!state.timelineDrag) return;
+  state.timelineDrag = null;
+  try { $("editorTimeline").releasePointerCapture?.(event.pointerId); } catch {}
+}
+
+async function loadEditorTimelineWaveform() {
+  clearEditorWaveformUrl();
+  const image = $("editorTimelineWaveform");
+  image.classList.add("hidden");
+  image.removeAttribute("src");
+  if (!state.editorInfo?.has_audio || !$("editorSourcePath").value.trim()) return;
+
+  try {
+    const blob = await apiBlob("/api/editor/waveform", {
+      method:"POST",
+      body:JSON.stringify({path:$("editorSourcePath").value.trim()}),
+    });
+    state.editorWaveformUrl = URL.createObjectURL(blob);
+    image.src = state.editorWaveformUrl;
+    image.classList.remove("hidden");
+  } catch {}
+}
+
 function renderEditorSource(data) {
   const info = data.info || {};
   state.editorInfo = info;
+  state.editorMediaUrl = data.media_url || "";
+  state.editorMediaToken = data.media_token || "";
   $("editorSourcePath").value = data.path || data.selected || "";
+
   const duration = Number(info.duration || 0);
-  $("editorStart").value = "0";
-  $("editorEnd").value = String(duration.toFixed(3));
+  $("editorStart").value = "0.000";
+  $("editorEnd").value = duration.toFixed(3);
+  $("editorStart").max = String(duration);
   $("editorEnd").max = String(duration);
   $("editorStartRange").max = String(duration);
   $("editorEndRange").max = String(duration);
   $("editorStartRange").value = "0";
   $("editorEndRange").value = String(duration);
-  $("editorPreviewPosition").value = String(Math.min(duration / 2, 5).toFixed(2));
+  $("editorPreviewPosition").value = "0";
   $("editorPreviewPosition").max = String(duration);
   $("editorOutputName").value = data.output_name || "edited_media";
   $("editorOutputDir").value = data.output_dir || state.settings.download_dir || "";
+
+  const transportIds = [
+    "editorPlayPauseBtn","editorSeekBackBtn","editorSeekForwardBtn","editorStepBackBtn","editorStepForwardBtn",
+    "editorGoInBtn","editorGoOutBtn","editorSetInBtn","editorSetOutBtn","editorResetTrimBtn",
+    "editorSourceViewBtn","editorFullscreenBtn",
+  ];
+  transportIds.forEach((id) => $(id).disabled = !(duration > 0));
+
   $("editorPreviewBtn").disabled = !info.has_video;
   $("editorProxyBtn").disabled = !info.has_video;
   $("editorWaveformBtn").disabled = !info.has_audio;
@@ -625,27 +954,25 @@ function renderEditorSource(data) {
   $("editorCropWidth").max = String(info.width || 2);
   $("editorCropHeight").max = String(info.height || 2);
   $("editorCustomCropPanel").classList.toggle("hidden", $("editorCrop").value !== "Custom");
-  updateTimelineSummary();
 
   const dimensions = info.has_video ? `${info.width || "?"}×${info.height || "?"}` : "Audio only";
+  const fps = Number(info.fps || 0) > 0 ? `${Number(info.fps).toFixed(2)} fps` : "";
   $("editorSourceMeta").textContent = [
     data.filename || "Media",
     formatDuration(info.duration),
     dimensions,
+    fps,
     info.has_audio ? "Audio" : "",
   ].filter(Boolean).join(" • ");
-  $("editorStatus").textContent = "Source loaded. Adjust controls, preview, then export.";
+  $("editorStatus").textContent = "Source ready. Play, seek, set In/Out, then export the selection.";
 
   clearEditorPreviewObjectUrl();
-  $("editorPreviewVideo").pause();
-  $("editorPreviewVideo").removeAttribute("src");
-  $("editorPreviewVideo").classList.add("hidden");
   $("editorPreviewImage").classList.add("hidden");
   $("editorCropOverlay").classList.add("hidden");
-  $("editorPreviewPlaceholder").classList.remove("hidden");
-  $("editorPreviewPlaceholder").textContent = info.has_video
-    ? "Click Preview frame to render the current crop/rotation."
-    : "Click Waveform to preview this audio file.";
+  $("editorPreviewPlaceholder").classList.add("hidden");
+  updateTimelineSummary();
+  showEditorSource({seek:0});
+  loadEditorTimelineWaveform();
 }
 
 async function loadEditorPath(path) {
@@ -684,24 +1011,21 @@ async function chooseEditorFile() {
 
 async function refreshEditorPreview() {
   if (!state.editorInfo?.has_video) return;
-  $("editorStatus").textContent = "Rendering preview frame…";
+  $("editorStatus").textContent = "Rendering exact FFmpeg frame…";
   $("editorPreviewBtn").disabled = true;
   try {
-    const customMode = $("editorCrop").value === "Custom";
     const blob = await apiBlob("/api/editor/preview", {
       method:"POST",
       body:JSON.stringify({
         path:$("editorSourcePath").value.trim(),
-        position:Number($("editorPreviewPosition").value || 0),
-        crop_preset:customMode ? "Original" : $("editorCrop").value,
-        rotate:customMode ? "0°" : $("editorRotate").value,
-        ...(customMode ? {} : editorCustomCropPayload()),
+        position:currentEditorPosition(),
+        crop_preset:$("editorCrop").value,
+        rotate:$("editorRotate").value,
+        ...editorCustomCropPayload(),
       }),
     });
-    showEditorImage(blob, customMode);
-    $("editorStatus").textContent = customMode
-      ? "Original frame loaded. Drag/resize the cyan crop box, then play proxy to verify."
-      : "Preview frame updated.";
+    showEditorImage(blob, false);
+    $("editorStatus").textContent = "Processed frame ready. Click Source to return to full playback.";
   } catch (error) {
     $("editorStatus").textContent = error.message;
   } finally {
@@ -718,7 +1042,7 @@ async function refreshEditorProxy() {
       method:"POST",
       body:JSON.stringify({
         path:$("editorSourcePath").value.trim(),
-        position:Number($("editorPreviewPosition").value || $("editorStart").value || 0),
+        position:currentEditorPosition(),
         duration:6,
         crop_preset:$("editorCrop").value,
         rotate:$("editorRotate").value,
@@ -748,8 +1072,9 @@ async function refreshEditorWaveform() {
       method:"POST",
       body:JSON.stringify({path:$("editorSourcePath").value.trim()}),
     });
-    showEditorImage(blob);
-    $("editorStatus").textContent = "Waveform updated.";
+    showEditorImage(blob, false);
+    setEditorPlayerMode("waveform", "WAVEFORM");
+    $("editorStatus").textContent = "Waveform view ready. Click Source to return to playback.";
   } catch (error) {
     $("editorStatus").textContent = error.message;
   } finally {
@@ -1121,44 +1446,157 @@ async function loadDiagnostics() {
 }
 $("chooseEditorFileBtn").addEventListener("click", chooseEditorFile);
 $("loadEditorPathBtn").addEventListener("click", () => loadEditorPath());
+$("editorSourceViewBtn").addEventListener("click", () => showEditorSource({seek:currentEditorPosition()}));
 $("editorPreviewBtn").addEventListener("click", refreshEditorPreview);
 $("editorProxyBtn").addEventListener("click", refreshEditorProxy);
 $("editorWaveformBtn").addEventListener("click", refreshEditorWaveform);
 $("chooseEditorOutputBtn").addEventListener("click", chooseEditorOutputFolder);
 $("editorExportBtn").addEventListener("click", startEditorExport);
 $("editorCancelExportBtn").addEventListener("click", cancelEditorExport);
+
+$("editorPlayPauseBtn").addEventListener("click", toggleEditorPlayback);
+$("editorSeekBackBtn").addEventListener("click", () => seekEditorBy(-5));
+$("editorSeekForwardBtn").addEventListener("click", () => seekEditorBy(5));
+$("editorStepBackBtn").addEventListener("click", () => stepEditorFrame(-1));
+$("editorStepForwardBtn").addEventListener("click", () => stepEditorFrame(1));
+$("editorSetInBtn").addEventListener("click", setEditorInPoint);
+$("editorSetOutBtn").addEventListener("click", setEditorOutPoint);
+$("editorGoInBtn").addEventListener("click", () => seekEditorTo(Number($("editorStart").value || 0)));
+$("editorGoOutBtn").addEventListener("click", () => seekEditorTo(Number($("editorEnd").value || 0)));
+$("editorResetTrimBtn").addEventListener("click", resetEditorTrim);
+$("editorFullscreenBtn").addEventListener("click", () => {
+  $("editorPreviewShell").requestFullscreen?.().catch(() => {});
+});
+$("editorPreviewShell").addEventListener("dblclick", () => {
+  if (state.editorInfo) $("editorPreviewShell").requestFullscreen?.().catch(() => {});
+});
+
+$("editorTimeline").addEventListener("pointerdown", beginTimelineDrag);
+$("editorTimeline").addEventListener("pointermove", moveTimelineDrag);
+$("editorTimeline").addEventListener("pointerup", endTimelineDrag);
+$("editorTimeline").addEventListener("pointercancel", endTimelineDrag);
+
 $("editorCrop").addEventListener("change", () => {
   const custom = $("editorCrop").value === "Custom";
   $("editorCustomCropPanel").classList.toggle("hidden", !custom);
-  if (custom && state.editorInfo?.has_video) {
-    refreshEditorPreview();
-  } else {
-    $("editorCropOverlay").classList.add("hidden");
-    if (state.editorInfo?.has_video) $("editorStatus").textContent = "Crop changed. Preview frame or proxy to refresh.";
+  if (state.editorInfo?.has_video) {
+    if (state.editorPlayerMode !== "source") showEditorSource({seek:currentEditorPosition()});
+    updateCropOverlay();
+    $("editorStatus").textContent = custom
+      ? "Drag/resize the crop box on the player. Use Processed frame for exact output."
+      : "Crop guide updated. Use Processed frame for exact output.";
   }
 });
 ["editorCropX","editorCropY","editorCropWidth","editorCropHeight"].forEach((id) => {
-  $(id).addEventListener("input", updateCropOverlay);
+  $(id).addEventListener("input", () => {
+    if (state.editorPlayerMode !== "source" && state.editorInfo) showEditorSource({seek:currentEditorPosition()});
+    updateCropOverlay();
+  });
 });
 $("editorCropOverlay").addEventListener("pointerdown", beginCropDrag);
 window.addEventListener("pointermove", moveCropDrag);
 window.addEventListener("pointerup", endCropDrag);
-window.addEventListener("resize", updateCropOverlay);
+window.addEventListener("resize", () => {
+  updateCropOverlay();
+  updateTimelineVisual();
+});
+
 $("editorStartRange").addEventListener("input", () => syncTimelineFromRanges("start"));
 $("editorEndRange").addEventListener("input", () => syncTimelineFromRanges("end"));
 $("editorStart").addEventListener("change", syncTimelineFromNumbers);
 $("editorEnd").addEventListener("change", syncTimelineFromNumbers);
+
 $("editorRotate").addEventListener("change", () => {
-  if (state.editorInfo?.has_video) $("editorStatus").textContent = "Rotation changed. Click Preview frame to refresh.";
+  applyLiveVideoTransform();
+  updateCropOverlay();
+  if (state.editorInfo?.has_video) $("editorStatus").textContent = "Rotation preview updated. Processed frame shows the exact render.";
+});
+$("editorSpeed").addEventListener("change", () => {
+  applyLivePlaybackSettings();
+  if (state.editorInfo) $("editorStatus").textContent = "Playback speed updated live.";
+});
+$("editorVolume").addEventListener("input", () => {
+  applyLivePlaybackSettings();
+  if (Number($("editorVolume").value || 100) > 100) {
+    $("editorStatus").textContent = "Browser preview is capped at 100% volume; export/proxy will use the requested boost.";
+  }
 });
 $("editorMute").addEventListener("change", () => {
   $("editorVolume").disabled = $("editorMute").checked || !state.editorInfo?.has_audio;
+  applyLivePlaybackSettings();
 });
 $("editorAudioPreset").addEventListener("change", () => {
-  if (state.editorInfo?.has_audio) $("editorStatus").textContent = "Audio preset changed. Play proxy to hear the result.";
+  if (state.editorInfo?.has_audio) $("editorStatus").textContent = "Audio preset is an FFmpeg effect. Use Processed 6s to hear it.";
 });
 $("editorNoiseReduction").addEventListener("change", () => {
-  if (state.editorInfo?.has_audio) $("editorStatus").textContent = "Noise reduction changed. Play proxy to hear the result.";
+  if (state.editorInfo?.has_audio) $("editorStatus").textContent = "Noise reduction is an FFmpeg effect. Use Processed 6s to hear it.";
+});
+
+const editorVideo = $("editorPreviewVideo");
+editorVideo.addEventListener("loadedmetadata", () => {
+  applyLivePlaybackSettings();
+  applyLiveVideoTransform();
+  if (state.editorPlayerMode === "source") {
+    updateTimelineVisual();
+    updateCropOverlay();
+  }
+});
+editorVideo.addEventListener("timeupdate", () => {
+  if (state.editorPlayerMode === "proxy") {
+    $("editorCurrentTime").textContent = formatEditorTime(editorVideo.currentTime || 0);
+    $("editorDurationTime").textContent = formatEditorTime(editorVideo.duration || 0);
+    return;
+  }
+  if (state.editorPlayerMode !== "source") return;
+  const outPoint = Number($("editorEnd").value || state.editorInfo?.duration || 0);
+  const current = Number(editorVideo.currentTime || 0);
+  $("editorPreviewPosition").value = String(current);
+  if (!editorVideo.paused && outPoint > 0 && current >= outPoint) {
+    editorVideo.pause();
+    try { editorVideo.currentTime = outPoint; } catch {}
+    $("editorPreviewPosition").value = String(outPoint);
+  }
+  updateTimelineVisual();
+});
+editorVideo.addEventListener("play", () => {
+  $("editorPlayPauseBtn").textContent = "❚❚";
+});
+editorVideo.addEventListener("pause", () => {
+  $("editorPlayPauseBtn").textContent = "▶";
+});
+editorVideo.addEventListener("ended", () => {
+  $("editorPlayPauseBtn").textContent = "▶";
+});
+editorVideo.addEventListener("error", () => {
+  if (state.editorPlayerMode === "source" && state.editorInfo) {
+    setEditorPlayerMode("source-error", "CODEC PREVIEW");
+    $("editorStatus").textContent = "This codec cannot play directly in the browser. Use Processed 6s for playback; export still works locally with FFmpeg.";
+  }
+});
+
+window.addEventListener("keydown", (event) => {
+  if (!state.editorInfo) return;
+  const tag = document.activeElement?.tagName?.toLowerCase();
+  if (["input","select","textarea","button"].includes(tag)) return;
+
+  if (event.code === "Space") {
+    event.preventDefault();
+    toggleEditorPlayback();
+  } else if (event.key === "i" || event.key === "I") {
+    event.preventDefault();
+    setEditorInPoint();
+  } else if (event.key === "o" || event.key === "O") {
+    event.preventDefault();
+    setEditorOutPoint();
+  } else if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    if (event.shiftKey) seekEditorBy(-5);
+    else stepEditorFrame(-1);
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    if (event.shiftKey) seekEditorBy(5);
+    else stepEditorFrame(1);
+  }
 });
 
 $("applyEditorPresetBtn").addEventListener("click", applySelectedEditorPreset);
