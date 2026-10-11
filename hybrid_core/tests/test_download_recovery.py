@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import time
@@ -29,12 +30,36 @@ class DownloadRecoveryIntegrationTests(unittest.TestCase):
             root = Path(folder)
             state_file = root / "jobs.json"
             state_file.write_text(
-                '{"version":2,"jobs":[{"id":"recover1","kind":"download","status":"running","progress":0.42,'
-                '"detail":"Downloading","error":"","created_at":1,"updated_at":2,'
-                '"request":{"analysis_id":"old","url":"https://example.com/video","mode":"Video",'
-                '"video_quality":"720p","audio_format":"MP3","audio_quality":"192","filename":"video",'
-                f'"download_dir":"{str(root).replace(chr(92), chr(92)+chr(92))}"},'
-                '"result":{},"metrics":{"speed_bps":1000},"meta":{"attempt_count":1}}]}',
+                json.dumps(
+                    {
+                        "version": 2,
+                        "jobs": [
+                            {
+                                "id": "recover1",
+                                "kind": "download",
+                                "status": "running",
+                                "progress": 0.42,
+                                "detail": "Downloading",
+                                "error": "",
+                                "created_at": 1,
+                                "updated_at": 2,
+                                "request": {
+                                    "analysis_id": "old",
+                                    "url": "https://example.com/video",
+                                    "mode": "Video",
+                                    "video_quality": "720p",
+                                    "audio_format": "MP3",
+                                    "audio_quality": "192",
+                                    "filename": "video",
+                                    "download_dir": str(root),
+                                },
+                                "result": {},
+                                "metrics": {"speed_bps": 1000},
+                                "meta": {"attempt_count": 1},
+                            }
+                        ],
+                    }
+                ),
                 encoding="utf-8",
             )
             mocked_analyze.return_value = (

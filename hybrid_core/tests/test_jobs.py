@@ -175,17 +175,26 @@ class JobManagerTests(unittest.TestCase):
         manager._set(job, status="completed", progress=1.0)
         self.assertFalse(manager.has_active_work())
 
-    def test_interrupted_download_is_restored_as_retryable_failure(self):
+    @patch("hybrid_core.jobs.JobManager._run_download")
+    def test_interrupted_download_is_restored_and_resubmitted(self, mocked_run_download):
         with tempfile.TemporaryDirectory() as folder:
             state_file = Path(folder) / "jobs.json"
             state_file.write_text(
-                '{"version":1,"jobs":[{"id":"abc","kind":"download","status":"running","progress":0.4,"detail":"Downloading","error":"","created_at":1,"updated_at":2,"request":{"url":"https://example.com/a","filename":"a"},"result":{}}]}',
+                '{"version":2,"jobs":[{"id":"abc","kind":"download","status":"running","progress":0.4,"detail":"Downloading","error":"","created_at":1,"updated_at":2,"request":{"url":"https://example.com/a","filename":"a","download_dir":"C:/Downloads"},"result":{},"metrics":{"speed_bps":1024},"meta":{"attempt_count":1}}]}',
                 encoding="utf-8",
             )
             restored = JobManager(max_downloads=1, state_path=state_file)
+
+            deadline = time.time() + 1
+            while time.time() < deadline and not mocked_run_download.called:
+                time.sleep(0.01)
+
             state = restored.snapshot("abc")
-            self.assertEqual(state["status"], "failed")
-            self.assertIn("Retry", state["error"])
+            self.assertEqual(state["status"], "queued")
+            self.assertEqual(state["meta"]["recovery_count"], 1)
+            self.assertEqual(state["metrics"], {})
+            self.assertIn("Recovered", state["detail"])
+            mocked_run_download.assert_called_once()
 
 if __name__ == "__main__":
     unittest.main()
