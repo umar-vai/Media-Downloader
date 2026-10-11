@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 import urllib.request
@@ -56,6 +59,32 @@ def _asset_map(release: dict[str, Any]) -> dict[str, str]:
         if name and url:
             result[name] = url
     return result
+
+
+def _asset_size_map(release: dict[str, Any]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for item in release.get("assets") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if name and size > 0:
+            result[name] = size
+    return result
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest().lower()
 
 
 def _expected_checksum(text: str, asset_name: str) -> str:
@@ -195,6 +224,7 @@ class CoreUpdateService:
             tag = str(release.get("tag_name") or "")
             latest = tag[len(TAG_PREFIX):]
             assets = _asset_map(release)
+            asset_sizes = _asset_size_map(release)
             asset_name = next((name for name in ASSET_NAMES if name in assets), "")
             checksum_name = f"{asset_name}.sha256" if asset_name else ""
             available = version_tuple(latest) > version_tuple(self.current_version)
@@ -206,8 +236,10 @@ class CoreUpdateService:
                 "release_url": str(release.get("html_url") or ""),
                 "asset_name": asset_name,
                 "asset_url": assets.get(asset_name, ""),
+                "asset_size": int(asset_sizes.get(asset_name, 0)),
                 "checksum_url": assets.get(checksum_name, ""),
                 "updater_asset_url": assets.get(UPDATER_ASSET_NAME, ""),
+                "updater_asset_size": int(asset_sizes.get(UPDATER_ASSET_NAME, 0)),
                 "updater_checksum_url": assets.get(updater_checksum_name, ""),
             }
 
@@ -267,6 +299,175 @@ class CoreUpdateService:
     def _download_bytes(self, url: str) -> bytes:
         return self._request_bytes(url, timeout=45)
 
+    def _update_transfer_progress(
+        self,
+        *,
+        partial: Path,
+        expected_size: int,
+        report_progress: bool,
+    ) -> None:
+        if not report_progress:
+            return
+        try:
+            downloaded = int(partial.stat().st_size)
+        except OSError:
+            downloaded = 0
+        if expected_size > 0:
+            progress = downloaded / expected_size
+            self._set(progress=max(0.0, min(0.96, progress)))
+        elif downloaded > 0:
+            self._set(progress=0.05)
+
+    def _urllib_stream_resume(
+        self,
+        *,
+        url: str,
+        partial: Path,
+        expected_size: int,
+        report_progress: bool,
+    ) -> None:
+        offset = int(partial.stat().st_size) if partial.exists() else 0
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/octet-stream",
+            "Connection": "close",
+        }
+        if offset > 0:
+            headers["Range"] = f"bytes={offset}-"
+
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(request, timeout=90) as response:
+            status = int(getattr(response, "status", 0) or response.getcode() or 0)
+            if offset > 0 and status != 206:
+                offset = 0
+                partial.unlink(missing_ok=True)
+
+            mode = "ab" if offset > 0 else "wb"
+            with partial.open(mode) as output:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+                    self._update_transfer_progress(
+                        partial=partial,
+                        expected_size=expected_size,
+                        report_progress=report_progress,
+                    )
+
+    def _native_curl_resume(
+        self,
+        *,
+        url: str,
+        partial: Path,
+        expected_size: int,
+        report_progress: bool,
+    ) -> None:
+        curl = shutil.which("curl.exe") if os.name == "nt" else shutil.which("curl")
+        if not curl:
+            raise RuntimeError("Native curl is unavailable.")
+
+        def run(*, resume: bool) -> int:
+            command = [
+                curl,
+                "--location",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--retry",
+                "8",
+                "--retry-all-errors",
+                "--retry-delay",
+                "2",
+                "--connect-timeout",
+                "20",
+                "--output",
+                str(partial),
+                "--header",
+                f"User-Agent: {USER_AGENT}",
+                "--header",
+                "Accept: application/octet-stream",
+            ]
+            if resume and partial.exists() and partial.stat().st_size > 0:
+                command.extend(["--continue-at", "-"])
+            command.append(url)
+
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                text=True,
+            )
+            while process.poll() is None:
+                self._update_transfer_progress(
+                    partial=partial,
+                    expected_size=expected_size,
+                    report_progress=report_progress,
+                )
+                time.sleep(0.5)
+            self._update_transfer_progress(
+                partial=partial,
+                expected_size=expected_size,
+                report_progress=report_progress,
+            )
+            return int(process.returncode or 0)
+
+        resumed = partial.exists() and partial.stat().st_size > 0
+        code = run(resume=resumed)
+        if code == 0:
+            return
+
+        if resumed:
+            partial.unlink(missing_ok=True)
+            code = run(resume=False)
+        if code != 0:
+            raise RuntimeError(f"Native curl download failed with exit code {code}.")
+
+    def _curl_cffi_stream_resume(
+        self,
+        *,
+        url: str,
+        partial: Path,
+        expected_size: int,
+        report_progress: bool,
+    ) -> None:
+        from curl_cffi import requests as curl_requests
+
+        offset = int(partial.stat().st_size) if partial.exists() else 0
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/octet-stream",
+        }
+        if offset > 0:
+            headers["Range"] = f"bytes={offset}-"
+
+        response = curl_requests.get(
+            url,
+            headers=headers,
+            timeout=600,
+            impersonate="chrome",
+            allow_redirects=True,
+            stream=True,
+        )
+        response.raise_for_status()
+        status = int(getattr(response, "status_code", 0) or 0)
+        if offset > 0 and status != 206:
+            offset = 0
+            partial.unlink(missing_ok=True)
+
+        mode = "ab" if offset > 0 else "wb"
+        with partial.open(mode) as output:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                output.write(chunk)
+                self._update_transfer_progress(
+                    partial=partial,
+                    expected_size=expected_size,
+                    report_progress=report_progress,
+                )
+
     def _download_verified_asset(
         self,
         *,
@@ -274,52 +475,84 @@ class CoreUpdateService:
         checksum_url: str,
         target: Path,
         asset_name: str,
+        expected_size: int = 0,
         report_progress: bool = False,
     ) -> None:
         checksum_text = self._download_bytes(checksum_url).decode("utf-8", errors="replace")
         expected = _expected_checksum(checksum_text, asset_name)
         partial = target.with_suffix(target.suffix + ".part")
-        partial.unlink(missing_ok=True)
 
-        digest = hashlib.sha256()
-        try:
-            request = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": USER_AGENT,
-                    "Accept": "application/octet-stream",
-                    "Connection": "close",
-                },
-            )
-            with urllib.request.urlopen(request, timeout=45) as response, partial.open("wb") as output:
-                total = int(response.headers.get("Content-Length") or 0)
-                downloaded = 0
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    output.write(chunk)
-                    digest.update(chunk)
-                    downloaded += len(chunk)
-                    if report_progress:
-                        progress = (downloaded / total) if total else 0.0
-                        self._set(progress=max(0.0, min(0.96, progress)))
-        except Exception:
-            partial.unlink(missing_ok=True)
-            data = self._curl_cffi_bytes(
-                url,
-                timeout=90,
-                accept="application/octet-stream",
-            )
-            partial.write_bytes(data)
-            digest = hashlib.sha256(data)
+        if target.is_file() and _sha256_file(target) == expected:
             if report_progress:
                 self._set(progress=0.96)
+            return
 
-        actual = digest.hexdigest().lower()
-        if actual != expected:
+        if partial.exists() and expected_size > 0 and partial.stat().st_size > expected_size:
             partial.unlink(missing_ok=True)
-            raise RuntimeError(f"Downloaded {asset_name} failed SHA-256 verification.")
+
+        resume_bytes = int(partial.stat().st_size) if partial.exists() else 0
+        if report_progress and resume_bytes > 0:
+            self._set(
+                detail=f"Resuming Local Core update from {resume_bytes / 1024 / 1024:.1f} MB…"
+            )
+            self._update_transfer_progress(
+                partial=partial,
+                expected_size=expected_size,
+                report_progress=True,
+            )
+
+        errors: list[str] = []
+        try:
+            self._urllib_stream_resume(
+                url=url,
+                partial=partial,
+                expected_size=expected_size,
+                report_progress=report_progress,
+            )
+        except Exception as exc:
+            errors.append(f"urllib: {exc}")
+
+        if not partial.is_file() or (expected_size > 0 and partial.stat().st_size < expected_size):
+            try:
+                self._native_curl_resume(
+                    url=url,
+                    partial=partial,
+                    expected_size=expected_size,
+                    report_progress=report_progress,
+                )
+            except Exception as exc:
+                errors.append(f"native curl: {exc}")
+
+        if not partial.is_file() or (expected_size > 0 and partial.stat().st_size < expected_size):
+            try:
+                self._curl_cffi_stream_resume(
+                    url=url,
+                    partial=partial,
+                    expected_size=expected_size,
+                    report_progress=report_progress,
+                )
+            except Exception as exc:
+                errors.append(f"curl_cffi: {exc}")
+
+        if not partial.is_file():
+            raise RuntimeError("Update download did not create a partial file.")
+
+        if expected_size > 0 and partial.stat().st_size != expected_size:
+            detail = " | ".join(errors[-3:])
+            raise RuntimeError(
+                f"Update download is incomplete ({partial.stat().st_size} of {expected_size} bytes). "
+                f"Press Download update again to resume."
+                + (f" {detail}" if detail else "")
+            )
+
+        actual = _sha256_file(partial)
+        if actual != expected:
+            # A wrong checksum means the resumable bytes cannot be trusted.
+            partial.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Downloaded {asset_name} failed SHA-256 verification. "
+                "The partial file was cleared; retry will start cleanly."
+            )
         partial.replace(target)
 
     def _download_worker(self, candidate: dict[str, Any]) -> None:
@@ -334,6 +567,7 @@ class CoreUpdateService:
                 checksum_url=str(candidate["checksum_url"]),
                 target=target,
                 asset_name=asset_name,
+                expected_size=int(candidate.get("asset_size") or 0),
                 report_progress=True,
             )
 
@@ -347,6 +581,7 @@ class CoreUpdateService:
                     checksum_url=updater_checksum_url,
                     target=updater_target,
                     asset_name=UPDATER_ASSET_NAME,
+                    expected_size=int(candidate.get("updater_asset_size") or 0),
                 )
                 staged_updater = str(updater_target)
 
@@ -359,4 +594,7 @@ class CoreUpdateService:
                 can_apply=self.can_apply,
             )
         except Exception as exc:
-            self._set(status="error", detail=f"Update download failed: {exc}", progress=0.0)
+            self._set(
+                status="error",
+                detail=f"Update download paused: {exc}",
+            )

@@ -263,6 +263,18 @@ The lightweight Windows agent now has installation, supervision, startup control
 - Added regression coverage for generic transport ordering, generic browser-session isolation and embedded-player ranking.
 - Local Core bumped to v0.10.3.
 
+### Phase 5A.4 — Resumable large updater downloads ✅
+
+- Core/update-helper downloads now keep their `.part` files after transport timeouts instead of deleting already downloaded bytes.
+- Retry resumes with HTTP Range from the existing partial file.
+- Windows uses native `curl.exe --continue-at -` with retries as the preferred large-file recovery path after urllib fails.
+- A streaming curl_cffi fallback remains available with a much longer transfer window and no whole-asset in-memory buffering.
+- GitHub release asset sizes are recorded so the PWA can keep meaningful progress while switching transports or resuming.
+- Existing fully downloaded/staged assets are reused after SHA-256 verification instead of being downloaded again.
+- Incomplete downloads report that **Download update** can be pressed again to continue from the partial file.
+- SHA-256 remains mandatory after every resumed/multi-transport transfer; a checksum mismatch clears the partial file and forces a clean retry.
+- Local Core bumped to v0.10.4.
+
 ### Remaining Phase 5 work
 
 - Long-running real-site regression matrix and soak tests on installed Windows builds.

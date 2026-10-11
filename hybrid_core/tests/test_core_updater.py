@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from hybrid_core.core_updater import CoreUpdateService, _expected_checksum, select_release, version_tuple
+from hybrid_core.core_updater import CoreUpdateService, _expected_checksum, _sha256_file, select_release, version_tuple
 
 
 class CoreUpdaterTests(unittest.TestCase):
@@ -51,6 +51,52 @@ class CoreUpdaterTests(unittest.TestCase):
 
             self.assertEqual(payload, b'{"ok":true}')
             fallback.assert_called_once()
+
+    def test_urllib_stream_resumes_existing_partial(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+
+        full = b"abcdef"
+        class FakeResponse:
+            status = 206
+            headers = {"Content-Length": "3"}
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def getcode(self): return self.status
+            def read(self, size=-1):
+                if hasattr(self, "_done"):
+                    return b""
+                self._done = True
+                return b"def"
+
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            service = CoreUpdateService(current_version="0.10.3", update_dir=root)
+            partial = root / "MediaDownloaderCore.exe.part"
+            partial.write_bytes(b"abc")
+
+            with patch("hybrid_core.core_updater.urllib.request.urlopen", return_value=FakeResponse()) as mocked:
+                service._urllib_stream_resume(
+                    url="https://example.com/core.exe",
+                    partial=partial,
+                    expected_size=len(full),
+                    report_progress=False,
+                )
+
+            request = mocked.call_args.args[0]
+            self.assertEqual(request.get_header("Range"), "bytes=3-")
+            self.assertEqual(partial.read_bytes(), full)
+
+    def test_sha256_file_matches_bytes(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        import hashlib
+
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "asset.bin"
+            path.write_bytes(b"resume-me")
+            self.assertEqual(_sha256_file(path), hashlib.sha256(b"resume-me").hexdigest())
 
     def test_checksum_parser_matches_asset(self):
         digest = "a" * 64
