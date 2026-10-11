@@ -11,7 +11,14 @@ import yt_dlp
 from imageio_ffmpeg import get_ffmpeg_exe
 
 from .browser_resolver import resolve_with_installed_browser
-from .sources import detect_platform, extraction_attempts, platform_name, video_format_selector
+from .sources import (
+    browser_session_attempts,
+    detect_platform,
+    extraction_attempts,
+    is_pornhub_url,
+    platform_name,
+    video_format_selector,
+)
 
 
 StatusCallback = Callable[[str], None]
@@ -107,6 +114,33 @@ def analyze_url(
             errors.append(f"Attempt {index}: {str(exc).strip()}")
 
     if not info:
+        session_attempts = browser_session_attempts(url)
+        for index, (attempt_url, session_options) in enumerate(session_attempts, start=1):
+            _check_cancel(cancel_event)
+            if on_status:
+                on_status(f"Trying browser session {index}/{len(session_attempts)}")
+            options = dict(session_options or {})
+            try:
+                with yt_dlp.YoutubeDL(
+                    {
+                        "quiet": True,
+                        "no_warnings": True,
+                        "skip_download": True,
+                        "noplaylist": True,
+                        "cachedir": False,
+                        "socket_timeout": 18,
+                        "retries": 1,
+                        "fragment_retries": 1,
+                        **options,
+                    }
+                ) as ydl:
+                    info = ydl.extract_info(attempt_url, download=False) or {}
+                if info:
+                    break
+            except Exception as exc:
+                errors.append(f"Browser session {index}: {str(exc).strip()}")
+
+    if not info:
         _check_cancel(cancel_event)
         if on_status:
             on_status("Trying installed-browser fallback")
@@ -121,10 +155,19 @@ def analyze_url(
 
     _check_cancel(cancel_event)
     if not info:
-        detail = "\n".join(errors[-5:])
+        if is_pornhub_url(url):
+            raise RuntimeError(
+                "Could not find a playable stream from this page. "
+                "Tried the site extractor, legacy HTTPS transport, installed-browser session cookies, "
+                "and browser media capture. If the video plays in your normal browser, keep that browser "
+                "profile available and Analyze again. DRM-protected streams are not supported."
+            )
+        detail = " | ".join(errors[-2:])
+        if len(detail) > 700:
+            detail = detail[:697] + "..."
         raise RuntimeError(
             "No compatible extraction path succeeded."
-            + (f"\n{detail}" if detail else "")
+            + (f" {detail}" if detail else "")
         )
 
     return _public_summary(url, info), info

@@ -81,6 +81,35 @@ def _looks_like_media(url: str, mime_type: str) -> bool:
     return lower_url.endswith(MEDIA_EXTENSIONS)
 
 
+def _format_from_url(page_url: str, media_url: str, mime_type: str = "") -> dict[str, Any] | None:
+    return _format_from_response(
+        page_url,
+        {
+            "url": media_url,
+            "mimeType": mime_type,
+        },
+    )
+
+
+def _cookie_header(cookies: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for cookie in cookies:
+        name = str(cookie.get("name") or "")
+        value = str(cookie.get("value") or "")
+        if name:
+            parts.append(f"{name}={value}")
+    return "; ".join(parts)
+
+
+def _add_cookie_header(item: dict[str, Any], cookie_header: str) -> dict[str, Any]:
+    if not cookie_header:
+        return item
+    headers = dict(item.get("http_headers") or {})
+    headers["Cookie"] = cookie_header
+    item["http_headers"] = headers
+    return item
+
+
 def _format_from_response(page_url: str, response: dict[str, Any]) -> dict[str, Any] | None:
     url = str(response.get("url") or "")
     mime = str(response.get("mimeType") or "")
@@ -263,6 +292,39 @@ def resolve_with_installed_browser(
                     except Exception:
                         pass
 
+                if elapsed > 3.0 and int(elapsed * 2) % 4 == 0:
+                    try:
+                        result = cdp.command(
+                            "Runtime.evaluate",
+                            {
+                                "expression": (
+                                    "(()=>{"
+                                    "const out=new Set();"
+                                    "for(const v of document.querySelectorAll('video')){"
+                                    "for(const x of [v.currentSrc,v.src]) if(x) out.add(x);"
+                                    "for(const s of v.querySelectorAll('source')) if(s.src) out.add(s.src);"
+                                    "}"
+                                    "for(const s of document.querySelectorAll('source')) if(s.src) out.add(s.src);"
+                                    "for(const e of performance.getEntriesByType('resource')){"
+                                    "const n=e&&e.name||'';"
+                                    "if(/\\.(?:m3u8|mpd|mp4|m4v|webm|m4a|mp3)(?:[?#]|$)/i.test(n)) out.add(n);"
+                                    "}"
+                                    "return [...out];"
+                                    "})()"
+                                ),
+                                "returnByValue": True,
+                            },
+                            timeout=2.0,
+                        )
+                        values = ((result.get("result") or {}).get("value")) or []
+                        for media_url in values:
+                            item = _format_from_url(url, str(media_url or ""))
+                            if item and item["url"] not in seen:
+                                seen.add(item["url"])
+                                formats.append(item)
+                    except Exception:
+                        pass
+
                 if formats and elapsed > 5.0:
                     break
 
@@ -275,6 +337,22 @@ def resolve_with_installed_browser(
                 title = str(((result.get("result") or {}).get("value")) or title)
             except Exception:
                 pass
+
+            if formats:
+                hydrated: list[dict[str, Any]] = []
+                for item in formats:
+                    cookie_header = ""
+                    try:
+                        cookie_result = cdp.command(
+                            "Network.getCookies",
+                            {"urls": [url, str(item.get("url") or "")]},
+                            timeout=2.0,
+                        )
+                        cookie_header = _cookie_header(list(cookie_result.get("cookies") or []))
+                    except Exception:
+                        pass
+                    hydrated.append(_add_cookie_header(item, cookie_header))
+                formats = hydrated
 
             if not formats:
                 raise RuntimeError("The browser loaded the page but did not observe a downloadable media stream.")

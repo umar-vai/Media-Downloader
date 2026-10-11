@@ -230,6 +230,17 @@ The lightweight Windows agent now has installation, supervision, startup control
 - Release builds now publish GitHub-signed build provenance attestations for Core EXE, updater, portable ZIP and installer.
 - Local Core bumped to v0.9.0.
 
+### Phase 5A.1 — Site/session extraction hardening ✅
+
+- Added a PornHub-specific non-curl extraction route using yt-dlp's legacy HTTP handler to avoid the BoringSSL/curl_cffi TLS failure seen on the Windows build.
+- Added the mobile page as a second site-extractor and Generic fallback without enabling curl impersonation.
+- When anonymous extraction yields no formats, the Local Core can temporarily reuse cookies from installed Chrome/Edge/Brave/Firefox profiles through yt-dlp. Cookie data stays local, is not written into job state, and this fallback is restricted to PornHub.
+- Expanded installed-browser capture to discover media from video/source elements and browser performance-resource entries, not just Network.responseReceived events.
+- Captured browser-session cookies are attached only to the matching in-memory media request headers for the current resolver session.
+- Analysis failures are now concise in the PWA instead of dumping several pages of yt-dlp/curl transport errors.
+- Added regression tests for PornHub transport selection, browser-session fallback isolation and browser media detection.
+- Local Core bumped to v0.10.1.
+
 ### Remaining Phase 5 work
 
 - Long-running real-site regression matrix and soak tests on installed Windows builds.

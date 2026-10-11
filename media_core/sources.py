@@ -8,6 +8,12 @@ from yt_dlp.extractor.eporner import EpornerIE
 
 from .network import yt_dlp_proxy_options
 
+PORNHUB_HOSTS = {
+    "pornhub.com",
+    "www.pornhub.com",
+    "m.pornhub.com",
+}
+
 SUPPORTED_PLATFORMS = {
     "youtube": "YouTube",
     "facebook": "Facebook",
@@ -178,6 +184,94 @@ def facebook_share_variants(url: str) -> list[str]:
     return variants
 
 
+def is_pornhub_url(url: str) -> bool:
+    return _hostname(url) in PORNHUB_HOSTS
+
+
+def pornhub_mobile_url(url: str) -> str:
+    if not is_pornhub_url(url):
+        return url
+    parsed = urlparse((url or "").strip())
+    return urlunparse(
+        (
+            parsed.scheme or "https",
+            "m.pornhub.com",
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
+
+
+def _available_cookie_browsers() -> list[str]:
+    """Return browser stores that plausibly exist on this computer.
+
+    These are consumed directly by yt-dlp and are never copied into app state.
+    """
+    import os
+    from pathlib import Path
+
+    candidates: list[tuple[str, Path]] = []
+    local = os.environ.get("LOCALAPPDATA")
+    roaming = os.environ.get("APPDATA")
+    home = Path.home()
+
+    if local:
+        local_path = Path(local)
+        candidates.extend(
+            [
+                ("chrome", local_path / "Google/Chrome/User Data"),
+                ("edge", local_path / "Microsoft/Edge/User Data"),
+                ("brave", local_path / "BraveSoftware/Brave-Browser/User Data"),
+            ]
+        )
+    if roaming:
+        candidates.append(("firefox", Path(roaming) / "Mozilla/Firefox/Profiles"))
+
+    candidates.extend(
+        [
+            ("chrome", home / ".config/google-chrome"),
+            ("chromium", home / ".config/chromium"),
+            ("firefox", home / ".mozilla/firefox"),
+        ]
+    )
+
+    result: list[str] = []
+    for name, path in candidates:
+        if name not in result and path.exists():
+            result.append(name)
+    return result
+
+
+def browser_session_attempts(url: str) -> list[tuple[str, dict]]:
+    """Fallbacks that reuse cookies from an installed browser session.
+
+    Kept intentionally narrow to sites where anonymous extraction commonly
+    returns an age/consent/region shell with no playable formats.
+    """
+    if not is_pornhub_url(url):
+        return []
+
+    base = {
+        **_base_request_options(),
+        "compat_opts": {"prefer-legacy-http-handler"},
+        "source_address": "0.0.0.0",
+    }
+    attempts: list[tuple[str, dict]] = []
+    for browser_name in _available_cookie_browsers():
+        attempts.append(
+            (
+                url,
+                {
+                    **base,
+                    "cookiesfrombrowser": (browser_name,),
+                },
+            )
+        )
+    return attempts
+
+
 def _generic_transport_attempts(url: str, *, allow_impersonation: bool = True) -> list[tuple[str, dict]]:
     """Try normal yt-dlp first, then browser-like and generic-page fallbacks."""
     base = _base_request_options()
@@ -223,6 +317,22 @@ def extraction_attempts(url: str) -> list[tuple[str, dict]]:
         return []
 
     host = _hostname(url)
+    if host in PORNHUB_HOSTS:
+        base = _base_request_options()
+        legacy = {
+            **base,
+            "compat_opts": {"prefer-legacy-http-handler"},
+            "source_address": "0.0.0.0",
+        }
+        mobile = pornhub_mobile_url(url)
+        attempts: list[tuple[str, dict]] = [(url, dict(legacy))]
+        if mobile != url:
+            attempts.append((mobile, dict(legacy)))
+        attempts.append((url, {**legacy, "_force_generic_extractor": True}))
+        if mobile != url:
+            attempts.append((mobile, {**legacy, "_force_generic_extractor": True}))
+        return attempts
+
     if host in {"eporner.com", "www.eporner.com"}:
         base = _base_request_options()
         embed = eporner_embed_url(url)

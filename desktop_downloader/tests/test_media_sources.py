@@ -18,6 +18,8 @@ from media_sources import (
     request_options,
     video_format_selector,
     eporner_embed_url,
+    is_pornhub_url,
+    pornhub_mobile_url,
 )
 
 
@@ -85,6 +87,22 @@ class MediaSourceTests(unittest.TestCase):
         self.assertTrue(attempts[0][0].startswith("https://m.facebook.com/watch/"))
         self.assertEqual(attempts[0][1].get("source_address"), "0.0.0.0")
         self.assertTrue(any("impersonate" in options for _url, options in attempts))
+
+    def test_pornhub_uses_legacy_http_handler_and_mobile_fallback(self):
+        url = "https://www.pornhub.com/view_video.php?viewkey=abc123"
+        self.assertTrue(is_pornhub_url(url))
+        self.assertEqual(
+            pornhub_mobile_url(url),
+            "https://m.pornhub.com/view_video.php?viewkey=abc123",
+        )
+        attempts = extraction_attempts(url)
+        urls = [candidate for candidate, _options in attempts]
+        self.assertIn(url, urls)
+        self.assertIn("https://m.pornhub.com/view_video.php?viewkey=abc123", urls)
+        self.assertTrue(all("impersonate" not in options for _candidate, options in attempts))
+        self.assertTrue(
+            all("prefer-legacy-http-handler" in options.get("compat_opts", set()) for _candidate, options in attempts)
+        )
 
     def test_eporner_https_api_patch_is_installed(self):
         self.assertTrue(getattr(InstagramBaseIE, "_can_impersonate", None) is False)
