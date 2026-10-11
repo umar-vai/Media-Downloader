@@ -247,10 +247,14 @@ def _available_cookie_browsers() -> list[str]:
 def browser_session_attempts(url: str) -> list[tuple[str, dict]]:
     """Fallbacks that reuse cookies from an installed browser session.
 
-    Kept intentionally narrow to sites where anonymous extraction commonly
-    returns an age/consent/region shell with no playable formats.
+    This runs only after anonymous extraction has failed. Cookie stores are read
+    locally by yt-dlp and are never persisted into Local Core job/settings state.
+    Known social platforms keep their dedicated extraction paths; generic web
+    pages can use the browser session because embedded players commonly require
+    consent/session cookies before exposing a stream.
     """
-    if not is_pornhub_url(url):
+    platform = detect_platform(url)
+    if platform != "web":
         return []
 
     base = {
@@ -269,28 +273,49 @@ def browser_session_attempts(url: str) -> list[tuple[str, dict]]:
                 },
             )
         )
-    return attempts
-
-
-def _generic_transport_attempts(url: str, *, allow_impersonation: bool = True) -> list[tuple[str, dict]]:
-    """Try normal yt-dlp first, then browser-like and generic-page fallbacks."""
-    base = _base_request_options()
-    attempts: list[tuple[str, dict]] = [(url, dict(base))]
-
-    if allow_impersonation:
-        attempts.append((url, {**base, "impersonate": ImpersonateTarget("chrome")}))
-
-    attempts.append((url, {**base, "_force_generic_extractor": True}))
-    if allow_impersonation:
         attempts.append(
             (
                 url,
                 {
                     **base,
-                    "impersonate": ImpersonateTarget("chrome"),
+                    "cookiesfrombrowser": (browser_name,),
                     "_force_generic_extractor": True,
                 },
             )
+        )
+    return attempts
+
+
+def _generic_transport_attempts(url: str, *, allow_impersonation: bool = True) -> list[tuple[str, dict]]:
+    """Prefer Python/legacy HTTP before curl_cffi for arbitrary websites."""
+    base = _base_request_options()
+    legacy = {
+        **base,
+        "compat_opts": {"prefer-legacy-http-handler"},
+        "source_address": "0.0.0.0",
+    }
+    attempts: list[tuple[str, dict]] = [
+        (url, dict(legacy)),
+        (url, dict(base)),
+        (url, {**legacy, "_force_generic_extractor": True}),
+        (url, {**base, "_force_generic_extractor": True}),
+    ]
+
+    # curl_cffi impersonation is intentionally last. On some Windows/network
+    # paths BoringSSL closes abruptly even when urllib/Chrome can reach the page.
+    if allow_impersonation:
+        attempts.extend(
+            [
+                (url, {**base, "impersonate": ImpersonateTarget("chrome")}),
+                (
+                    url,
+                    {
+                        **base,
+                        "impersonate": ImpersonateTarget("chrome"),
+                        "_force_generic_extractor": True,
+                    },
+                ),
+            ]
         )
     return attempts
 

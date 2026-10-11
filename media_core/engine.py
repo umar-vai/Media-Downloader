@@ -120,6 +120,7 @@ def analyze_url(
             if on_status:
                 on_status(f"Trying browser session {index}/{len(session_attempts)}")
             options = dict(session_options or {})
+            force_generic = bool(options.pop("_force_generic_extractor", False))
             try:
                 with yt_dlp.YoutubeDL(
                     {
@@ -134,7 +135,11 @@ def analyze_url(
                         **options,
                     }
                 ) as ydl:
-                    info = ydl.extract_info(attempt_url, download=False) or {}
+                    info = ydl.extract_info(
+                        attempt_url,
+                        download=False,
+                        force_generic_extractor=force_generic,
+                    ) or {}
                 if info:
                     break
             except Exception as exc:
@@ -148,7 +153,7 @@ def analyze_url(
             info = resolve_with_installed_browser(
                 url,
                 cancel_event=cancel_event,
-                capture_seconds=12.0,
+                capture_seconds=18.0,
             )
         except Exception as exc:
             errors.append(f"Installed browser: {str(exc).strip()}")
@@ -162,12 +167,12 @@ def analyze_url(
                 "and browser media capture. If the video plays in your normal browser, keep that browser "
                 "profile available and Analyze again. DRM-protected streams are not supported."
             )
-        detail = " | ".join(errors[-2:])
-        if len(detail) > 700:
-            detail = detail[:697] + "..."
         raise RuntimeError(
-            "No compatible extraction path succeeded."
-            + (f" {detail}" if detail else "")
+            "Could not find a playable stream from this page. "
+            "Tried legacy HTTPS, the site/Generic extractor, installed-browser session cookies, "
+            "and browser media capture. If the page plays only after selecting an episode/server or "
+            "passing a browser challenge, open it once in Chrome/Edge and Analyze again. "
+            "DRM-protected streams are not supported."
         )
 
     return _public_summary(url, info), info

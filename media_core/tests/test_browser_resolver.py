@@ -7,6 +7,7 @@ from media_core.browser_resolver import (
     _cookie_header,
     _format_from_url,
     _looks_like_media,
+    _rank_embed_urls,
 )
 
 
@@ -36,6 +37,17 @@ class BrowserResolverTests(unittest.TestCase):
         self.assertEqual(header, "session=abc; consent=yes")
         item = _add_cookie_header({"http_headers": {"Referer": "https://example.com"}}, header)
         self.assertEqual(item["http_headers"]["Cookie"], header)
+
+    def test_embed_urls_prioritize_cross_origin_player_links(self):
+        ranked = _rank_embed_urls(
+            [
+                "https://anime.example/assets/frame",
+                "https://player.cdn.example/embed/episode-2",
+                "https://ads.example/banner",
+            ],
+            "https://anime.example/watch/episode-2",
+        )
+        self.assertEqual(ranked[0], "https://player.cdn.example/embed/episode-2")
 
 
 if __name__ == "__main__":

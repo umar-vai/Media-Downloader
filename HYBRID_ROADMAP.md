@@ -251,6 +251,18 @@ The lightweight Windows agent now has installation, supervision, startup control
 - Added regression coverage for the urllib → curl_cffi updater fallback.
 - Local Core bumped to v0.10.2.
 
+### Phase 5A.3 — Generic streaming/embedded-player extraction hardening ✅
+
+- Generic websites now try yt-dlp's legacy Python HTTP handler before curl_cffi impersonation, avoiding the BoringSSL EOF path seen on anime/streaming pages.
+- The normal site extractor and Generic extractor are both attempted on the legacy transport before curl impersonation is used as a last resort.
+- After anonymous extraction fails, generic web pages can reuse installed Chrome/Edge/Brave/Firefox session cookies locally; known social platforms keep their dedicated paths.
+- Browser fallback capture now waits longer, tries common play controls, starts HTML5 video, discovers iframe player URLs and follows up to four likely embedded-player pages.
+- Media discovery continues across Network responses, video/source DOM URLs and browser performance-resource entries.
+- Embed URLs are ranked toward cross-origin player/embed/stream/watch/video/episode/server pages instead of blindly following arbitrary iframes.
+- Generic analysis failures now return a concise actionable message instead of exposing raw curl/yt-dlp transport dumps.
+- Added regression coverage for generic transport ordering, generic browser-session isolation and embedded-player ranking.
+- Local Core bumped to v0.10.3.
+
 ### Remaining Phase 5 work
 
 - Long-running real-site regression matrix and soak tests on installed Windows builds.

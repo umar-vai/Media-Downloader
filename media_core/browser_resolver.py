@@ -193,11 +193,43 @@ class _CDP:
         return self._recv(timeout)
 
 
+def _rank_embed_urls(urls: list[str], page_url: str) -> list[str]:
+    page_host = ""
+    try:
+        from urllib.parse import urlparse
+
+        page_host = (urlparse(page_url).hostname or "").lower()
+    except Exception:
+        pass
+
+    ranked: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    keywords = ("embed", "player", "stream", "watch", "video", "episode", "server")
+    for raw in urls:
+        value = str(raw or "").strip()
+        if not value.startswith(("http://", "https://")) or value in seen or value == page_url:
+            continue
+        seen.add(value)
+        score = sum(3 for key in keywords if key in value.lower())
+        try:
+            from urllib.parse import urlparse
+
+            host = (urlparse(value).hostname or "").lower()
+            if host and host != page_host:
+                score += 2
+        except Exception:
+            pass
+        ranked.append((score, value))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [value for _score, value in ranked]
+
+
 def resolve_with_installed_browser(
     url: str,
     *,
     cancel_event=None,
-    capture_seconds: float = 12.0,
+    capture_seconds: float = 18.0,
 ) -> dict[str, Any]:
     browser = find_browser()
     if browser is None:
@@ -214,6 +246,7 @@ def resolve_with_installed_browser(
             "--disable-extensions",
             "--disable-background-networking",
             "--autoplay-policy=no-user-gesture-required",
+            "--disable-features=MediaEngagementBypassAutoplayPolicies",
             "--remote-allow-origins=*",
             f"--remote-debugging-port={port}",
             f"--user-data-dir={profile}",
@@ -250,102 +283,134 @@ def resolve_with_installed_browser(
             cdp.command("Network.enable")
             cdp.command("Page.enable")
             cdp.command("Runtime.enable")
-            cdp.command("Page.navigate", {"url": url}, timeout=6.0)
 
             formats: list[dict[str, Any]] = []
             seen: set[str] = set()
+            embed_urls: list[str] = []
             title = "Browser media"
-            started = time.monotonic()
-            played = False
 
-            while time.monotonic() - started < capture_seconds:
-                if cancel_event is not None and cancel_event.is_set():
-                    raise RuntimeError("Analysis cancelled.")
+            def add_response(page_url: str, response: dict[str, Any]) -> None:
+                item = _format_from_response(page_url, response)
+                if item and item["url"] not in seen:
+                    seen.add(item["url"])
+                    formats.append(item)
 
-                message = cdp.event(timeout=0.35)
-                if message:
-                    method = str(message.get("method") or "")
-                    params = dict(message.get("params") or {})
-                    if method == "Network.responseReceived":
-                        response = dict(params.get("response") or {})
-                        item = _format_from_response(url, response)
-                        if item and item["url"] not in seen:
-                            seen.add(item["url"])
-                            formats.append(item)
+            def add_runtime_media(page_url: str, values: list[Any]) -> None:
+                for media_url in values:
+                    item = _format_from_url(page_url, str(media_url or ""))
+                    if item and item["url"] not in seen:
+                        seen.add(item["url"])
+                        formats.append(item)
 
-                elapsed = time.monotonic() - started
-                if not played and elapsed > 2.0:
-                    played = True
+            def capture_page(target_url: str, seconds: float) -> None:
+                nonlocal title
+                cdp.command("Page.navigate", {"url": target_url}, timeout=7.0)
+                started = time.monotonic()
+                interacted = False
+                last_scan_bucket = -1
+
+                while time.monotonic() - started < seconds:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RuntimeError("Analysis cancelled.")
+
+                    message = cdp.event(timeout=0.35)
+                    if message:
+                        method = str(message.get("method") or "")
+                        params = dict(message.get("params") or {})
+                        if method == "Network.responseReceived":
+                            add_response(target_url, dict(params.get("response") or {}))
+
+                    elapsed = time.monotonic() - started
+                    if not interacted and elapsed > 1.5:
+                        interacted = True
+                        try:
+                            cdp.command(
+                                "Runtime.evaluate",
+                                {
+                                    "expression": (
+                                        "(()=>{"
+                                        "for(const v of document.querySelectorAll('video')){"
+                                        "try{v.muted=true;v.autoplay=true;v.play().catch(()=>{});}catch(e){}}"
+                                        "const selectors=["
+                                        "'.vjs-big-play-button','.jw-icon-display','.jw-display-icon-container',"
+                                        "'.plyr__control--overlaid','.play-button','.play-btn','[aria-label*=\\"play\\" i]',"
+                                        "'button[class*=\\"play\\" i]','div[class*=\\"play\\" i]'];"
+                                        "for(const s of selectors){const e=document.querySelector(s);"
+                                        "if(e){try{e.click();}catch(x){}}}"
+                                        "return document.title||'';"
+                                        "})()"
+                                    ),
+                                    "returnByValue": True,
+                                },
+                                timeout=2.0,
+                            )
+                        except Exception:
+                            pass
+
+                    scan_bucket = int(elapsed // 2)
+                    if elapsed > 2.0 and scan_bucket != last_scan_bucket:
+                        last_scan_bucket = scan_bucket
+                        try:
+                            result = cdp.command(
+                                "Runtime.evaluate",
+                                {
+                                    "expression": (
+                                        "(()=>{"
+                                        "const media=new Set(),frames=new Set();"
+                                        "for(const v of document.querySelectorAll('video')){"
+                                        "for(const x of [v.currentSrc,v.src]) if(x) media.add(x);"
+                                        "for(const s of v.querySelectorAll('source')) if(s.src) media.add(s.src);"
+                                        "}"
+                                        "for(const s of document.querySelectorAll('source')) if(s.src) media.add(s.src);"
+                                        "for(const e of performance.getEntriesByType('resource')){"
+                                        "const n=e&&e.name||'';"
+                                        "if(/\\.(?:m3u8|mpd|mp4|m4v|webm|m4a|mp3)(?:[?#]|$)/i.test(n)) media.add(n);"
+                                        "}"
+                                        "for(const f of document.querySelectorAll('iframe[src]')){if(f.src) frames.add(f.src);}"
+                                        "return {media:[...media],frames:[...frames],title:document.title||''};"
+                                        "})()"
+                                    ),
+                                    "returnByValue": True,
+                                },
+                                timeout=2.5,
+                            )
+                            value = ((result.get("result") or {}).get("value")) or {}
+                            if isinstance(value, dict):
+                                add_runtime_media(target_url, list(value.get("media") or []))
+                                for frame_url in list(value.get("frames") or []):
+                                    frame_url = str(frame_url or "")
+                                    if frame_url.startswith(("http://", "https://")) and frame_url not in embed_urls:
+                                        embed_urls.append(frame_url)
+                                if value.get("title"):
+                                    title = str(value.get("title"))
+                        except Exception:
+                            pass
+
+                    if formats and elapsed > 4.5:
+                        break
+
+            capture_page(url, capture_seconds)
+
+            if not formats and embed_urls:
+                for embed_url in _rank_embed_urls(embed_urls, url)[:4]:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RuntimeError("Analysis cancelled.")
                     try:
-                        cdp.command(
-                            "Runtime.evaluate",
-                            {
-                                "expression": (
-                                    "(()=>{for(const v of document.querySelectorAll('video')){"
-                                    "try{v.muted=true;v.autoplay=true;v.play().catch(()=>{});}catch(e){}}"
-                                    "return document.title||'';})()"
-                                ),
-                                "returnByValue": True,
-                            },
-                            timeout=2.0,
-                        )
+                        capture_page(embed_url, 7.0)
                     except Exception:
-                        pass
-
-                if elapsed > 3.0 and int(elapsed * 2) % 4 == 0:
-                    try:
-                        result = cdp.command(
-                            "Runtime.evaluate",
-                            {
-                                "expression": (
-                                    "(()=>{"
-                                    "const out=new Set();"
-                                    "for(const v of document.querySelectorAll('video')){"
-                                    "for(const x of [v.currentSrc,v.src]) if(x) out.add(x);"
-                                    "for(const s of v.querySelectorAll('source')) if(s.src) out.add(s.src);"
-                                    "}"
-                                    "for(const s of document.querySelectorAll('source')) if(s.src) out.add(s.src);"
-                                    "for(const e of performance.getEntriesByType('resource')){"
-                                    "const n=e&&e.name||'';"
-                                    "if(/\\.(?:m3u8|mpd|mp4|m4v|webm|m4a|mp3)(?:[?#]|$)/i.test(n)) out.add(n);"
-                                    "}"
-                                    "return [...out];"
-                                    "})()"
-                                ),
-                                "returnByValue": True,
-                            },
-                            timeout=2.0,
-                        )
-                        values = ((result.get("result") or {}).get("value")) or []
-                        for media_url in values:
-                            item = _format_from_url(url, str(media_url or ""))
-                            if item and item["url"] not in seen:
-                                seen.add(item["url"])
-                                formats.append(item)
-                    except Exception:
-                        pass
-
-                if formats and elapsed > 5.0:
-                    break
-
-            try:
-                result = cdp.command(
-                    "Runtime.evaluate",
-                    {"expression": "document.title || ''", "returnByValue": True},
-                    timeout=2.0,
-                )
-                title = str(((result.get("result") or {}).get("value")) or title)
-            except Exception:
-                pass
+                        continue
+                    if formats:
+                        break
 
             if formats:
                 hydrated: list[dict[str, Any]] = []
                 for item in formats:
                     cookie_header = ""
                     try:
+                        referer = str((item.get("http_headers") or {}).get("Referer") or url)
                         cookie_result = cdp.command(
                             "Network.getCookies",
-                            {"urls": [url, str(item.get("url") or "")]},
+                            {"urls": [url, referer, str(item.get("url") or "")]},
                             timeout=2.0,
                         )
                         cookie_header = _cookie_header(list(cookie_result.get("cookies") or []))
@@ -355,7 +420,9 @@ def resolve_with_installed_browser(
                 formats = hydrated
 
             if not formats:
-                raise RuntimeError("The browser loaded the page but did not observe a downloadable media stream.")
+                raise RuntimeError(
+                    "The browser loaded the page and embedded players but did not observe a downloadable media stream."
+                )
 
             return {
                 "id": f"browser-{abs(hash(url))}",
