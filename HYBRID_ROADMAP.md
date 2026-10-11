@@ -241,6 +241,16 @@ The lightweight Windows agent now has installation, supervision, startup control
 - Added regression tests for PornHub transport selection, browser-session fallback isolation and browser media detection.
 - Local Core bumped to v0.10.1.
 
+### Phase 5A.2 — Updater TLS + helper bootstrap hardening ✅
+
+- GitHub release checks now retry Python urllib and fall back to bundled curl_cffi when TLS terminates with unexpected EOF.
+- Core/checksum asset downloads use the same fallback path while retaining SHA-256 verification.
+- A packaged Core is now considered self-update capable even if the installed updater helper is missing; the release downloads a verified updater helper and the agent can execute that staged helper directly.
+- After a successful update, the staged helper installs itself beside the Core for subsequent rollback/update operations.
+- Manual rollback still requires an installed updater helper and a previous Core backup.
+- Added regression coverage for the urllib → curl_cffi updater fallback.
+- Local Core bumped to v0.10.2.
+
 ### Remaining Phase 5 work
 
 - Long-running real-site regression matrix and soak tests on installed Windows builds.

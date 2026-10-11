@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -117,16 +118,58 @@ class CoreUpdateService:
         threading.Thread(target=self._check_worker, daemon=True, name="core-update-check").start()
         return self.snapshot()
 
-    def _fetch_json(self, url: str) -> Any:
-        request = urllib.request.Request(
+    @staticmethod
+    def _curl_cffi_bytes(url: str, *, timeout: float, accept: str = "*/*") -> bytes:
+        from curl_cffi import requests as curl_requests
+
+        response = curl_requests.get(
             url,
             headers={
                 "User-Agent": USER_AGENT,
-                "Accept": "application/vnd.github+json",
+                "Accept": accept,
             },
+            timeout=timeout,
+            impersonate="chrome",
+            allow_redirects=True,
         )
-        with urllib.request.urlopen(request, timeout=15) as response:
-            return json.loads(response.read().decode("utf-8"))
+        response.raise_for_status()
+        return bytes(response.content)
+
+    def _request_bytes(self, url: str, *, timeout: float, accept: str = "*/*") -> bytes:
+        errors: list[str] = []
+        for attempt in range(2):
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": accept,
+                    "Connection": "close",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    return response.read()
+            except Exception as exc:
+                errors.append(f"urllib {attempt + 1}: {exc}")
+                time.sleep(0.35 * (attempt + 1))
+
+        try:
+            return self._curl_cffi_bytes(url, timeout=timeout, accept=accept)
+        except Exception as exc:
+            errors.append(f"curl_cffi: {exc}")
+
+        detail = " | ".join(errors[-3:])
+        if len(detail) > 700:
+            detail = detail[:697] + "..."
+        raise RuntimeError(f"Could not reach GitHub update service. {detail}")
+
+    def _fetch_json(self, url: str) -> Any:
+        payload = self._request_bytes(
+            url,
+            timeout=20,
+            accept="application/vnd.github+json",
+        )
+        return json.loads(payload.decode("utf-8"))
 
     def _check_worker(self) -> None:
         try:
@@ -222,9 +265,7 @@ class CoreUpdateService:
         return self.snapshot()
 
     def _download_bytes(self, url: str) -> bytes:
-        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return response.read()
+        return self._request_bytes(url, timeout=45)
 
     def _download_verified_asset(
         self,
@@ -240,21 +281,40 @@ class CoreUpdateService:
         partial = target.with_suffix(target.suffix + ".part")
         partial.unlink(missing_ok=True)
 
-        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(request, timeout=30) as response, partial.open("wb") as output:
-            total = int(response.headers.get("Content-Length") or 0)
-            downloaded = 0
-            digest = hashlib.sha256()
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                output.write(chunk)
-                digest.update(chunk)
-                downloaded += len(chunk)
-                if report_progress:
-                    progress = (downloaded / total) if total else 0.0
-                    self._set(progress=max(0.0, min(0.98, progress)))
+        digest = hashlib.sha256()
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": "application/octet-stream",
+                    "Connection": "close",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=45) as response, partial.open("wb") as output:
+                total = int(response.headers.get("Content-Length") or 0)
+                downloaded = 0
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+                    digest.update(chunk)
+                    downloaded += len(chunk)
+                    if report_progress:
+                        progress = (downloaded / total) if total else 0.0
+                        self._set(progress=max(0.0, min(0.96, progress)))
+        except Exception:
+            partial.unlink(missing_ok=True)
+            data = self._curl_cffi_bytes(
+                url,
+                timeout=90,
+                accept="application/octet-stream",
+            )
+            partial.write_bytes(data)
+            digest = hashlib.sha256(data)
+            if report_progress:
+                self._set(progress=0.96)
 
         actual = digest.hexdigest().lower()
         if actual != expected:

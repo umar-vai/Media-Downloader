@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from hybrid_core.core_updater import _expected_checksum, select_release, version_tuple
+from hybrid_core.core_updater import CoreUpdateService, _expected_checksum, select_release, version_tuple
 
 
 class CoreUpdaterTests(unittest.TestCase):
@@ -24,8 +24,6 @@ class CoreUpdaterTests(unittest.TestCase):
     def test_can_apply_is_recorded_when_enabled(self):
         from pathlib import Path
         from tempfile import TemporaryDirectory
-        from hybrid_core.core_updater import CoreUpdateService
-
         with TemporaryDirectory() as folder:
             service = CoreUpdateService(
                 current_version="0.7.0",
@@ -34,6 +32,25 @@ class CoreUpdaterTests(unittest.TestCase):
             )
             service._set(status="ready", staged_path="MediaDownloaderCore.exe", can_apply=service.can_apply)
             self.assertTrue(service.snapshot()["can_apply"])
+
+    def test_request_bytes_falls_back_to_curl_cffi_after_urllib_tls_errors(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+
+        with TemporaryDirectory() as folder:
+            service = CoreUpdateService(
+                current_version="0.10.1",
+                update_dir=Path(folder),
+            )
+            with (
+                patch("hybrid_core.core_updater.urllib.request.urlopen", side_effect=OSError("SSL EOF")),
+                patch.object(service, "_curl_cffi_bytes", return_value=b'{"ok":true}') as fallback,
+            ):
+                payload = service._request_bytes("https://api.github.com/test", timeout=1)
+
+            self.assertEqual(payload, b'{"ok":true}')
+            fallback.assert_called_once()
 
     def test_checksum_parser_matches_asset(self):
         digest = "a" * 64

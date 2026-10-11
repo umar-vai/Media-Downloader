@@ -30,6 +30,7 @@ from .agent_control import (
     MUTEX_NAME,
     can_self_update,
     executable_path,
+    installed_updater_available,
     previous_core_path,
     rollback_available,
     send_control,
@@ -182,7 +183,12 @@ class Agent:
             raise RuntimeError("Self-update requires the installed Media Downloader Core agent.")
         staged = self._validate_staged_update(raw_path)
         staged_helper = self._validate_staged_updater(staged_updater_path)
-        helper = staged_helper or updater_helper_path()
+        installed_helper = updater_helper_path() if installed_updater_available() else None
+        helper = staged_helper or installed_helper
+        if helper is None:
+            raise RuntimeError(
+                "Updater helper is missing. Download the update again so the verified updater helper is staged."
+            )
         target = executable_path()
         self.stop_child()
         subprocess.Popen(
@@ -246,6 +252,7 @@ class Agent:
                 "version": CORE_VERSION,
                 "pid": os.getpid(),
                 "self_update": can_self_update(),
+                "installed_updater": installed_updater_available(),
                 "rollback_available": rollback_available(),
                 "previous_path": str(previous_core_path()) if rollback_available() else "",
             }

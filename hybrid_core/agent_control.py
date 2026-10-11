@@ -32,12 +32,18 @@ def previous_core_path() -> Path:
     return target.with_suffix(target.suffix + ".previous")
 
 
+def installed_updater_available() -> bool:
+    return is_packaged_agent() and updater_helper_path().is_file()
+
+
 def rollback_available() -> bool:
-    return is_packaged_agent() and previous_core_path().is_file()
+    return installed_updater_available() and previous_core_path().is_file()
 
 
 def can_self_update() -> bool:
-    return is_packaged_agent() and updater_helper_path().is_file()
+    # A packaged Core can bootstrap self-update with the verified updater helper
+    # staged alongside the downloaded Core release.
+    return is_packaged_agent()
 
 
 def send_control(command: str, **payload: Any) -> dict[str, Any]:
