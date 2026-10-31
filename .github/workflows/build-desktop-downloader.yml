@@ -128,6 +128,8 @@ jobs:
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed `
             --name MediaDownloader `
+            --paths "." `
+            --collect-submodules media_core `
             --collect-all yt_dlp `
             --collect-all curl_cffi `
             --collect-all imageio_ffmpeg `
@@ -157,6 +159,8 @@ jobs:
             --distpath "dist/installed" `
             --workpath "build/installed" `
             --specpath "build/installed" `
+            --paths "." `
+            --collect-submodules media_core `
             --collect-all yt_dlp `
             --collect-all curl_cffi `
             --collect-all imageio_ffmpeg `

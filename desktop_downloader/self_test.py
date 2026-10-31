@@ -133,6 +133,26 @@ def run_self_test(progress_path: Path | None = None) -> dict[str, Any]:
     except Exception as exc:
         record(CheckResult("yt_dlp", False, str(exc)))
 
+    try:
+        # The launcher imports app in normal GUI mode, so this smoke check must
+        # import it too. Otherwise "--self-test" can pass while a missing
+        # frozen module crashes the real Desktop EXE at startup.
+        import media_core.engine  # noqa: F401
+        import media_core.sources  # noqa: F401
+        import media_core.browser_resolver  # noqa: F401
+        import media_core.network  # noqa: F401
+        from app import DownloaderApp
+
+        record(
+            CheckResult(
+                "desktop_startup_imports",
+                bool(DownloaderApp),
+                "Desktop app and shared media_core modules import successfully.",
+            )
+        )
+    except Exception as exc:
+        record(CheckResult("desktop_startup_imports", False, f"{type(exc).__name__}: {exc}"))
+
     config_dir = Path(os.getenv("APPDATA") or Path.home()) / "MediaDownloader"
     local_dir = Path(os.getenv("LOCALAPPDATA") or config_dir) / "MediaDownloader"
     download_dir = Path.home() / "Downloads" / "Media Downloader"
