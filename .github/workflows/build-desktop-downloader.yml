@@ -44,6 +44,7 @@ jobs:
       - name: Validate Python and updater tests
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m py_compile media_core/network.py
           python -m py_compile media_core/sources.py
           python -m py_compile media_core/browser_resolver.py
@@ -139,22 +140,12 @@ jobs:
 
       - name: Run portable packaged self-test
         shell: pwsh
+        timeout-minutes: 6
         run: |
-          $report = (Join-Path $PWD "dist\portable-self-test.json")
-          $process = Start-Process -FilePath (Resolve-Path "dist\MediaDownloader.exe").Path `
-            -ArgumentList @("--self-test", "--report", $report) `
-            -Wait -PassThru
-          if (-not (Test-Path $report)) {
-            throw "Portable runtime self-test did not produce a report."
-          }
-          Get-Content $report
-          if ($process.ExitCode -ne 0) {
-            throw "Portable runtime self-test failed with exit code $($process.ExitCode)."
-          }
-          $payload = Get-Content $report -Raw | ConvertFrom-Json
-          if ($payload.install_mode -ne "portable") {
-            throw "Expected portable install mode, got '$($payload.install_mode)'."
-          }
+          $report = Join-Path $PWD "dist\portable-self-test.json"
+          & "./desktop_downloader/ci/packaged_self_test.ps1" `
+            -Exe (Resolve-Path "dist\MediaDownloader.exe").Path `
+            -Report $report -ExpectedMode portable -TimeoutSeconds 180
 
       - name: Build installed onedir package
         shell: pwsh
@@ -177,17 +168,12 @@ jobs:
 
       - name: Run onedir packaged self-test
         shell: pwsh
+        timeout-minutes: 4
         run: |
           $exe = (Resolve-Path "dist\installed\MediaDownloader\MediaDownloader.exe").Path
-          $report = (Join-Path $PWD "dist\onedir-self-test.json")
-          $process = Start-Process -FilePath $exe -ArgumentList @("--self-test", "--report", $report) -Wait -PassThru
-          if (-not (Test-Path $report)) {
-            throw "Onedir runtime self-test did not produce a report."
-          }
-          Get-Content $report
-          if ($process.ExitCode -ne 0) {
-            throw "Onedir runtime self-test failed with exit code $($process.ExitCode)."
-          }
+          $report = Join-Path $PWD "dist\onedir-self-test.json"
+          & "./desktop_downloader/ci/packaged_self_test.ps1" `
+            -Exe $exe -Report $report -ExpectedMode portable -TimeoutSeconds 120
 
       - name: Package extraction-safe portable ZIP
         shell: pwsh
@@ -214,11 +200,8 @@ jobs:
             throw "Portable ZIP does not contain MediaDownloader.exe."
           }
           $report = Join-Path $env:RUNNER_TEMP "portable-zip-self-test.json"
-          $test = Start-Process -FilePath $portableExe -ArgumentList @("--self-test", "--report", $report) -Wait -PassThru
-          if ($test.ExitCode -ne 0 -or -not (Test-Path $report)) {
-            throw "Portable ZIP runtime self-test failed."
-          }
-          Get-Content $report
+          & "./desktop_downloader/ci/packaged_self_test.ps1" `
+            -Exe $portableExe -Report $report -ExpectedMode portable -TimeoutSeconds 120
 
       - name: Build Windows installer
         shell: pwsh
@@ -267,15 +250,8 @@ jobs:
             throw "Installed MediaDownloader.exe is missing."
           }
           $report = Join-Path $env:RUNNER_TEMP "installed-self-test.json"
-          $test = Start-Process -FilePath $installedExe -ArgumentList @("--self-test", "--report", $report) -Wait -PassThru
-          if ($test.ExitCode -ne 0 -or -not (Test-Path $report)) {
-            throw "Installed runtime self-test failed."
-          }
-          Get-Content $report
-          $payload = Get-Content $report -Raw | ConvertFrom-Json
-          if ($payload.install_mode -ne "installer") {
-            throw "Expected installer mode, got '$($payload.install_mode)'."
-          }
+          & "./desktop_downloader/ci/packaged_self_test.ps1" `
+            -Exe $installedExe -Report $report -ExpectedMode installer -TimeoutSeconds 120
 
           $uninstaller = Join-Path $installDir "unins000.exe"
           if (-not (Test-Path $uninstaller)) {

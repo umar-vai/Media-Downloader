@@ -10,11 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-import yt_dlp
-from imageio_ffmpeg import get_ffmpeg_exe
-
 from install_mode import install_mode_name
-from media_player import _mpv_executable
 from version import APP_VERSION
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -75,28 +71,44 @@ def _check_writable(name: str, directory: Path) -> CheckResult:
         return CheckResult(name, False, f"{directory}: {exc}")
 
 
-def run_self_test() -> dict[str, Any]:
+def run_self_test(progress_path: Path | None = None) -> dict[str, Any]:
     checks: list[CheckResult] = []
+
+    def record(check: CheckResult) -> None:
+        checks.append(check)
+        if progress_path is not None:
+            write_report(
+                {
+                    "stage": "checking",
+                    "last_check": check.name,
+                    "checks": [asdict(item) for item in checks],
+                },
+                progress_path,
+            )
 
     version_parts = APP_VERSION.split(".")
     version_ok = len(version_parts) == 3 and all(part.isdigit() for part in version_parts)
-    checks.append(CheckResult("app_version", version_ok, APP_VERSION))
+    record(CheckResult("app_version", version_ok, APP_VERSION))
 
     try:
+        from imageio_ffmpeg import get_ffmpeg_exe
+
         ffmpeg = Path(get_ffmpeg_exe())
-        checks.append(_run_version_check("ffmpeg", ffmpeg, ["-version"]))
+        record(_run_version_check("ffmpeg", ffmpeg, ["-version"]))
     except Exception as exc:
-        checks.append(CheckResult("ffmpeg", False, str(exc)))
+        record(CheckResult("ffmpeg", False, str(exc)))
 
     try:
+        from media_player import _mpv_executable
+
         mpv = _mpv_executable()
-        checks.append(_run_version_check("mpv", mpv, ["--version"]))
+        record(_run_version_check("mpv", mpv, ["--version"]))
     except Exception as exc:
-        checks.append(CheckResult("mpv", False, str(exc)))
+        record(CheckResult("mpv", False, str(exc)))
 
     updater = _resource_path("MediaDownloaderUpdater.exe")
     if getattr(sys, "frozen", False):
-        checks.append(
+        record(
             CheckResult(
                 "updater",
                 updater.exists() and updater.stat().st_size > 0,
@@ -105,7 +117,7 @@ def run_self_test() -> dict[str, Any]:
         )
     else:
         source_updater = Path(__file__).resolve().with_name("updater.py")
-        checks.append(
+        record(
             CheckResult(
                 "updater",
                 source_updater.exists(),
@@ -114,18 +126,20 @@ def run_self_test() -> dict[str, Any]:
         )
 
     try:
+        import yt_dlp
+
         yt_version = str(getattr(yt_dlp.version, "__version__", "unknown"))
-        checks.append(CheckResult("yt_dlp", yt_version != "unknown", yt_version))
+        record(CheckResult("yt_dlp", yt_version != "unknown", yt_version))
     except Exception as exc:
-        checks.append(CheckResult("yt_dlp", False, str(exc)))
+        record(CheckResult("yt_dlp", False, str(exc)))
 
     config_dir = Path(os.getenv("APPDATA") or Path.home()) / "MediaDownloader"
     local_dir = Path(os.getenv("LOCALAPPDATA") or config_dir) / "MediaDownloader"
     download_dir = Path.home() / "Downloads" / "Media Downloader"
 
-    checks.append(_check_writable("config_write", config_dir))
-    checks.append(_check_writable("local_data_write", local_dir))
-    checks.append(_check_writable("download_write", download_dir))
+    record(_check_writable("config_write", config_dir))
+    record(_check_writable("local_data_write", local_dir))
+    record(_check_writable("download_write", download_dir))
 
     all_ok = all(check.ok for check in checks)
     return {
@@ -151,9 +165,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, default=None)
     args = parser.parse_args(argv)
 
-    report = run_self_test()
+    progress_path = args.report.with_suffix(".progress.json") if args.report else None
+    if progress_path is not None:
+        write_report({"stage": "started", "checks": []}, progress_path)
+
+    report = run_self_test(progress_path=progress_path)
     if args.report:
         write_report(report, args.report)
+    if progress_path is not None:
+        write_report(
+            {"stage": "completed", "ok": report["ok"], "checks": report["checks"]},
+            progress_path,
+        )
     else:
         print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0 if report["ok"] else 1
