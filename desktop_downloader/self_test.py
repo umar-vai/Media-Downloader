@@ -13,6 +13,14 @@ from typing import Any
 from install_mode import install_mode_name
 from version import APP_VERSION
 
+# Source tests are invoked as "python desktop_downloader/self_test.py", so
+# Python adds desktop_downloader/ (not the repository root) to sys.path.
+# Frozen builds use PyInstaller's embedded module loader instead.
+if not getattr(sys, "frozen", False):
+    repository_root = Path(__file__).resolve().parents[1]
+    if str(repository_root) not in sys.path:
+        sys.path.insert(0, str(repository_root))
+
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
