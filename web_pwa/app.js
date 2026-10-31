@@ -8,6 +8,8 @@ const state = {
   updatePoll: null,
   agent: {},
   downloads: {},
+  batchLastRefresh: 0,
+  batchRefreshing: false,
   editorInfo: null,
   editorExportId: "",
   editorObjectUrl: "",
@@ -185,6 +187,114 @@ async function startDownload() {
   }
 }
 
+function batchInputUrls() {
+  return $("batchUrls").value.split(/[\s,]+/).map((url) => url.trim()).filter(Boolean);
+}
+
+function updateBatchCount() {
+  const count = batchInputUrls().length;
+  $("batchCount").textContent = `${count} / 50 URLs`;
+  $("batchCount").classList.toggle("batch-count-over", count > 50);
+}
+
+function updateBatchMode() {
+  const audio = $("batchMode").value === "Audio";
+  $("batchQuality").disabled = audio;
+  $("batchAudioFormat").disabled = !audio;
+  $("batchAudioQuality").disabled = !audio;
+}
+
+async function enqueueBatch() {
+  const urls = batchInputUrls();
+  if (!urls.length || urls.length > 50) {
+    $("batchStatus").textContent = "Enter between 1 and 50 URLs.";
+    return;
+  }
+  $("batchStartBtn").disabled = true;
+  $("batchStatus").textContent = `Adding ${urls.length} links to queue…`;
+  try {
+    const {batch} = await api("/api/batches", {
+      method:"POST",
+      body:JSON.stringify({
+        urls,
+        mode:$("batchMode").value,
+        video_quality:$("batchQuality").value,
+        audio_format:$("batchAudioFormat").value,
+        audio_quality:$("batchAudioQuality").value,
+        download_dir:$("downloadDirInput").value.trim() || null,
+      }),
+    });
+    $("batchStatus").textContent = `Queued ${batch.total} items${batch.duplicates_skipped ? ` • ${batch.duplicates_skipped} duplicate(s) skipped` : ""}. Download Activity shows each item.`;
+    $("batchUrls").value = "";
+    updateBatchCount();
+    await refreshBatches();
+    await refreshDownloads();
+  } catch (error) {
+    $("batchStatus").textContent = error.message;
+  } finally {
+    $("batchStartBtn").disabled = false;
+  }
+}
+
+function batchRow(batch) {
+  const row = document.createElement("article");
+  row.className = "batch-row";
+  const progress = Math.max(0, Math.min(100, Math.round(Number(batch.progress || 0) * 100)));
+  const active = Number(batch.active || 0);
+  const errors = Number(batch.failed || 0);
+  const actions = [];
+  if (active > 0) actions.push(`<button class="secondary mini danger" data-batch-cancel="${batch.id}">Cancel remaining</button>`);
+  if (errors > 0) actions.push(`<button class="mini retry" data-batch-retry="${batch.id}">Retry ${errors} failed</button>`);
+  const items = (batch.items || []).map((job) => {
+    const name = job.request?.filename || job.request?.url || "media";
+    const status = String(job.status || "queued");
+    const pct = Math.round(Number(job.progress || 0) * 100);
+    const detail = job.error ? ` · ${String(job.error).slice(0, 110)}` : "";
+    return `<div class="batch-item"><span>${escapeHtml(name + detail)}</span><span>${escapeHtml(status)} ${pct}%</span></div>`;
+  }).join("");
+  row.innerHTML = `
+    <div class="row-top">
+      <strong>Batch ${escapeHtml(batch.id.slice(0, 8))} · ${escapeHtml(batch.mode)} · ${batch.total} items</strong>
+      <span class="job-status ${escapeHtml(batch.status)}">${escapeHtml(batch.status.replaceAll("_", " ").toUpperCase())}</span>
+    </div>
+    <div class="progress"><span style="width:${progress}%"></span></div>
+    <div class="row-bottom"><span>${batch.completed} completed · ${errors} failed · ${batch.cancelled} cancelled · ${active} pending/running</span>
+      <div class="row-actions">${actions.join("")}</div>
+    </div>
+    <details class="batch-detail"><summary>Show ${batch.total} item(s)</summary><div class="batch-items">${items}</div></details>
+  `;
+  return row;
+}
+
+async function refreshBatches() {
+  if (!state.key || state.batchRefreshing) return;
+  state.batchRefreshing = true;
+  try {
+    const {batches} = await api("/api/batches");
+    const list = $("batchList");
+    const expanded = new Set(
+      [...list.querySelectorAll(".batch-row")].filter((row) => row.querySelector("details")?.open)
+        .map((row) => row.dataset.batchId)
+    );
+    list.replaceChildren();
+    if (!batches.length) {
+      list.innerHTML = '<div class="empty">No batches yet.</div>';
+    } else {
+      for (const batch of batches) {
+        const row = batchRow(batch);
+        row.dataset.batchId = batch.id;
+        if (expanded.has(batch.id)) row.querySelector("details").open = true;
+        list.appendChild(row);
+      }
+    }
+    state.batchLastRefresh = Date.now();
+  } catch (error) {
+    $("batchStatus").textContent = error.message;
+  } finally {
+    state.batchRefreshing = false;
+  }
+}
+
 function jobRow(job) {
   const row = document.createElement("article");
   row.className = "download-row";
@@ -222,6 +332,7 @@ function escapeHtml(value) {
 
 async function refreshDownloads() {
   if (!state.key) return;
+  if (Date.now() - state.batchLastRefresh >= 2500) void refreshBatches();
   try {
     const {downloads} = await api("/api/downloads");
     state.downloads = Object.fromEntries(downloads.map((job) => [job.id, job]));
@@ -1231,6 +1342,11 @@ function renderSettings(settings = {}) {
 
   $("audioFormatSelect").value = settings.audio_format || "MP3";
   $("audioQualitySelect").value = settings.audio_quality || "192";
+  $("batchMode").value = settings.default_mode || "Video";
+  $("batchQuality").value = settings.video_quality || "720p";
+  $("batchAudioFormat").value = settings.audio_format || "MP3";
+  $("batchAudioQuality").value = settings.audio_quality || "192";
+  updateBatchMode();
   setMode(settings.default_mode || "Video");
 }
 
@@ -1359,6 +1475,7 @@ async function bootstrap() {
     $("analysisStatus").textContent = "Ready for a media link.";
     setInterval(refreshDownloads, 900);
     refreshDownloads();
+    refreshBatches();
     refreshEditorExports();
     refreshEditorLibrary();
     refreshAgentStatus();
@@ -1371,6 +1488,33 @@ async function bootstrap() {
     $("analysisStatus").textContent = "Local Core is not available. Start Media Downloader Core.";
   }
 }
+
+$("batchUrls").addEventListener("input", updateBatchCount);
+$("batchMode").addEventListener("change", updateBatchMode);
+$("batchStartBtn").addEventListener("click", enqueueBatch);
+$("batchClearBtn").addEventListener("click", () => {
+  $("batchUrls").value = "";
+  updateBatchCount();
+});
+$("batchRefreshBtn").addEventListener("click", refreshBatches);
+$("batchList").addEventListener("click", async (event) => {
+  const cancel = event.target.closest("[data-batch-cancel]");
+  const retry = event.target.closest("[data-batch-retry]");
+  try {
+    if (cancel) {
+      await api(`/api/batches/${cancel.dataset.batchCancel}`, {method:"DELETE"});
+      $("batchStatus").textContent = "Cancelling remaining batch items…";
+    } else if (retry) {
+      await api(`/api/batches/${retry.dataset.batchRetry}/retry`, {method:"POST"});
+      $("batchStatus").textContent = "Failed batch items queued for retry.";
+    }
+    await refreshBatches();
+    await refreshDownloads();
+  } catch (error) {
+    $("batchStatus").textContent = error.message;
+  }
+});
+updateBatchCount();
 
 $("analyzeBtn").addEventListener("click", analyze);
 $("cancelAnalyzeBtn").addEventListener("click", cancelAnalysis);

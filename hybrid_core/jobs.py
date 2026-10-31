@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from media_core.editor import EditorCancelled, run_export
+from media_core.engine import safe_filename
+
+from .batch import batch_summary, normalize_batch_urls
 
 from .engine import Cancelled, analyze_url, download_from_analysis
 from .state_store import JsonStateStore
@@ -294,7 +297,105 @@ class JobManager:
         self._download_pool.submit(self._run_download, job)
         return job
 
+    def start_batch(
+        self,
+        *,
+        urls: list[str],
+        mode: str,
+        video_quality: str,
+        audio_format: str,
+        audio_quality: str,
+        download_dir: str,
+    ) -> dict[str, Any]:
+        unique, duplicates = normalize_batch_urls(urls)
+        if mode not in {"Video", "Audio"}:
+            raise ValueError("Batch mode must be Video or Audio.")
+        with self._lock:
+            active = sum(
+                job.kind == "download" and job.status in {"queued", "running", "cancelling"}
+                for job in self._jobs.values()
+            )
+            if active + len(unique) > 150:
+                raise ValueError("Queue capacity exceeded. Complete or cancel some downloads first.")
+            batch_id = uuid.uuid4().hex
+            items: list[Job] = []
+            for index, url in enumerate(unique, start=1):
+                request = {
+                    "url": url,
+                    "batch_id": batch_id,
+                    "batch_index": index,
+                    "auto_filename": True,
+                    "filename": f"batch_{batch_id[:8]}_{index:03d}",
+                    "mode": mode,
+                    "video_quality": video_quality,
+                    "audio_format": audio_format,
+                    "audio_quality": audio_quality,
+                    "download_dir": download_dir,
+                }
+                items.append(self._new("download", request))
+            # Submit under the same lock so batch-wide cancellation cannot
+            # interleave with a partially queued batch.
+            for item in items:
+                self._download_pool.submit(self._run_download, item)
+            summary = batch_summary(batch_id, [item.snapshot() for item in items])
+            summary["duplicates_skipped"] = duplicates
+            return summary
+
+    def get_batch(self, batch_id: str) -> dict[str, Any]:
+        with self._lock:
+            jobs = [
+                job.snapshot()
+                for job in self._jobs.values()
+                if job.kind == "download" and job.request.get("batch_id") == batch_id
+            ]
+        return batch_summary(batch_id, jobs)
+
+    def list_batches(self, limit: int = 12) -> list[dict[str, Any]]:
+        with self._lock:
+            groups: dict[str, list[dict[str, Any]]] = {}
+            for job in self._jobs.values():
+                if job.kind != "download":
+                    continue
+                batch_id = str(job.request.get("batch_id") or "")
+                if batch_id:
+                    groups.setdefault(batch_id, []).append(job.snapshot())
+        summaries = [batch_summary(group_id, jobs) for group_id, jobs in groups.items()]
+        summaries.sort(key=lambda summary: summary["created_at"], reverse=True)
+        return summaries[:limit]
+
+    def cancel_batch(self, batch_id: str) -> dict[str, Any]:
+        with self._lock:
+            jobs = [
+                job for job in self._jobs.values()
+                if job.kind == "download" and job.request.get("batch_id") == batch_id
+            ]
+        if not jobs:
+            raise ValueError("Batch not found.")
+        for job in jobs:
+            self.cancel(job.id)
+        return self.get_batch(batch_id)
+
+    def retry_batch(self, batch_id: str) -> dict[str, Any]:
+        with self._lock:
+            jobs = [
+                job for job in self._jobs.values()
+                if job.kind == "download" and job.request.get("batch_id") == batch_id
+                and job.status == "failed"
+            ]
+            exists = any(
+                job.kind == "download" and job.request.get("batch_id") == batch_id
+                for job in self._jobs.values()
+            )
+        if not exists:
+            raise ValueError("Batch not found.")
+        for job in jobs:
+            self.retry_download(job.id)
+        return self.get_batch(batch_id)
+
     def _run_download(self, job: Job) -> None:
+        if job.cancel_event.is_set():
+            self._set(job, status="cancelled", detail="Cancelled before starting")
+            return
         attempt = int(job.meta.get("attempt_count") or 0) + 1
         self._set(
             job,
@@ -312,7 +413,19 @@ class JobManager:
                     on_status=lambda text: self._set(job, detail=f"Refresh: {text}"),
                 )
                 job.private["cached_info"] = cached_info
+                if job.request.get("auto_filename"):
+                    # A stable per-batch prefix prevents collisions between
+                    # identical titles and between separate submitted batches.
+                    stem = safe_filename(str(_public.get("filename") or _public.get("title") or "media"))
+                    batch_id = str(job.request.get("batch_id") or "")[:8]
+                    batch_index = int(job.request.get("batch_index") or 0)
+                    filename = f"{batch_id}_{batch_index:03d}_{stem}"
+                    with self._lock:
+                        job.request["filename"] = filename
+                    self._persist()
 
+            if job.cancel_event.is_set():
+                raise Cancelled("Cancelled before download.")
             download_dir = Path(str(job.request.get("download_dir") or ""))
             self._ensure_disk_space(download_dir, cached_info)
 
@@ -410,7 +523,10 @@ class JobManager:
         if job is None or job.status in TERMINAL:
             return False
         job.cancel_event.set()
-        self._set(job, status="cancelling", detail="Cancelling")
+        if job.status == "queued":
+            self._set(job, status="cancelled", detail="Cancelled in queue")
+        else:
+            self._set(job, status="cancelling", detail="Cancelling")
         return True
 
     def retry_editor_export(self, job_id: str) -> Job:

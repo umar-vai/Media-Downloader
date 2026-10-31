@@ -78,9 +78,48 @@
       </div>
     </section>
 
+    <section id="batchCard" class="card batch-card">
+      <div class="downloads-head">
+        <div class="section-head">
+          <span>03 / BATCH DOWNLOAD</span>
+          <h2>Download multiple links</h2>
+          <p class="batch-help">Paste up to 50 URLs, one per line. All items use your selected quality and save folder.</p>
+        </div>
+        <span id="batchCount" class="pill">0 / 50 URLs</span>
+      </div>
+      <label class="batch-label" for="batchUrls">Media URLs</label>
+      <textarea id="batchUrls" rows="5" spellcheck="false" placeholder="https://example.com/video/1&#10;https://example.com/video/2&#10;https://example.com/video/3"></textarea>
+      <div class="batch-controls">
+        <label>Download type
+          <select id="batchMode"><option value="Video">Video</option><option value="Audio">Audio</option></select>
+        </label>
+        <label>Video quality
+          <select id="batchQuality">
+            <option>Best available</option><option>1080p</option><option selected>720p</option><option>480p</option><option>360p</option>
+          </select>
+        </label>
+        <label>Audio format
+          <select id="batchAudioFormat"><option>MP3</option><option>M4A</option><option>WAV</option></select>
+        </label>
+        <label>Audio bitrate
+          <select id="batchAudioQuality"><option>128</option><option selected>192</option><option>256</option><option>320</option></select>
+        </label>
+      </div>
+      <div class="batch-actions">
+        <button id="batchStartBtn" class="primary">Add batch to queue</button>
+        <button id="batchClearBtn" class="secondary">Clear links</button>
+        <span id="batchStatus" class="status-text" role="status">Up to 3 concurrent downloads by default (configurable in Settings).</span>
+      </div>
+      <div class="batch-history-header">
+        <strong>Batch queues</strong>
+        <button id="batchRefreshBtn" class="secondary mini">Refresh</button>
+      </div>
+      <div id="batchList" class="batch-list"><div class="empty">No batches yet.</div></div>
+    </section>
+
     <section class="card">
       <div class="downloads-head">
-        <div class="section-head"><span>03 / DOWNLOADS</span><h2>Download activity</h2></div>
+        <div class="section-head"><span>04 / DOWNLOADS</span><h2>Download activity</h2></div>
         <button id="openDownloadsBtn" class="secondary">Open downloads</button>
       </div>
       <div id="downloadsList" class="downloads-list">
@@ -91,7 +130,7 @@
     <section id="editorCard" class="card editor-card">
       <div class="downloads-head editor-titlebar">
         <div class="section-head">
-          <span>04 / EDITOR</span>
+          <span>05 / EDITOR</span>
           <h2>Local timeline editor</h2>
           <p class="editor-subtitle">Play the full local source, trim on a real timeline, preview transforms, then export with FFmpeg.</p>
         </div>

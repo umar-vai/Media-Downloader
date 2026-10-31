@@ -94,6 +94,15 @@ class DownloadRequest(BaseModel):
     download_dir: str | None = None
 
 
+class BatchDownloadRequest(BaseModel):
+    urls: list[str] = Field(min_length=1, max_length=50)
+    mode: str = "Video"
+    video_quality: str = "Best available"
+    audio_format: str = "MP3"
+    audio_quality: str = "192"
+    download_dir: str | None = None
+
+
 class ConfigRequest(BaseModel):
     download_dir: str
 
@@ -292,6 +301,7 @@ def bootstrap() -> dict[str, Any]:
             "download": True,
             "cancel_download": True,
             "retry_download": True,
+            "batch_download": True,
             "local_save": True,
             "editor": True,
         },
@@ -343,6 +353,63 @@ def create_download(payload: DownloadRequest) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"job": job.snapshot()}
+
+
+@app.post("/api/batches", dependencies=[Depends(require_key)])
+def create_batch(payload: BatchDownloadRequest) -> dict[str, Any]:
+    RATE_LIMITER.check("batch-create", limit=8, window_seconds=60)
+    if payload.mode not in {"Video", "Audio"}:
+        raise HTTPException(status_code=400, detail="Mode must be Video or Audio.")
+    settings = SETTINGS.get()
+    directory = Path(payload.download_dir or str(settings["download_dir"])).expanduser()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        if not directory.is_dir():
+            raise OSError("Not a directory.")
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid download folder: {exc}") from exc
+    try:
+        batch = MANAGER.start_batch(
+            urls=payload.urls,
+            mode=payload.mode,
+            video_quality=payload.video_quality,
+            audio_format=payload.audio_format,
+            audio_quality=payload.audio_quality,
+            download_dir=str(directory),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"batch": batch}
+
+
+@app.get("/api/batches", dependencies=[Depends(require_key)])
+def list_batches() -> dict[str, Any]:
+    return {"batches": MANAGER.list_batches()}
+
+
+@app.get("/api/batches/{batch_id}", dependencies=[Depends(require_key)])
+def get_batch(batch_id: str) -> dict[str, Any]:
+    try:
+        return {"batch": MANAGER.get_batch(batch_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/api/batches/{batch_id}", dependencies=[Depends(require_key)])
+def cancel_batch(batch_id: str) -> dict[str, Any]:
+    try:
+        return {"batch": MANAGER.cancel_batch(batch_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/batches/{batch_id}/retry", dependencies=[Depends(require_key)])
+def retry_batch(batch_id: str) -> dict[str, Any]:
+    RATE_LIMITER.check("batch-retry", limit=10, window_seconds=60)
+    try:
+        return {"batch": MANAGER.retry_batch(batch_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/downloads", dependencies=[Depends(require_key)])

@@ -147,3 +147,34 @@ button{border:0;border-radius:11px;padding:11px 15px;color:var(--text);cursor:po
   .editor-timeline{height:82px}
   .editor-timeline-waveform{height:62px}
 }
+
+
+/* Batch download workspace */
+.batch-card{background:linear-gradient(120deg,#0b1323,#101b2c)}
+.batch-help{margin:0;color:var(--muted);font-size:12px}
+.batch-card .downloads-head{gap:12px;align-items:flex-start}
+.batch-count-over{color:var(--danger);background:#351722}
+.batch-label{display:block;margin:14px 0 7px;font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase}
+#batchUrls{width:100%;min-height:140px;resize:vertical;display:block;background:var(--surface2);border:1px solid #2a4169;color:var(--text);border-radius:12px;padding:13px 14px;font:12px/1.7 Consolas,monospace;outline:none}
+#batchUrls:focus{border-color:var(--purple)}
+.batch-controls{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:13px 0}
+.batch-controls label{display:flex;flex-direction:column;gap:6px;font-size:10px;color:var(--muted);text-transform:uppercase}
+.batch-controls select{width:100%;min-width:0}
+.batch-actions{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+.batch-actions .status-text{margin:0;font-size:11px;flex:1 1 250px}
+.batch-history-header{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border);margin-top:18px;padding-top:14px;gap:12px}
+.batch-list{display:flex;flex-direction:column;gap:9px;margin-top:10px}
+.batch-row{border:1px solid #274164;background:var(--surface2);padding:12px;border-radius:12px}
+.batch-row .row-bottom>span{overflow-wrap:anywhere;min-width:0}
+.batch-detail{margin-top:8px;border-top:1px solid #213350;padding-top:8px}
+.batch-detail summary{font-size:11px;color:var(--cyan);cursor:pointer}
+.batch-items{padding-top:8px;display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto}
+.batch-item{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--muted)}
+.batch-item span:first-child{overflow-wrap:anywhere;min-width:0}
+.batch-item span:last-child{white-space:nowrap}
+@media(max-width:760px){
+  .batch-controls{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .batch-card .downloads-head{flex-wrap:wrap}
+  .batch-actions .primary{flex:1}
+  .batch-row .row-bottom{flex-direction:column;align-items:flex-start}
+}
