@@ -45,6 +45,15 @@ class BatchDownloadTests(unittest.TestCase):
         self.assertEqual(result["active"], 1)
         self.assertEqual(result["status"], "queued")
 
+    def test_partial_cancellation_is_not_reported_as_completed(self):
+        items = [
+            {"request": {"batch_index": 1, "mode": "Video"}, "status": "completed", "progress": 1, "created_at": 1},
+            {"request": {"batch_index": 2, "mode": "Video"}, "status": "cancelled", "progress": 0, "created_at": 2},
+        ]
+        result = batch_summary("batch1", items)
+        self.assertEqual(result["status"], "partially_cancelled")
+        self.assertEqual(result["cancelled"], 1)
+
     @patch("hybrid_core.jobs.download_from_analysis")
     @patch("hybrid_core.jobs.analyze_url")
     def test_batch_downloads_and_restores_history(self, mocked_analyze, mocked_download):

@@ -47,8 +47,8 @@ def batch_summary(batch_id: str, jobs: list[dict[str, Any]]) -> dict[str, Any]:
         status = "running" if counts["running"] or counts["cancelling"] else "queued"
     elif failed:
         status = "completed_with_errors"
-    elif cancelled and not done:
-        status = "cancelled"
+    elif cancelled:
+        status = "partially_cancelled" if done else "cancelled"
     else:
         status = "completed"
     percent = sum(

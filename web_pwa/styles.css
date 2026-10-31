@@ -178,3 +178,7 @@ button{border:0;border-radius:11px;padding:11px 15px;color:var(--text);cursor:po
   .batch-actions .primary{flex:1}
   .batch-row .row-bottom{flex-direction:column;align-items:flex-start}
 }
+
+.batch-item-actions{display:inline-flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.batch-item-actions button{padding:4px 8px}
+@media(max-width:760px){.batch-item{flex-direction:column;align-items:flex-start}.batch-item-actions{justify-content:flex-start}}

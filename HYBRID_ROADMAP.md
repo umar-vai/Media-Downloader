@@ -280,11 +280,12 @@ The lightweight Windows agent now has installation, supervision, startup control
 - Paste 1–50 HTTP(S) URLs together in the new PWA Batch Download panel; duplicate links within the submitted list are ignored.
 - Each URL becomes its own persistent download job with a common batch ID and stable order. The existing download concurrency setting caps simultaneous analysis/download work.
 - Choose one Video/Audio mode and quality/format for the batch; files receive individual source-derived names with a collision-resistant batch prefix.
-- Batch queue cards show overall progress and totals (completed, failed, cancelled, pending), with expandable per-item status.
+- Batch queue cards show overall progress and totals (completed, failed, cancelled, pending), with expandable per-item status and individual Cancel/Retry/Edit controls for all 50 items.
 - **Cancel remaining** stops active and queued members, while **Retry failed** requeues only failed members; each job also retains its individual Cancel/Retry/Edit controls in Download Activity.
 - The group is reconstructed from persisted download job history after Local Core restart; pending downloads automatically resume under the existing recovery mechanism.
 - Input validation, duplicate detection, queue capacity protection, and batch tests added.
-- Local Core bumped to v0.11.0.
+- A completed-and-cancelled batch is shown as partially cancelled, not incorrectly as fully completed.
+- Local Core batch rollout build bumped to v0.11.1.
 
 ### Remaining Phase 5 work
 

@@ -250,7 +250,15 @@ function batchRow(batch) {
     const status = String(job.status || "queued");
     const pct = Math.round(Number(job.progress || 0) * 100);
     const detail = job.error ? ` · ${String(job.error).slice(0, 110)}` : "";
-    return `<div class="batch-item"><span>${escapeHtml(name + detail)}</span><span>${escapeHtml(status)} ${pct}%</span></div>`;
+    const actions = [];
+    if (["queued","running","cancelling"].includes(status)) {
+      actions.push(`<button class="mini secondary danger" data-batch-item-cancel="${job.id}">Cancel</button>`);
+    } else if (status === "failed") {
+      actions.push(`<button class="mini retry" data-batch-item-retry="${job.id}">Retry</button>`);
+    } else if (status === "completed" && job.result?.path) {
+      actions.push(`<button class="mini secondary" data-batch-item-edit="${job.id}">Edit</button>`);
+    }
+    return `<div class="batch-item"><span>${escapeHtml(name + detail)}</span><span class="batch-item-actions">${escapeHtml(status)} ${pct}% ${actions.join("")}</span></div>`;
   }).join("");
   row.innerHTML = `
     <div class="row-top">
@@ -1500,8 +1508,18 @@ $("batchRefreshBtn").addEventListener("click", refreshBatches);
 $("batchList").addEventListener("click", async (event) => {
   const cancel = event.target.closest("[data-batch-cancel]");
   const retry = event.target.closest("[data-batch-retry]");
+  const cancelItem = event.target.closest("[data-batch-item-cancel]");
+  const retryItem = event.target.closest("[data-batch-item-retry]");
+  const editItem = event.target.closest("[data-batch-item-edit]");
   try {
-    if (cancel) {
+    if (cancelItem) {
+      await api(`/api/downloads/${cancelItem.dataset.batchItemCancel}`, {method:"DELETE"});
+    } else if (retryItem) {
+      await api(`/api/downloads/${retryItem.dataset.batchItemRetry}/retry`, {method:"POST"});
+    } else if (editItem) {
+      const {job} = await api(`/api/jobs/${editItem.dataset.batchItemEdit}`);
+      if (job.result?.path) await loadEditorPath(job.result.path);
+    } else if (cancel) {
       await api(`/api/batches/${cancel.dataset.batchCancel}`, {method:"DELETE"});
       $("batchStatus").textContent = "Cancelling remaining batch items…";
     } else if (retry) {
