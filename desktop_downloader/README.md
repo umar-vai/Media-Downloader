@@ -102,3 +102,26 @@ This keeps the product workflow unchanged: **paste link → analyze → download
 Failed items in **Download Activity** now show a **Retry** button.
 
 Retry keeps the original URL, filename, output folder, selected video/audio settings, and cached analyzed media data. The failed item is reset to queued state and immediately starts again when a download slot is available. Existing successful or active downloads are not affected.
+
+
+## v3.9.6 Desktop Batch Download
+
+The original CustomTkinter Windows desktop EXE now includes **Batch Download**, accessible from
+the top toolbar. This is part of the desktop `v3.9.x` series, not the separate Web/PWA Local Core.
+
+- Paste up to 50 HTTP(S) URLs, one per line. Duplicate URLs in the same list are skipped.
+- Select Video/Audio mode and output quality once for the batch.
+- Items enter the same existing download queue, with up to 3 concurrent analyze/download workers.
+- Each URL is analyzed separately in its worker before download. Successful analysis supplies its
+  source title and cached media format data to the shared downloader.
+- Every file has a unique batch-ID and position prefix to avoid title collisions.
+- The separate Batch Download window shows each item's status/progress, per-item Cancel/Retry,
+  overall batch completion counts, and Cancel Remaining/Retry Failed actions.
+- One failed link does not stop the other queued links; completed downloads are still recorded
+  in normal Download History and remain available to the editor.
+- A maximum of 150 pending/running jobs prevents queue overload.
+
+**Note:** In the v3.9.6 Desktop branch, batch job state is in memory while the EXE is running.
+Completed files and Download History persist, but unfinished batch jobs are not automatically
+resumed after closing/restarting the desktop app. Individual download success still depends
+on the site's compatible non-DRM media extraction support.

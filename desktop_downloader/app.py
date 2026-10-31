@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import urllib.request
+import uuid
 import webbrowser
 from datetime import datetime, timezone
 from enum import Enum
@@ -24,6 +25,8 @@ from tkinter import filedialog, messagebox
 
 from app_logging import get_logger, log_path
 from diagnostics_window import DiagnosticsWindow
+from batch_download import batch_filename, parse_batch_urls
+from batch_window import BatchDownloadWindow
 from download_queue import DownloadQueue, DownloadRequest
 from history_store import HistoryStore, make_history_entry
 from history_window import HistoryWindow
@@ -241,6 +244,7 @@ class DownloaderApp(ctk.CTk):
         self.diagnostics_window: DiagnosticsWindow | None = None
         self.settings_window: SettingsWindow | None = None
         self.history_window: HistoryWindow | None = None
+        self.batch_window: BatchDownloadWindow | None = None
         self.download_queue = DownloadQueue(max_concurrent=3)
         self.task_state = TaskState.IDLE
 
@@ -381,6 +385,21 @@ class DownloaderApp(ctk.CTk):
 
         ctk.CTkButton(
             top,
+            text="Batch Download",
+            width=130,
+            height=30,
+            corner_radius=9,
+            fg_color="#25204A",
+            hover_color=PURPLE,
+            border_width=1,
+            border_color=PURPLE,
+            text_color=TEXT,
+            font=("Segoe UI Semibold", 9),
+            command=self.open_batch_downloads,
+        ).grid(row=0, column=3, padx=(12, 0))
+
+        ctk.CTkButton(
+            top,
             text="History",
             width=82,
             height=30,
@@ -392,7 +411,7 @@ class DownloaderApp(ctk.CTk):
             text_color=TEXT,
             font=("Segoe UI Semibold", 9),
             command=self.open_history,
-        ).grid(row=0, column=3, padx=(12, 0))
+        ).grid(row=0, column=4, padx=(12, 0))
 
         ctk.CTkButton(
             top,
@@ -407,7 +426,7 @@ class DownloaderApp(ctk.CTk):
             text_color=TEXT,
             font=("Segoe UI Semibold", 9),
             command=self.open_settings,
-        ).grid(row=0, column=4, padx=(8, 0))
+        ).grid(row=0, column=5, padx=(8, 0))
 
         ctk.CTkLabel(
             top,
@@ -417,7 +436,7 @@ class DownloaderApp(ctk.CTk):
             fg_color=SURFACE_2,
             text_color=CYAN,
             font=("Segoe UI Semibold", 10),
-        ).grid(row=0, column=5, padx=(12, 24))
+        ).grid(row=0, column=6, padx=(12, 24))
 
     def _build_hero(self) -> None:
         hero = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -1565,6 +1584,84 @@ class DownloaderApp(ctk.CTk):
                 return candidate
         return f"{base} {int(time.time())}"
 
+    def open_batch_downloads(self) -> None:
+        existing = self.batch_window
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                self.batch_window = None
+        try:
+            self.batch_window = BatchDownloadWindow(
+                self,
+                on_enqueue=self._enqueue_batch_downloads,
+                on_cancel=self.cancel_download,
+                on_retry=self.retry_download,
+                get_snapshots=self.download_queue.snapshot,
+                settings=self.settings,
+            )
+            self.batch_window.focus()
+        except Exception:
+            LOGGER.exception("Unable to open Desktop Batch Download")
+            self.batch_window = None
+            messagebox.showerror(APP_NAME, "Could not open Batch Download. Check diagnostics log.")
+
+    def _enqueue_batch_downloads(
+        self, text: str, options: dict[str, str]
+    ) -> tuple[str, int, int]:
+        urls, duplicates = parse_batch_urls(text)
+        mode = str(options.get("mode") or "Video")
+        quality = str(options.get("video_quality") or "720p")
+        audio_format = str(options.get("audio_format") or "MP3")
+        bitrate = str(options.get("audio_quality") or "192")
+        if mode not in {"Video", "Audio"}:
+            raise ValueError("Select Video or Audio.")
+        if quality not in {"Best available", "1080p", "720p", "480p", "360p"}:
+            raise ValueError("Invalid video quality.")
+        if audio_format not in {"MP3", "M4A"} or bitrate not in {"128", "192", "256", "320"}:
+            raise ValueError("Invalid audio output settings.")
+
+        self.download_dir.mkdir(parents=True, exist_ok=True)
+        batch_id = uuid.uuid4().hex
+        payloads = []
+        for index, url in enumerate(urls, 1):
+            prefix = batch_id[:8]
+            request_settings = {
+                "batch_id": batch_id,
+                "batch_index": index,
+                "mode": mode,
+                "video_quality": quality,
+                "audio_format": audio_format.lower(),
+                "audio_quality": bitrate,
+                "source_url": url,
+                "history_title": f"Batch item {index}",
+                "history_platform": platform_name(url),
+                "history_quality": quality if mode == "Video" else f"{audio_format} {bitrate} kbps",
+                "history_duration": 0,
+            }
+            payloads.append({
+                "url": url,
+                "name": f"{prefix}_{index:03d}_media",
+                "batch_id": batch_id,
+                "batch_index": index,
+                "download_dir": str(self.download_dir),
+                "request_settings": request_settings,
+                "cached_info": None,
+            })
+        self.download_queue.enqueue_batch(payloads)
+        LOGGER.info(
+            "Desktop batch queued batch=%s links=%s duplicates_skipped=%s",
+            batch_id, len(payloads), duplicates
+        )
+        self._set_status(f"Queued {len(payloads)} batch downloads", "ready")
+        self._schedule_download_activity_refresh(40)
+        self._start_available_downloads()
+        return batch_id, len(payloads), duplicates
+
     def _start_download(self, edit_after_download: bool) -> None:
         url = self.url_var.get().strip()
         platform = detect_platform(url)
@@ -1646,6 +1743,36 @@ class DownloaderApp(ctk.CTk):
         cached_info: dict[str, Any] | None = None,
     ) -> None:
         try:
+            if request_settings.get("batch_id"):
+                if cancel_event.is_set():
+                    raise SharedCancelled("Batch item cancelled before analysis.")
+                self._put_download_event(
+                    "download_status", request_id, "Analyzing batch link…"
+                )
+                summary, extracted_info = shared_analyze_url(
+                    url,
+                    cancel_event=cancel_event,
+                    on_status=lambda text: self._put_download_event(
+                        "download_status", request_id, f"Analyze: {text}"
+                    ),
+                )
+                if cancel_event.is_set():
+                    raise SharedCancelled("Batch item cancelled after analysis.")
+                cached_info = extracted_info
+                name = batch_filename(
+                    str(request_settings["batch_id"]),
+                    int(request_settings.get("batch_index") or 0),
+                    str(summary.get("title") or "media"),
+                )
+                self._put_download_event("download_name", request_id, name)
+                request_settings["history_title"] = str(summary.get("title") or name)
+                request_settings["history_creator"] = str(summary.get("creator") or "")
+                request_settings["history_platform"] = str(
+                    summary.get("platform") or platform_name(url)
+                )
+                request_settings["history_duration"] = int(
+                    float(summary.get("duration") or 0)
+                )
             final_path = shared_download_from_analysis(
                 url=url,
                 cached_info=dict(cached_info or {}),
@@ -1835,6 +1962,10 @@ class DownloaderApp(ctk.CTk):
 
                     if kind == "download_status":
                         self.download_queue.update_detail(request_id, str(data or "Working…"))
+                        self._schedule_download_activity_refresh(80)
+
+                    elif kind == "download_name":
+                        self.download_queue.update_name(request_id, str(data or "Media"))
                         self._schedule_download_activity_refresh(80)
 
                     elif kind == "download_done":

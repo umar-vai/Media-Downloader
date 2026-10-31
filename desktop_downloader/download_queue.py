@@ -29,6 +29,8 @@ class DownloadRequest:
             "id": self.id,
             "name": str(self.payload.get("name") or "Media download"),
             "url": str(self.payload.get("url") or ""),
+            "batch_id": str(self.payload.get("batch_id") or ""),
+            "batch_index": int(self.payload.get("batch_index") or 0),
             "edit_after_download": self.edit_after_download,
             "status": self.status,
             "progress": self.progress,
@@ -68,6 +70,23 @@ class DownloadQueue:
             self._pending.append(request.id)
             self._trim_history_locked()
             return request
+
+    def enqueue_batch(self, payloads: list[dict[str, Any]]) -> list[DownloadRequest]:
+        """Enqueue a batch atomically, preserving submitted order."""
+        if not payloads or len(payloads) > 50:
+            raise ValueError("Batch must contain between 1 and 50 items.")
+        with self._lock:
+            outstanding = self.queued_count() + self.running_count()
+            if outstanding + len(payloads) > 150:
+                raise ValueError("Download queue is full (150 pending/running items maximum).")
+            requests = [self.enqueue(payload, edit_after_download=False) for payload in payloads]
+        return requests
+
+    def update_name(self, request_id: str, name: str) -> None:
+        with self._lock:
+            request = self._find_locked(request_id)
+            if request is not None and request.status in {"running", "cancelling"}:
+                request.payload["name"] = str(name)
 
     def start_available(self) -> list[DownloadRequest]:
         started: list[DownloadRequest] = []
