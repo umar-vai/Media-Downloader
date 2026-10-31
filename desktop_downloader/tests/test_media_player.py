@@ -21,6 +21,7 @@ class _AliveProcess:
 class MediaPlayerReadinessTests(unittest.TestCase):
     def make_player(self) -> EmbeddedMediaPlayer:
         player = EmbeddedMediaPlayer.__new__(EmbeddedMediaPlayer)
+        player.path = Path("fixture-video.mp4")
         player._lock = threading.RLock()
         player._closed = False
         player._ready = threading.Event()

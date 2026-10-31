@@ -8,3 +8,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from media_core.network import *  # noqa: F401,F403
+
+# Compatibility exports for legacy desktop source/tests.
+from media_core.network import _normalize_proxy_url, _parse_windows_proxy_server  # noqa: F401

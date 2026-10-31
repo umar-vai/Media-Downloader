@@ -42,7 +42,7 @@ class NetworkProxyTests(unittest.TestCase):
 
     @patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:7890"}, clear=True)
     def test_environment_proxy_is_forwarded_to_ytdlp(self) -> None:
-        with patch("network_proxy._windows_registry_proxy", return_value=None):
+        with patch("media_core.network._windows_registry_proxy", return_value=None):
             self.assertEqual(
                 active_proxy_route(),
                 ProxyRoute("http://127.0.0.1:7890", "environment"),
@@ -52,7 +52,7 @@ class NetworkProxyTests(unittest.TestCase):
                 {"proxy": "http://127.0.0.1:7890"},
             )
 
-    @patch("network_proxy.active_proxy_route", return_value=ProxyRoute("http://127.0.0.1:7890", "windows"))
+    @patch("media_core.network.active_proxy_route", return_value=ProxyRoute("http://127.0.0.1:7890", "windows"))
     def test_safe_label_does_not_expose_credentials(self, _route) -> None:
         self.assertEqual(safe_proxy_label(), "System proxy active • 127.0.0.1:7890")
 
