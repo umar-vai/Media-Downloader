@@ -22,6 +22,8 @@ class BatchSection:
         on_enqueue: Callable[[str, dict[str, str]], tuple[str, int, int]],
         on_cancel: Callable[[str], None],
         on_retry: Callable[[str], None],
+        on_pause: Callable[[str], None] | None = None,
+        on_resume: Callable[[str], None] | None = None,
         get_snapshots: Callable[[], list[dict[str, Any]]],
         settings: dict[str, Any],
     ) -> None:
@@ -76,7 +78,7 @@ class BatchSection:
                                       ellipsis=True)
         self.percent_label = ui.Label(page, "", fg=ui.TEXT, size=11, bold=True, anchor="ne", relayout=False)
         self.overall_bar = ui.Bar(page, height=8, color=ui.ACCENT)
-        self.items = ActivityList(page, on_cancel=on_cancel, on_retry=on_retry, numbered=True,
+        self.items = ActivityList(page, on_cancel=on_cancel, on_retry=on_retry, on_pause=on_pause, on_resume=on_resume, numbered=True,
                                   empty_text="Links you add will appear here with live progress.")
         self._sync_mode()
 
@@ -218,7 +220,7 @@ class BatchSection:
 
     def _cancel_group(self) -> None:
         for item in self._get_snapshots():
-            if item.get("batch_id") == self._selected_group and item.get("status") in {"queued", "running"}:
+            if item.get("batch_id") == self._selected_group and item.get("status") in {"queued", "running", "paused"}:
                 self._on_cancel(str(item["id"]))
         self.refresh()
 

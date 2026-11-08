@@ -28,6 +28,8 @@ from app_logging import get_logger, log_path
 from diagnostics_window import DiagnosticsWindow
 from batch_download import batch_filename, parse_batch_urls
 from app_ui import UIMixin
+import power
+from tray import TrayController
 import ui_kit as ui
 from download_queue import DownloadQueue, DownloadRequest
 from history_store import HistoryStore, make_history_entry
@@ -42,6 +44,22 @@ from version import APP_VERSION
 
 APP_NAME = "Media Downloader"
 APP_USER_MODEL_ID = "TeamFahad.MediaDownloader"
+MAX_AUTO_RETRIES = 3
+_PERMANENT_ERRORS = re.compile(
+    r"unsupported url|private video|sign in|log in|login|members.only|removed|copyright|"
+    r"not available in your country|age.restricted|video unavailable|does not exist|no space left",
+    re.IGNORECASE,
+)
+_TRANSIENT_ERRORS = re.compile(
+    r"timed out|timeout|connection|reset by peer|temporar|http error 5\d\d|429|"
+    r"too many requests|incomplete|eof|ssl|network|unreachable|getaddrinfo|name resolution|"
+    r"read error|broken pipe|remote end closed|chunk|retrying",
+    re.IGNORECASE,
+)
+
+
+def _looks_transient(message: str) -> bool:
+    return not _PERMANENT_ERRORS.search(message) and bool(_TRANSIENT_ERRORS.search(message))
 
 
 def _icon_path() -> Path | None:
@@ -115,6 +133,7 @@ def default_settings() -> dict[str, Any]:
         "auto_analyze_links": True,
         "open_editor_after_download": False,
         "confirm_before_exit": True,
+        "close_to_tray": True,
         "default_mode": "Video",
         "video_quality": "720p",
         "audio_format": "MP3",
@@ -154,6 +173,7 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         ("auto_analyze_links", True),
         ("open_editor_after_download", False),
         ("confirm_before_exit", True),
+        ("close_to_tray", True),
     ):
         value = settings.get(key, fallback)
         settings[key] = value if isinstance(value, bool) else fallback
@@ -247,6 +267,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         super().__init__()
         self.title(APP_NAME)
         self._apply_window_icon()
+        self.after(400, self._init_tray)
         self.geometry("1180x780")
         self.minsize(980, 640)
         self.configure(fg_color=BG)
@@ -268,6 +289,16 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.analysis_cancel_event: threading.Event | None = None
         self.analysis_url = ""
         self.analysis_running = False
+
+        self._quitting = False
+        self.tray: TrayController | None = None
+        self._tray_hint_shown = False
+        self._tray_status_text = ""
+        self._pause_ids: set[str] = set()
+        self._reserved_names: dict[str, str] = {}
+        self._name_lock = threading.Lock()
+        self._notified_done: set[str] = set()
+        power.disable_power_throttling()
 
         self.download_cancel_events: dict[str, threading.Event] = {}
         self._download_progress_lock = threading.Lock()
@@ -322,7 +353,79 @@ class DownloaderApp(UIMixin, ctk.CTk):
         # CustomTkinter swaps in its own icon shortly after start-up; set ours again afterwards.
         self.after(250, apply)
 
+    # ------------------------------------------------------- tray / background
+    def _init_tray(self) -> None:
+        if self.tray is not None:
+            return
+        controller = TrayController(
+            icon_path=_icon_path(),
+            title=APP_NAME,
+            on_show=self.show_from_tray,
+            on_pause_all=self.pause_all_downloads,
+            on_resume_all=self.resume_all_downloads,
+            on_quit=self.quit_from_tray,
+            run_on_ui=lambda fn: self._run_on_ui(fn),
+        )
+        self.tray = controller if controller.start() else None
+
+    def _run_on_ui(self, fn: Any) -> None:
+        try:
+            self.after(0, fn)
+        except Exception:
+            pass
+
+    def show_from_tray(self) -> None:
+        try:
+            self.deiconify()
+            self.state("normal")
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
+
+    def hide_to_tray(self) -> None:
+        self.withdraw()
+        if self.tray is not None and not self._tray_hint_shown:
+            self._tray_hint_shown = True
+            self.tray.notify("Still running in the tray. Downloads continue in the background.")
+
+    def quit_from_tray(self) -> None:
+        self._quitting = True
+        self.show_from_tray()
+        self._close_app()
+
+    def _after_activity_render(self, snapshots: list[dict[str, Any]], active: int, queued: int) -> None:
+        power.keep_system_awake(active > 0)
+        paused = sum(1 for item in snapshots if item.get("status") == "paused")
+        parts = []
+        if active:
+            parts.append(f"{active} downloading")
+        if queued:
+            parts.append(f"{queued} queued")
+        if paused:
+            parts.append(f"{paused} paused")
+        text = " • ".join(parts) or "Idle"
+        if self.tray is not None and text != self._tray_status_text:
+            self._tray_status_text = text
+            self.tray.set_status(text)
+        try:
+            hidden = self.state() in {"iconic", "withdrawn"}
+        except Exception:
+            hidden = False
+        for item in snapshots:
+            if item.get("status") == "completed" and item["id"] not in self._notified_done:
+                self._notified_done.add(item["id"])
+                if hidden and self.tray is not None:
+                    self.tray.notify(str(item.get("name") or "Download"), "Download complete")
+
     def _close_app(self) -> None:
+        if (
+            not self._quitting
+            and self.tray is not None
+            and bool(self.settings.get("close_to_tray", True))
+        ):
+            self.hide_to_tray()
+            return
         active_downloads = self.download_queue.queued_count() + self.download_queue.running_count()
         active = self.analysis_running or self.update_downloading or active_downloads > 0
         if active:
@@ -347,6 +450,9 @@ class DownloaderApp(UIMixin, ctk.CTk):
             active_downloads,
             self.update_downloading,
         )
+        power.keep_system_awake(False)
+        if self.tray is not None:
+            self.tray.stop()
         self.destroy()
 
     def _center_window(self) -> None:
@@ -649,7 +755,6 @@ class DownloaderApp(UIMixin, ctk.CTk):
         batch_id = uuid.uuid4().hex
         payloads = []
         for index, url in enumerate(urls, 1):
-            prefix = batch_id[:8]
             request_settings = {
                 "batch_id": batch_id,
                 "batch_index": index,
@@ -779,10 +884,13 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 if cancel_event.is_set():
                     raise SharedCancelled("Batch item cancelled after analysis.")
                 cached_info = extracted_info
-                name = batch_filename(
-                    str(request_settings["batch_id"]),
-                    int(request_settings.get("batch_index") or 0),
-                    str(summary.get("title") or "media"),
+                name = self._reserve_name(
+                    request_id,
+                    batch_filename(
+                        str(request_settings["batch_id"]),
+                        int(request_settings.get("batch_index") or 0),
+                        str(summary.get("title") or "media"),
+                    ),
                 )
                 self._put_download_event("download_name", request_id, name)
                 request_settings["history_title"] = str(summary.get("title") or name)
@@ -793,27 +901,45 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 request_settings["history_duration"] = int(
                     float(summary.get("duration") or 0)
                 )
-            final_path = shared_download_from_analysis(
-                url=url,
-                cached_info=dict(cached_info or {}),
-                download_dir=download_dir,
-                filename=name,
-                mode=str(request_settings.get("mode") or "Video"),
-                video_quality=str(request_settings.get("video_quality") or "Best available"),
-                audio_format=str(request_settings.get("audio_format") or "mp3"),
-                audio_quality=str(request_settings.get("audio_quality") or "192"),
-                cancel_event=cancel_event,
-                on_status=lambda text: self._put_download_event(
-                    "download_status",
-                    request_id,
-                    f"{text}…" if text and not str(text).endswith("…") else str(text),
-                ),
-                on_progress=lambda value, detail: self._put_download_event(
-                    "download_progress",
-                    request_id,
-                    {"percent": float(value) * 100.0, "detail": str(detail or "")},
-                ),
-            )
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    final_path = shared_download_from_analysis(
+                        url=url,
+                        cached_info=dict(cached_info or {}),
+                        download_dir=download_dir,
+                        filename=name,
+                        mode=str(request_settings.get("mode") or "Video"),
+                        video_quality=str(request_settings.get("video_quality") or "Best available"),
+                        audio_format=str(request_settings.get("audio_format") or "mp3"),
+                        audio_quality=str(request_settings.get("audio_quality") or "192"),
+                        cancel_event=cancel_event,
+                        on_status=lambda text: self._put_download_event(
+                            "download_status",
+                            request_id,
+                            f"{text}…" if text and not str(text).endswith("…") else str(text),
+                        ),
+                        on_progress=lambda value, detail: self._put_download_event(
+                            "download_progress",
+                            request_id,
+                            {"percent": float(value) * 100.0, "detail": str(detail or "")},
+                        ),
+                    )
+                    break
+                except SharedCancelled:
+                    raise
+                except Exception as exc:
+                    if cancel_event.is_set() or attempt > MAX_AUTO_RETRIES or not _looks_transient(str(exc)):
+                        raise
+                    LOGGER.warning("Transient failure request=%s attempt=%s: %s", request_id, attempt, exc)
+                    self._put_download_event(
+                        "download_status",
+                        request_id,
+                        f"Connection problem — retrying ({attempt}/{MAX_AUTO_RETRIES})…",
+                    )
+                    if cancel_event.wait(min(3 * attempt, 15)):
+                        raise SharedCancelled("Download cancelled while waiting to retry.")
 
             self._put_download_event(
                 "download_done",
@@ -1000,12 +1126,21 @@ class DownloaderApp(UIMixin, ctk.CTk):
                         self._schedule_download_activity_refresh(30)
 
                     elif kind == "download_cancelled":
-                        self.download_queue.cancel(request_id)
-                        self._set_status("Download cancelled", "cancelled")
+                        if request_id in self._pause_ids:
+                            self._pause_ids.discard(request_id)
+                            self.download_queue.mark_paused(request_id)
+                            self._set_status("Download paused", "ready")
+                        else:
+                            self.download_queue.cancel(request_id)
+                            self._set_status("Download cancelled", "cancelled")
                         self._schedule_download_activity_refresh(30)
 
                     elif kind == "download_finished":
                         self.download_cancel_events.pop(request_id, None)
+                        snapshot = self.download_queue.get(request_id)
+                        if not snapshot or snapshot.get("status") != "paused":
+                            with self._name_lock:
+                                self._reserved_names.pop(request_id, None)
                         self._start_available_downloads()
                         self._schedule_download_activity_refresh(30)
 
@@ -1467,7 +1602,50 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self._schedule_download_activity_refresh(20)
         self._start_available_downloads()
 
+    def _reserve_name(self, request_id: str, base: str) -> str:
+        """Keep concurrent downloads of identically-titled media from sharing a filename."""
+        with self._name_lock:
+            existing = self._reserved_names.get(request_id)
+            if existing:
+                return existing
+            taken = set(self._reserved_names.values())
+            candidate, index = base, 2
+            while candidate in taken:
+                candidate = f"{base} ({index})"
+                index += 1
+            self._reserved_names[request_id] = candidate
+            return candidate
+
+    def pause_download(self, request_id: str) -> None:
+        state = self.download_queue.pause(request_id)
+        if state == "pausing":
+            self._pause_ids.add(request_id)
+            event = self.download_cancel_events.get(request_id)
+            if event is not None:
+                event.set()
+            self._set_status("Pausing download…", "working")
+        elif state == "paused":
+            self._set_status("Download paused", "ready")
+        self._schedule_download_activity_refresh(20)
+
+    def resume_download(self, request_id: str) -> None:
+        if self.download_queue.resume(request_id):
+            self._set_status("Download resumed", "working")
+            self._start_available_downloads()
+        self._schedule_download_activity_refresh(20)
+
+    def pause_all_downloads(self) -> None:
+        for item in self.download_queue.snapshot():
+            if str(item.get("status") or "") in {"queued", "running"}:
+                self.pause_download(str(item.get("id") or ""))
+
+    def resume_all_downloads(self) -> None:
+        for item in reversed(self.download_queue.snapshot()):
+            if str(item.get("status") or "") == "paused":
+                self.resume_download(str(item.get("id") or ""))
+
     def cancel_download(self, request_id: str) -> None:
+        self._pause_ids.discard(request_id)
         state = self.download_queue.request_cancel(request_id)
         if state == "cancelling":
             event = self.download_cancel_events.get(request_id)
@@ -1487,7 +1665,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
 
     def cancel_all_downloads(self) -> None:
         for item in self.download_queue.snapshot():
-            if str(item.get("status") or "") in {"queued", "running", "cancelling"}:
+            if str(item.get("status") or "") in {"queued", "running", "cancelling", "paused"}:
                 self.cancel_download(str(item.get("id") or ""))
 
     def _sync_recent_file(self) -> None:

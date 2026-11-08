@@ -124,7 +124,8 @@ class DownloadQueue:
             request = self._find_locked(request_id)
             if request is None or request.status not in {"running", "cancelling"}:
                 return
-            request.progress = max(0.0, min(1.0, float(progress)))
+            # Never let the bar move backwards (e.g. after an automatic retry restarts a stream).
+            request.progress = max(request.progress, max(0.0, min(1.0, float(progress))))
             if detail:
                 request.detail = str(detail)
 
@@ -153,11 +154,51 @@ class DownloadQueue:
         with self._lock:
             self._finish_locked(request_id, "failed", error=error, detail="Download failed")
 
-    def retry(self, request_id: str) -> bool:
-        """Move a failed download back to the queue using its original payload."""
+    def pause(self, request_id: str) -> str:
+        """Pause a queued download now, or flag a running one so the worker can stop it."""
         with self._lock:
             request = self._find_locked(request_id)
-            if request is None or request.status != "failed":
+            if request is None:
+                return "missing"
+            if request.status == "queued":
+                try:
+                    self._pending.remove(request.id)
+                except ValueError:
+                    pass
+                request.status = "paused"
+                request.detail = "Paused"
+                return "paused"
+            if request.status == "running":
+                request.status = "cancelling"
+                request.detail = "Pausing…"
+                return "pausing"
+            return request.status
+
+    def mark_paused(self, request_id: str) -> None:
+        """A running download stopped because of a pause request; keep partial data for resume."""
+        with self._lock:
+            request = self._find_locked(request_id)
+            if request is None or request.status in TERMINAL_STATUSES:
+                return
+            request.status = "paused"
+            request.detail = "Paused — will resume where it stopped"
+            self._active_ids.discard(request.id)
+
+    def resume(self, request_id: str) -> bool:
+        with self._lock:
+            request = self._find_locked(request_id)
+            if request is None or request.status != "paused":
+                return False
+            request.status = "queued"
+            request.detail = "Resuming…"
+            self._pending.append(request.id)
+            return True
+
+    def retry(self, request_id: str) -> bool:
+        """Move a failed or cancelled download back to the queue using its original payload."""
+        with self._lock:
+            request = self._find_locked(request_id)
+            if request is None or request.status not in {"failed", "cancelled"}:
                 return False
             if request.id in self._active_ids or request.id in self._pending:
                 return False
@@ -177,7 +218,7 @@ class DownloadQueue:
             request = self._find_locked(request_id)
             if request is None or request.status in TERMINAL_STATUSES:
                 return request.status if request else "missing"
-            if request.status == "queued":
+            if request.status in {"queued", "paused"}:
                 try:
                     self._pending.remove(request.id)
                 except ValueError:

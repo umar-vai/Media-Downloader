@@ -27,12 +27,28 @@ class DesktopBatchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_batch_urls("\n".join(f"https://example.com/{i}" for i in range(51)))
 
-    def test_batch_filename_is_unique_and_sanitized(self) -> None:
-        first = batch_filename("12345678abcdef", 1, "Same: Video.mp4")
-        second = batch_filename("12345678abcdef", 2, "Same: Video.mp4")
-        self.assertNotEqual(first, second)
-        self.assertTrue(first.startswith("12345678_001_"))
-        self.assertNotIn(":", first)
+    def test_batch_filename_is_plain_sanitized_title(self) -> None:
+        name = batch_filename("12345678abcdef", 1, "Same: Video.mp4")
+        self.assertEqual(name, batch_filename("other", 7, "Same: Video.mp4"))
+        self.assertFalse(name.startswith("12345678"))
+        self.assertNotIn(":", name)
+        self.assertIn("Same", name)
+
+    def test_pause_resume_and_retry_cancelled(self) -> None:
+        queue = DownloadQueue(max_concurrent=1)
+        first = queue.enqueue({"url": "https://example.com/a", "name": "a"})
+        second = queue.enqueue({"url": "https://example.com/b", "name": "b"})
+        queue.start_available()
+        self.assertEqual(queue.pause(second.id), "paused")
+        self.assertEqual(queue.pause(first.id), "pausing")
+        queue.mark_paused(first.id)
+        self.assertEqual(queue.running_count(), 0)
+        self.assertEqual(queue.get(first.id)["status"], "paused")
+        self.assertTrue(queue.resume(first.id))
+        self.assertEqual(queue.get(first.id)["status"], "queued")
+        self.assertEqual(queue.request_cancel(second.id), "cancelled")
+        self.assertTrue(queue.retry(second.id))
+        self.assertEqual(queue.get(second.id)["status"], "queued")
 
     def test_atomic_enqueue_preserves_order_and_respects_concurrency(self) -> None:
         queue = DownloadQueue(max_concurrent=3)
@@ -87,6 +103,9 @@ class DesktopBatchTests(unittest.TestCase):
         class FakeApp:
             def __init__(self):
                 self.events = []
+                self._reserved_names = {}
+                self._name_lock = threading.Lock()
+            _reserve_name = DownloaderApp._reserve_name
             def _put_download_event(self, kind, request_id, data=None):
                 self.events.append((kind, request_id, data))
 
@@ -116,7 +135,7 @@ class DesktopBatchTests(unittest.TestCase):
         analyze.assert_called_once()
         kwargs = download.call_args.kwargs
         self.assertEqual(kwargs["cached_info"]["formats"][0]["url"], "https://cdn.example/stream.mp4")
-        self.assertEqual(kwargs["filename"], "abcdef12_002_A_ Title")
+        self.assertEqual(kwargs["filename"], "A_ Title")
         self.assertEqual(request_settings["history_title"], "A: Title.mp4")
         self.assertIn("download_done", [item[0] for item in fake.events])
         self.assertIn("download_finished", [item[0] for item in fake.events])

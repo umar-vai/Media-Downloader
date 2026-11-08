@@ -21,9 +21,11 @@ STATUS_STYLE = {
     "completed": ("DONE", ui.SUCCESS, ui.SUCCESS_SOFT),
     "failed": ("FAILED", ui.DANGER, ui.DANGER_SOFT),
     "cancelled": ("CANCELLED", ui.WARNING, ui.WARNING_SOFT),
+    "paused": ("PAUSED", ui.WARNING, ui.WARNING_SOFT),
 }
 BAR_COLORS = {
     "completed": ui.SUCCESS, "failed": ui.DANGER, "cancelled": ui.WARNING, "cancelling": ui.WARNING,
+    "paused": ui.WARNING,
 }
 ROW_H = 78
 
@@ -44,11 +46,16 @@ def reveal_in_folder(path: str) -> None:
 
 class DownloadRow:
     def __init__(self, page: ui.Page, *, on_cancel: Callable[[str], None],
-                 on_retry: Callable[[str], None]) -> None:
+                 on_retry: Callable[[str], None],
+                 on_pause: Callable[[str], None] | None = None,
+                 on_resume: Callable[[str], None] | None = None) -> None:
         self.page = page
         self.request_id = ""
         self._on_cancel = on_cancel
         self._on_retry = on_retry
+        self._on_pause = on_pause
+        self._on_resume = on_resume
+        self._pause_mode = ""
         self._state: dict[str, Any] = {}
         self._mode = ""
         self._path = ""
@@ -62,9 +69,12 @@ class DownloadRow:
         self.detail = ui.Label(page, "", fg=ui.MUTED, size=10, ellipsis=True, relayout=False)
         self.action = ui.Btn(page, "Cancel", self._act, style="danger", size=11, padx=14, radius=8)
         self.show_btn = ui.Btn(page, "Show in folder", self._show, style="ghost", size=11, padx=14, radius=8)
+        self.pause_btn = ui.Btn(page, "Pause", self._pause_click, style="secondary", size=11, padx=14, radius=8)
         self.action.show(False)
         self.show_btn.show(False)
-        self.parts = [self.bg, self.index, self.title, self.chip, self.bar, self.detail, self.action, self.show_btn]
+        self.pause_btn.show(False)
+        self.parts = [self.bg, self.index, self.title, self.chip, self.bar, self.detail,
+                      self.action, self.show_btn, self.pause_btn]
 
     def destroy(self) -> None:
         for part in self.parts:
@@ -75,6 +85,12 @@ class DownloadRow:
             self._on_cancel(self.request_id)
         elif self._mode == "retry":
             self._on_retry(self.request_id)
+
+    def _pause_click(self) -> None:
+        if self._pause_mode == "pause" and self._on_pause:
+            self._on_pause(self.request_id)
+        elif self._pause_mode == "resume" and self._on_resume:
+            self._on_resume(self.request_id)
 
     def _show(self) -> None:
         if self._path:
@@ -122,9 +138,14 @@ class DownloadRow:
             self.bar.set(0.0 if status == "queued" else progress, animate=not first)
 
         path = str(item.get("result_path") or "")
-        mode = "cancel" if status in {"queued", "running"} else "retry" if status in {"failed", "cancelled"} \
+        mode = "cancel" if status in {"queued", "running", "paused"} else "retry" if status in {"failed", "cancelled"} \
             else "busy" if status == "cancelling" else ""
-        sig = (mode, status == "completed" and bool(path))
+        pause_mode = ""
+        if self._on_pause and status in {"queued", "running"}:
+            pause_mode = "pause"
+        elif self._on_resume and status == "paused":
+            pause_mode = "resume"
+        sig = (mode, status == "completed" and bool(path), pause_mode)
         self._path = path
         if self._state.get("actions") != sig:
             self._state["actions"] = sig
@@ -137,6 +158,11 @@ class DownloadRow:
                 self.action.configure(text="Cancelling…", style="danger", state="disabled")
             self.action.show(mode != "")
             self.show_btn.show(sig[1])
+            self._pause_mode = pause_mode
+            if pause_mode:
+                self.pause_btn.configure(text="Pause" if pause_mode == "pause" else "Resume",
+                                         style="secondary" if pause_mode == "pause" else "primary")
+            self.pause_btn.show(bool(pause_mode))
             self.bg.relayout()
 
     def place(self, x: float, y: float, w: float) -> None:
@@ -152,12 +178,13 @@ class DownloadRow:
             left += px(30)
         self.title.place(left, y + px(13), max(20, right - chip_w - px(12) - left))
 
-        button_w = 0
-        for button in (self.action, self.show_btn):
+        edge = right
+        for button in (self.action, self.show_btn, self.pause_btn):
             if button.visible:
-                button_w = button.natural_w(minimum=82)
-                button.place(right - button_w, y + px(40), button_w, px(28))
-        bar_right = right - (button_w + px(12) if button_w else 0)
+                width = button.natural_w(minimum=82)
+                button.place(edge - width, y + px(40), width, px(28))
+                edge -= width + px(8)
+        bar_right = edge - px(4) if edge < right else right
         bar_w = max(20, bar_right - (x + pad))
         self.bar.place(x + pad, y + px(47), bar_w)
         self.detail.place(x + pad, y + px(56), bar_w)
@@ -167,10 +194,14 @@ class ActivityList:
     """Keeps one ``DownloadRow`` per request and reuses it between refreshes."""
 
     def __init__(self, page: ui.Page, *, on_cancel: Callable[[str], None], on_retry: Callable[[str], None],
-                 empty_text: str, numbered: bool = False) -> None:
+                 empty_text: str, numbered: bool = False,
+                 on_pause: Callable[[str], None] | None = None,
+                 on_resume: Callable[[str], None] | None = None) -> None:
         self.page = page
         self._on_cancel = on_cancel
         self._on_retry = on_retry
+        self._on_pause = on_pause
+        self._on_resume = on_resume
         self._numbered = numbered
         self.rows: dict[str, DownloadRow] = {}
         self.order: list[str] = []
@@ -190,7 +221,8 @@ class ActivityList:
             request_id = wanted[position]
             row = self.rows.get(request_id)
             if row is None:
-                row = DownloadRow(self.page, on_cancel=self._on_cancel, on_retry=self._on_retry)
+                row = DownloadRow(self.page, on_cancel=self._on_cancel, on_retry=self._on_retry,
+                                  on_pause=self._on_pause, on_resume=self._on_resume)
                 row.request_id = request_id
                 self.rows[request_id] = row
                 changed = True

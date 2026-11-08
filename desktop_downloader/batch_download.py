@@ -99,7 +99,6 @@ def batch_summaries(snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def batch_filename(batch_id: str, batch_index: int, title: str) -> str:
-    """Stable unique prefix so identical media titles do not collide."""
+    """Plain media title. Duplicate titles are made unique by the caller / the engine ("Title (2)")."""
     from media_core.engine import safe_filename
-    stem = safe_filename(title or "media")
-    return f"{batch_id[:8]}_{batch_index:03d}_{stem[:100]}"
+    return safe_filename(title or "media")[:120]

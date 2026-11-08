@@ -58,6 +58,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.auto_analyze_var = ctk.BooleanVar(value=bool(settings.get("auto_analyze_links", True)))
         self.open_editor_after_var = ctk.BooleanVar(value=bool(settings.get("open_editor_after_download", False)))
         self.confirm_exit_var = ctk.BooleanVar(value=bool(settings.get("confirm_before_exit", True)))
+        self.close_to_tray_var = ctk.BooleanVar(value=bool(settings.get("close_to_tray", True)))
         self.auto_check_updates_var = ctk.BooleanVar(value=bool(settings.get("auto_check_updates", True)))
         self.auto_download_updates_var = ctk.BooleanVar(value=bool(settings.get("auto_download_updates", False)))
 
@@ -78,6 +79,7 @@ class SettingsWindow(ctk.CTkToplevel):
             self.auto_analyze_var,
             self.open_editor_after_var,
             self.confirm_exit_var,
+            self.close_to_tray_var,
             self.auto_check_updates_var,
             self.auto_download_updates_var,
         ):
@@ -197,6 +199,13 @@ class SettingsWindow(ctk.CTkToplevel):
             "Confirm before closing active tasks",
             self.confirm_exit_var,
             "Ask before closing the app while a download, analysis or update is still running.",
+        )
+        self._switch(
+            tab,
+            4,
+            "Keep running in the system tray when closed",
+            self.close_to_tray_var,
+            "The X button hides the window to the tray so downloads continue. Use the tray icon's Quit to exit.",
         )
 
     def _build_downloads_tab(self, tab: ctk.CTkFrame) -> None:
@@ -431,6 +440,7 @@ class SettingsWindow(ctk.CTkToplevel):
                 "auto_analyze_links": bool(self.auto_analyze_var.get()),
                 "open_editor_after_download": bool(self.open_editor_after_var.get()),
                 "confirm_before_exit": bool(self.confirm_exit_var.get()),
+                "close_to_tray": bool(self.close_to_tray_var.get()),
                 "auto_check_updates": bool(self.auto_check_updates_var.get()),
                 "auto_download_updates": bool(self.auto_download_updates_var.get()),
             }

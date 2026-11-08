@@ -342,9 +342,21 @@ def download_from_analysis(
         "no_warnings": True,
         "cachedir": False,
         "socket_timeout": 30,
-        "retries": 3,
-        "fragment_retries": 4,
-        "concurrent_fragment_downloads": 4,
+        # Reliability: patient retries with exponential back-off, resilient to flaky Wi-Fi and
+        # antivirus briefly locking the .part file on Windows.
+        "retries": 10,
+        "fragment_retries": 15,
+        "extractor_retries": 3,
+        "file_access_retries": 6,
+        "retry_sleep_functions": {
+            "http": lambda n: min(2 ** n, 20),
+            "fragment": lambda n: min(1 + n, 10),
+            "extractor": lambda n: min(2 ** n, 15),
+            "file_access": lambda n: 0.5 * (n + 1),
+        },
+        # Speed: more parallel fragments (HLS/DASH) and a larger read buffer.
+        "concurrent_fragment_downloads": 8,
+        "buffersize": 1 << 18,
         "progress_hooks": [hook],
         "postprocessor_hooks": [post_hook],
         "overwrites": False,

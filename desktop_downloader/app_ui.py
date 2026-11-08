@@ -214,6 +214,7 @@ class UIMixin:
         self.open_folder_button = ui.Btn(p, "Open folder", self.open_download_folder, style="ghost", size=10)
         self.view_all_button = ui.Btn(p, "View all", lambda: self.show_page("queue"), style="secondary", size=10)
         self.recent_list = ActivityList(p, on_cancel=self.cancel_download, on_retry=self.retry_download,
+                                       on_pause=self.pause_download, on_resume=self.resume_download,
                                         empty_text="Nothing downloaded yet — paste a link above.")
         self.status_label.show(False)
 
@@ -312,6 +313,8 @@ class UIMixin:
             on_enqueue=self._enqueue_batch_downloads,
             on_cancel=self.cancel_download,
             on_retry=self.retry_download,
+            on_pause=self.pause_download,
+            on_resume=self.resume_download,
             get_snapshots=self.download_queue.snapshot,
             settings=self.settings,
         )
@@ -334,8 +337,11 @@ class UIMixin:
                                                   size=11, state="disabled")
         self.clear_finished_button = ui.Btn(p, "Clear finished", self.clear_finished_downloads, style="ghost",
                                             size=11)
+        self.pause_all_button = ui.Btn(p, "Pause all", self.pause_all_downloads, style="secondary", size=11)
+        self.resume_all_button = ui.Btn(p, "Resume all", self.resume_all_downloads, style="secondary", size=11)
         self.queue_card = ui.Card(p)
         self.queue_list = ActivityList(p, on_cancel=self.cancel_download, on_retry=self.retry_download,
+                                       on_pause=self.pause_download, on_resume=self.resume_download,
                                        empty_text="No downloads yet. Analyze a link and press Download.")
 
     def _layout_queue(self, w: int, h: int) -> int:
@@ -345,7 +351,8 @@ class UIMixin:
         self.queue_title.place(x0, y)
         self.queue_sub.place(x0, y + px(42))
         bx = x0 + cw
-        for button in (self.cancel_all_downloads_button, self.clear_finished_button):
+        for button in (self.cancel_all_downloads_button, self.clear_finished_button,
+                       self.resume_all_button, self.pause_all_button):
             bw = button.natural_w(minimum=96)
             button.place(bx - bw, y + px(12), bw, px(38))
             bx -= bw + px(8)
@@ -483,6 +490,7 @@ class UIMixin:
             self.queue_list.sync(snapshots)
         elif page == "batch":
             self.batch_page.refresh(snapshots)
+        self._after_activity_render(snapshots, active, queued)
 
     # ------------------------------------------------------------- thumbnail
     def _reset_thumbnail_label(self) -> None:

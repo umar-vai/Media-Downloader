@@ -57,6 +57,8 @@ jobs:
           python -m py_compile desktop_downloader/app_ui.py
           python -m py_compile desktop_downloader/batch_page.py
           python -m py_compile desktop_downloader/ui_kit.py
+          python -m py_compile desktop_downloader/power.py
+          python -m py_compile desktop_downloader/tray.py
           python -m py_compile desktop_downloader/download_queue.py
           python -m py_compile desktop_downloader/browser_resolver.py
           python -m py_compile desktop_downloader/diagnostics_window.py
@@ -141,6 +143,8 @@ jobs:
             --collect-all imageio_ffmpeg `
             --collect-all websocket `
             --collect-all customtkinter `
+            --collect-all pystray `
+            --hidden-import pystray._win32 `
             --collect-all PIL `
             --add-binary "dist/MediaDownloaderUpdater.exe;." `
             --add-binary "dist/mpv.exe;." `
@@ -174,6 +178,8 @@ jobs:
             --collect-all curl_cffi `
             --collect-all imageio_ffmpeg `
             --collect-all customtkinter `
+            --collect-all pystray `
+            --hidden-import pystray._win32 `
             --collect-all PIL `
             --add-binary "$updater;." `
             --add-binary "$mpv;." `
