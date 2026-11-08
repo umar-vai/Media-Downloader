@@ -160,7 +160,7 @@ jobs:
         run: |
           $updater = (Resolve-Path "dist\MediaDownloaderUpdater.exe").Path
           $mpv = (Resolve-Path "dist\mpv.exe").Path
-          $icon = (Resolve-Path "desktop_downloaderssetspp_icon.ico").Path
+          $icon = (Resolve-Path "desktop_downloader/assets/app_icon.ico").Path
           pyinstaller --noconfirm --clean --onedir --windowed `
             --name MediaDownloader `
             --icon "$icon" `
