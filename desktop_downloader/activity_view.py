@@ -31,12 +31,14 @@ ROW_H = 78
 
 
 def reveal_in_folder(path: str) -> None:
-    target = Path(path)
+    target = Path(os.path.normpath(path))
     try:
         if os.name == "nt":
             if target.exists():
-                subprocess.Popen(["explorer", f"/select,{target}"])
-            else:
+                # Pass as one pre-quoted string: a list arg gets quoted as a whole by
+                # subprocess, which makes explorer ignore /select and open Documents.
+                subprocess.Popen(f'explorer /select,"{target}"')
+            elif target.parent.exists():
                 os.startfile(str(target.parent))  # type: ignore[attr-defined]
         else:
             subprocess.Popen(["xdg-open", str(target.parent)])

@@ -78,7 +78,7 @@ class BatchSection:
                                       ellipsis=True)
         self.percent_label = ui.Label(page, "", fg=ui.TEXT, size=11, bold=True, anchor="ne", relayout=False)
         self.overall_bar = ui.Bar(page, height=8, color=ui.ACCENT)
-        self.items = ActivityList(page, on_cancel=on_cancel, on_retry=on_retry, on_pause=on_pause, on_resume=on_resume, numbered=True,
+        self.items = ActivityList(page, on_cancel=on_cancel, on_retry=on_retry, on_pause=on_pause, on_resume=on_resume, numbered=False,
                                   empty_text="Links you add will appear here with live progress.")
         self._sync_mode()
 
