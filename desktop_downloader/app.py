@@ -41,6 +41,15 @@ from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_installer_r
 from version import APP_VERSION
 
 APP_NAME = "Media Downloader"
+APP_USER_MODEL_ID = "TeamFahad.MediaDownloader"
+
+
+def _icon_path() -> Path | None:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    for candidate in (base / "assets" / "app_icon.ico", Path(__file__).resolve().parent / "assets" / "app_icon.ico"):
+        if candidate.exists():
+            return candidate
+    return None
 DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "Media Downloader"
 CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / "MediaDownloader"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
@@ -229,8 +238,15 @@ def get_bundled_updater_path() -> Path | None:
 
 class DownloaderApp(UIMixin, ctk.CTk):
     def __init__(self) -> None:
+        if os.name == "nt":
+            try:  # own taskbar identity so the download icon shows (and pins) instead of python's
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+            except Exception:
+                pass
         super().__init__()
         self.title(APP_NAME)
+        self._apply_window_icon()
         self.geometry("1180x780")
         self.minsize(980, 640)
         self.configure(fg_color=BG)
@@ -289,6 +305,22 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.after(700, lambda: self._show_update_result(attempt=0))
         if self.auto_check_updates_var.get():
             self.after(1500, lambda: self.check_for_updates(manual=False))
+
+    def _apply_window_icon(self) -> None:
+        icon = _icon_path()
+        if icon is None or os.name != "nt":
+            return
+
+        def apply() -> None:
+            try:
+                self.iconbitmap(default=str(icon))
+                self.iconbitmap(str(icon))
+            except Exception:
+                pass
+
+        apply()
+        # CustomTkinter swaps in its own icon shortly after start-up; set ours again afterwards.
+        self.after(250, apply)
 
     def _close_app(self) -> None:
         active_downloads = self.download_queue.queued_count() + self.download_queue.running_count()
