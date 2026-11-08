@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.request
 import uuid
+from urllib.parse import urlsplit
 import webbrowser
 from datetime import datetime, timezone
 from enum import Enum
@@ -26,7 +27,8 @@ from tkinter import filedialog, messagebox
 from app_logging import get_logger, log_path
 from diagnostics_window import DiagnosticsWindow
 from batch_download import batch_filename, parse_batch_urls
-from batch_window import BatchDownloadWindow
+from app_ui import UIMixin
+import ui_kit as ui
 from download_queue import DownloadQueue, DownloadRequest
 from history_store import HistoryStore, make_history_entry
 from history_window import HistoryWindow
@@ -49,20 +51,18 @@ UPDATE_DIR = Path(os.getenv("LOCALAPPDATA") or CONFIG_DIR) / "MediaDownloader" /
 UPDATE_RESULT_FILE = CONFIG_DIR / "update-result.json"
 UPDATE_LOG_FILE = CONFIG_DIR / "update.log"
 
-BG = "#060B14"
-SURFACE = "#0B1323"
-SURFACE_2 = "#101C31"
-SURFACE_3 = "#14223A"
-BORDER = "#223456"
-TEXT = "#F7FAFF"
-MUTED = "#8798B5"
-CYAN = "#23D5FF"
-CYAN_HOVER = "#0EBDE9"
-PURPLE = "#7657FF"
-PURPLE_HOVER = "#6547E9"
-SUCCESS = "#24D18C"
-WARNING = "#FFB84D"
-DANGER = "#FF647C"
+BG = ui.BG
+SURFACE = ui.SURFACE
+SURFACE_2 = ui.SURFACE_2
+SURFACE_3 = ui.SURFACE_3
+BORDER = ui.BORDER
+TEXT = ui.TEXT
+MUTED = ui.MUTED
+CYAN = ui.CYAN
+PURPLE = ui.ACCENT
+SUCCESS = ui.SUCCESS
+WARNING = ui.WARNING
+DANGER = ui.DANGER
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -227,24 +227,23 @@ def get_bundled_updater_path() -> Path | None:
     return candidate if candidate.exists() else None
 
 
-class DownloaderApp(ctk.CTk):
+class DownloaderApp(UIMixin, ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("1080x720")
-        self.minsize(860, 620)
+        self.geometry("1180x780")
+        self.minsize(980, 640)
         self.configure(fg_color=BG)
         self.protocol("WM_DELETE_WINDOW", self._close_app)
 
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.current_info: dict[str, Any] | None = None
-        self.thumbnail_image: ctk.CTkImage | None = None
+        self.thumbnail_image: Any = None
         self.last_file: Path | None = None
         self.editor_window: MediaEditorWindow | None = None
         self.diagnostics_window: DiagnosticsWindow | None = None
         self.settings_window: SettingsWindow | None = None
         self.history_window: HistoryWindow | None = None
-        self.batch_window: BatchDownloadWindow | None = None
         self.download_queue = DownloadQueue(max_concurrent=3)
         self.task_state = TaskState.IDLE
 
@@ -320,849 +319,10 @@ class DownloaderApp(ctk.CTk):
 
     def _center_window(self) -> None:
         self.update_idletasks()
-        width, height = 1120, 760
+        width, height = 1180, 780
         x = max(0, (self.winfo_screenwidth() - width) // 2)
         y = max(0, (self.winfo_screenheight() - height) // 2 - 20)
         self.geometry(f"{width}x{height}+{x}+{y}")
-
-    def _build_ui(self) -> None:
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
-        self._build_topbar()
-        self.content = ctk.CTkScrollableFrame(
-            self,
-            fg_color="transparent",
-            scrollbar_button_color=SURFACE_3,
-            scrollbar_button_hover_color=PURPLE,
-        )
-        self.content.grid(row=1, column=0, sticky="nsew", padx=24, pady=(8, 22))
-        self.content.grid_columnconfigure(0, weight=1)
-        self._build_hero()
-        self._build_url_card()
-        self._build_media_card()
-        self._build_settings_card()
-        self._build_download_card()
-        self._build_update_card()
-        self._build_footer()
-        self.url_entry.focus_set()
-        self._sync_mode(self.mode_var.get())
-
-    def _build_topbar(self) -> None:
-        top = ctk.CTkFrame(self, height=62, corner_radius=0, fg_color=SURFACE, border_width=0)
-        top.grid(row=0, column=0, sticky="ew")
-        top.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(
-            top,
-            text="MD",
-            width=36,
-            height=36,
-            corner_radius=10,
-            fg_color=PURPLE,
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 13),
-        ).grid(row=0, column=0, padx=(24, 12), pady=13)
-
-        brand = ctk.CTkFrame(top, fg_color="transparent")
-        brand.grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(brand, text="MEDIA DOWNLOADER", text_color=TEXT, font=("Segoe UI Semibold", 13)).pack(anchor="w")
-        ctk.CTkLabel(brand, text="PASTE LINK • DOWNLOAD • EDIT", text_color=MUTED, font=("Segoe UI", 9)).pack(anchor="w")
-
-        self.top_update_button = ctk.CTkButton(
-            top,
-            text="UPDATE AVAILABLE",
-            width=130,
-            height=30,
-            corner_radius=9,
-            fg_color="#342A12",
-            hover_color="#493A17",
-            text_color=WARNING,
-            font=("Segoe UI Semibold", 9),
-            command=self.download_or_install_update,
-        )
-        self.top_update_button.grid(row=0, column=2, padx=(12, 0))
-        self.top_update_button.grid_remove()
-
-        ctk.CTkButton(
-            top,
-            text="Batch Download",
-            width=130,
-            height=30,
-            corner_radius=9,
-            fg_color="#25204A",
-            hover_color=PURPLE,
-            border_width=1,
-            border_color=PURPLE,
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 9),
-            command=self.open_batch_downloads,
-        ).grid(row=0, column=3, padx=(12, 0))
-
-        ctk.CTkButton(
-            top,
-            text="History",
-            width=82,
-            height=30,
-            corner_radius=9,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 9),
-            command=self.open_history,
-        ).grid(row=0, column=4, padx=(12, 0))
-
-        ctk.CTkButton(
-            top,
-            text="Settings",
-            width=88,
-            height=30,
-            corner_radius=9,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 9),
-            command=self.open_settings,
-        ).grid(row=0, column=5, padx=(8, 0))
-
-        ctk.CTkLabel(
-            top,
-            text=f"DESKTOP  •  v{APP_VERSION}",
-            height=28,
-            corner_radius=9,
-            fg_color=SURFACE_2,
-            text_color=CYAN,
-            font=("Segoe UI Semibold", 10),
-        ).grid(row=0, column=6, padx=(12, 24))
-
-    def _build_hero(self) -> None:
-        hero = ctk.CTkFrame(self.content, fg_color="transparent")
-        hero.grid(row=0, column=0, sticky="ew", pady=(18, 16))
-        hero.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(hero, text="Media Downloader", text_color=TEXT, font=("Segoe UI Semibold", 31)).grid(
-            row=0, column=0, sticky="w"
-        )
-        ctk.CTkLabel(
-            hero,
-            text="Paste a public media link, download video or audio, then edit it locally.",
-            text_color=MUTED,
-            font=("Segoe UI", 13),
-        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
-        ctk.CTkLabel(
-            hero,
-            text="LOCAL ENGINE  •  READY",
-            height=30,
-            corner_radius=10,
-            fg_color="#0D2A2A",
-            text_color=SUCCESS,
-            font=("Segoe UI Semibold", 10),
-        ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(20, 10))
-
-        self.edit_local_button = ctk.CTkButton(
-            hero,
-            text="Edit local media",
-            width=132,
-            height=34,
-            corner_radius=10,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
-            text_color=TEXT,
-            command=self.open_editor,
-        )
-        self.edit_local_button.grid(row=0, column=2, rowspan=2, sticky="e")
-
-    def _card(self, master: Any, **kwargs: Any) -> ctk.CTkFrame:
-        return ctk.CTkFrame(master, fg_color=SURFACE, corner_radius=18, border_width=1, border_color=BORDER, **kwargs)
-
-    def _section_title(
-        self,
-        master: Any,
-        kicker: str,
-        title: str,
-        row: int = 0,
-        column: int = 0,
-        columnspan: int = 1,
-    ) -> None:
-        wrap = ctk.CTkFrame(master, fg_color="transparent")
-        wrap.grid(row=row, column=column, columnspan=columnspan, sticky="w")
-        ctk.CTkLabel(wrap, text=kicker.upper(), text_color=CYAN, font=("Segoe UI Semibold", 9)).pack(anchor="w")
-        ctk.CTkLabel(wrap, text=title, text_color=TEXT, font=("Segoe UI Semibold", 16)).pack(anchor="w", pady=(2, 0))
-
-    def _build_url_card(self) -> None:
-        card = self._card(self.content)
-        card.grid(row=1, column=0, sticky="ew", pady=(0, 14))
-        card.grid_columnconfigure(0, weight=1)
-        self._section_title(card, "01 / Source", "Paste a media link")
-        row = ctk.CTkFrame(card, fg_color="transparent")
-        row.grid(row=1, column=0, sticky="ew", padx=18, pady=(16, 18))
-        row.grid_columnconfigure(0, weight=1)
-
-        self.url_entry = ctk.CTkEntry(
-            row,
-            textvariable=self.url_var,
-            height=48,
-            corner_radius=12,
-            fg_color=SURFACE_2,
-            border_color="#2A4169",
-            border_width=1,
-            text_color=TEXT,
-            placeholder_text="Paste any public http:// or https:// media URL",
-            placeholder_text_color="#667995",
-            font=("Segoe UI", 11),
-        )
-        self.url_entry.grid(row=0, column=0, sticky="ew")
-        self.url_entry.bind("<Return>", lambda _event: self.analyze_media())
-        self.url_entry.bind("<KeyRelease>", self._on_url_changed)
-
-        self.paste_button = ctk.CTkButton(
-            row,
-            text="Paste",
-            width=76,
-            height=48,
-            corner_radius=12,
-            fg_color=SURFACE_3,
-            hover_color="#1B3153",
-            border_width=1,
-            border_color="#2A4169",
-            command=self.paste_from_clipboard,
-        )
-        self.paste_button.grid(row=0, column=1, padx=(10, 0))
-
-        self.read_button = ctk.CTkButton(
-            row,
-            text="Analyze",
-            width=104,
-            height=48,
-            corner_radius=12,
-            fg_color=PURPLE,
-            hover_color=PURPLE_HOVER,
-            text_color="#FFFFFF",
-            font=("Segoe UI Semibold", 11),
-            command=self.analyze_media,
-        )
-        self.read_button.grid(row=0, column=2, padx=(10, 0))
-
-        self.cancel_analysis_button = ctk.CTkButton(
-            row,
-            text="Cancel analysis",
-            width=112,
-            height=48,
-            corner_radius=12,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=MUTED,
-            command=self.cancel_analysis,
-            state="disabled",
-        )
-        self.cancel_analysis_button.grid(row=0, column=3, padx=(10, 0))
-
-    def _build_media_card(self) -> None:
-        self.media_card = self._card(self.content)
-        self.media_card.grid(row=2, column=0, sticky="ew", pady=(0, 14))
-        self.media_card.grid_columnconfigure(1, weight=1)
-
-        self.thumbnail_frame = ctk.CTkFrame(
-            self.media_card,
-            width=214,
-            height=122,
-            corner_radius=14,
-            fg_color=SURFACE_2,
-            border_width=1,
-            border_color="#24395C",
-        )
-        self.thumbnail_frame.grid(row=0, column=0, rowspan=4, sticky="nw", padx=18, pady=18)
-        self.thumbnail_frame.grid_propagate(False)
-        self.thumbnail_label = ctk.CTkLabel(
-            self.thumbnail_frame, text="VIDEO\nPREVIEW", text_color="#526683", font=("Segoe UI Semibold", 11)
-        )
-        self.thumbnail_label.place(relx=0.5, rely=0.5, anchor="center")
-
-        self.media_badge = ctk.CTkLabel(
-            self.media_card,
-            text="WAITING FOR LINK",
-            height=26,
-            corner_radius=8,
-            fg_color=SURFACE_2,
-            text_color=MUTED,
-            font=("Segoe UI Semibold", 9),
-        )
-        self.media_badge.grid(row=0, column=1, sticky="nw", pady=(20, 0), padx=(0, 14))
-
-        self.title_label = ctk.CTkLabel(
-            self.media_card,
-            text="Analyze media to see its details here",
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 18),
-            anchor="w",
-            justify="left",
-            wraplength=560,
-        )
-        self.title_label.grid(row=1, column=1, sticky="ew", padx=(0, 14), pady=(8, 2))
-
-        self.meta_label = ctk.CTkLabel(
-            self.media_card,
-            text="Title, creator, platform and duration will appear after analysis.",
-            text_color=MUTED,
-            font=("Segoe UI", 11),
-            anchor="w",
-            justify="left",
-            wraplength=560,
-        )
-        self.meta_label.grid(row=2, column=1, sticky="new", padx=(0, 14), pady=(2, 6))
-
-        self.media_action_hint = ctk.CTkLabel(
-            self.media_card,
-            text="Analyze a link first, then add it to the download list.",
-            text_color="#637696",
-            font=("Segoe UI", 9),
-            anchor="w",
-        )
-        self.media_action_hint.grid(row=3, column=1, sticky="ew", padx=(0, 14), pady=(0, 18))
-
-        action = ctk.CTkFrame(self.media_card, fg_color=SURFACE_2, corner_radius=12, border_width=1, border_color="#23385A")
-        action.grid(row=0, column=2, rowspan=4, sticky="ns", padx=(0, 18), pady=18)
-        action.grid_columnconfigure(0, weight=1)
-
-        self.download_button = ctk.CTkButton(
-            action,
-            text="Download video",
-            width=154,
-            height=42,
-            corner_radius=10,
-            fg_color=CYAN,
-            hover_color=CYAN_HOVER,
-            text_color="#031018",
-            font=("Segoe UI Semibold", 11),
-            command=self.download,
-            state="disabled",
-        )
-        self.download_button.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
-
-        self.open_editor_after_check = ctk.CTkCheckBox(
-            action,
-            text="Open in editor\nafter download",
-            variable=self.open_editor_after_var,
-            checkbox_width=20,
-            checkbox_height=20,
-            fg_color=PURPLE,
-            hover_color=PURPLE_HOVER,
-            border_color=BORDER,
-            text_color=TEXT,
-            font=("Segoe UI", 9),
-        )
-        self.open_editor_after_check.grid(row=1, column=0, sticky="w", padx=12, pady=(2, 12))
-
-    def _build_settings_card(self) -> None:
-        card = self._card(self.content)
-        card.grid(row=3, column=0, sticky="ew", pady=(0, 14))
-        card.grid_columnconfigure(0, weight=1)
-        card.grid_columnconfigure(1, weight=1)
-        self._section_title(card, "02 / Output", "Choose what you want to save", columnspan=2)
-
-        left = ctk.CTkFrame(card, fg_color="transparent")
-        left.grid(row=1, column=0, sticky="nsew", padx=(18, 10), pady=(16, 18))
-        left.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(left, text="DOWNLOAD TYPE", text_color=MUTED, font=("Segoe UI Semibold", 9)).grid(
-            row=0, column=0, sticky="w"
-        )
-        self.mode_control = ctk.CTkSegmentedButton(
-            left,
-            values=["Video", "Audio"],
-            variable=self.mode_var,
-            command=self._sync_mode,
-            height=40,
-            corner_radius=11,
-            fg_color=SURFACE_2,
-            selected_color=PURPLE,
-            selected_hover_color=PURPLE_HOVER,
-            unselected_color=SURFACE_2,
-            unselected_hover_color=SURFACE_3,
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 11),
-        )
-        self.mode_control.grid(row=1, column=0, sticky="ew", pady=(7, 15))
-
-        ctk.CTkLabel(left, text="CUSTOM FILE NAME", text_color=MUTED, font=("Segoe UI Semibold", 9)).grid(
-            row=2, column=0, sticky="w"
-        )
-        self.name_entry = ctk.CTkEntry(
-            left,
-            textvariable=self.name_var,
-            height=42,
-            corner_radius=10,
-            fg_color=SURFACE_2,
-            border_color="#2A4169",
-            border_width=1,
-            text_color=TEXT,
-            placeholder_text="Video title will appear here",
-        )
-        self.name_entry.grid(row=3, column=0, sticky="ew", pady=(7, 14))
-
-        ctk.CTkLabel(left, text="SAVE LOCATION", text_color=MUTED, font=("Segoe UI Semibold", 9)).grid(
-            row=4, column=0, sticky="w"
-        )
-        folder_row = ctk.CTkFrame(left, fg_color="transparent")
-        folder_row.grid(row=5, column=0, sticky="ew", pady=(7, 0))
-        folder_row.grid_columnconfigure(0, weight=1)
-
-        self.folder_entry = ctk.CTkEntry(
-            folder_row,
-            textvariable=self.download_dir_var,
-            height=42,
-            corner_radius=10,
-            fg_color=SURFACE_2,
-            border_color="#2A4169",
-            border_width=1,
-            text_color="#AFC0D9",
-            state="readonly",
-        )
-        self.folder_entry.grid(row=0, column=0, sticky="ew")
-        self.choose_folder_button = ctk.CTkButton(
-            folder_row,
-            text="Choose folder",
-            width=112,
-            height=42,
-            corner_radius=10,
-            fg_color=SURFACE_3,
-            hover_color="#1B3153",
-            border_width=1,
-            border_color="#2A4169",
-            text_color=TEXT,
-            command=self.choose_download_folder,
-        )
-        self.choose_folder_button.grid(row=0, column=1, padx=(8, 0))
-        self.reset_folder_button = ctk.CTkButton(
-            folder_row,
-            text="Default",
-            width=74,
-            height=42,
-            corner_radius=10,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=MUTED,
-            command=self.reset_download_folder,
-        )
-        self.reset_folder_button.grid(row=0, column=2, padx=(8, 0))
-
-        right = ctk.CTkFrame(card, fg_color=SURFACE_2, corner_radius=14, border_width=1, border_color="#23385A")
-        right.grid(row=1, column=1, sticky="nsew", padx=(10, 18), pady=(16, 18))
-        right.grid_columnconfigure((0, 1), weight=1)
-
-        self.quality_label = ctk.CTkLabel(
-            right, text="VIDEO QUALITY", text_color=MUTED, font=("Segoe UI Semibold", 9)
-        )
-        self.quality_label.grid(row=0, column=0, sticky="w", padx=14, pady=(14, 0))
-        self.video_quality = ctk.CTkComboBox(
-            right,
-            variable=self.video_quality_var,
-            values=["360p", "480p", "720p", "1080p", "Best available"],
-            height=39,
-            corner_radius=9,
-            fg_color=SURFACE_3,
-            border_color="#30496F",
-            button_color="#263E65",
-            button_hover_color=PURPLE,
-            dropdown_fg_color=SURFACE_2,
-            dropdown_hover_color=SURFACE_3,
-            text_color=TEXT,
-        )
-        self.video_quality.grid(row=1, column=0, sticky="ew", padx=(14, 7), pady=(7, 14))
-
-        self.audio_format_label = ctk.CTkLabel(
-            right, text="AUDIO FORMAT", text_color=MUTED, font=("Segoe UI Semibold", 9)
-        )
-        self.audio_format_label.grid(row=0, column=1, sticky="w", padx=7, pady=(14, 0))
-        self.audio_format = ctk.CTkComboBox(
-            right,
-            variable=self.audio_format_var,
-            values=["MP3", "M4A"],
-            height=39,
-            corner_radius=9,
-            fg_color=SURFACE_3,
-            border_color="#30496F",
-            button_color="#263E65",
-            button_hover_color=PURPLE,
-            dropdown_fg_color=SURFACE_2,
-            dropdown_hover_color=SURFACE_3,
-            text_color=TEXT,
-        )
-        self.audio_format.grid(row=1, column=1, sticky="ew", padx=(7, 14), pady=(7, 14))
-
-        self.audio_quality_label = ctk.CTkLabel(
-            right, text="AUDIO BITRATE", text_color=MUTED, font=("Segoe UI Semibold", 9)
-        )
-        self.audio_quality_label.grid(row=2, column=0, sticky="w", padx=14)
-        self.audio_quality = ctk.CTkComboBox(
-            right,
-            variable=self.audio_quality_var,
-            values=["128", "192", "256", "320"],
-            height=39,
-            corner_radius=9,
-            fg_color=SURFACE_3,
-            border_color="#30496F",
-            button_color="#263E65",
-            button_hover_color=PURPLE,
-            dropdown_fg_color=SURFACE_2,
-            dropdown_hover_color=SURFACE_3,
-            text_color=TEXT,
-        )
-        self.audio_quality.grid(row=3, column=0, sticky="ew", padx=(14, 7), pady=(7, 14))
-        self.output_hint = ctk.CTkLabel(
-            right,
-            text="MP4 video\nFFmpeg merge when needed",
-            text_color="#6F83A2",
-            font=("Segoe UI", 9),
-            justify="left",
-        )
-        self.output_hint.grid(row=2, column=1, rowspan=2, sticky="sw", padx=(7, 14), pady=(0, 15))
-
-    def _build_download_card(self) -> None:
-        card = self._card(self.content)
-        card.grid(row=4, column=0, sticky="ew", pady=(0, 14))
-        card.grid_columnconfigure(0, weight=1)
-
-        header = ctk.CTkFrame(card, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(15, 8))
-        header.grid_columnconfigure(1, weight=1)
-
-        self.status_chip = ctk.CTkLabel(
-            header,
-            text="READY",
-            height=26,
-            corner_radius=8,
-            fg_color="#0D2A2A",
-            text_color=SUCCESS,
-            font=("Segoe UI Semibold", 9),
-        )
-        self.status_chip.grid(row=0, column=0, sticky="w")
-
-        self.status_label = ctk.CTkLabel(
-            header,
-            text="Ready for a link",
-            text_color=MUTED,
-            font=("Segoe UI", 10),
-            anchor="w",
-        )
-        self.status_label.grid(row=0, column=1, sticky="w", padx=(10, 0))
-
-        self.downloads_summary = ctk.CTkLabel(
-            header,
-            text="0 active • 0 queued",
-            text_color=CYAN,
-            font=("Segoe UI Semibold", 10),
-            anchor="e",
-        )
-        self.downloads_summary.grid(row=0, column=2, sticky="e")
-
-        self.downloads_list = ctk.CTkFrame(card, fg_color="transparent")
-        self.downloads_list.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 10))
-        self.downloads_list.grid_columnconfigure(0, weight=1)
-
-        self.downloads_empty_label = ctk.CTkLabel(
-            self.downloads_list,
-            text="No downloads yet. Analyze a video and press Download.",
-            text_color="#637696",
-            font=("Segoe UI", 10),
-            anchor="w",
-        )
-        self.downloads_empty_label.grid(row=0, column=0, sticky="ew", pady=(8, 12))
-
-        actions = ctk.CTkFrame(card, fg_color="transparent")
-        actions.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 16))
-        for index in range(3):
-            actions.grid_columnconfigure(index, weight=1)
-
-        self.open_file_button = ctk.CTkButton(
-            actions,
-            text="Open last file",
-            height=38,
-            corner_radius=10,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
-            text_color=TEXT,
-            command=self.open_last_file,
-            state="disabled",
-        )
-        self.open_file_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-
-        ctk.CTkButton(
-            actions,
-            text="Open downloads",
-            height=38,
-            corner_radius=10,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
-            text_color=TEXT,
-            command=self.open_download_folder,
-        ).grid(row=0, column=1, sticky="ew", padx=6)
-
-        self.cancel_all_downloads_button = ctk.CTkButton(
-            actions,
-            text="Cancel all downloads",
-            height=38,
-            corner_radius=10,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=MUTED,
-            command=self.cancel_all_downloads,
-            state="disabled",
-        )
-        self.cancel_all_downloads_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
-
-    def _build_update_card(self) -> None:
-        self.update_card = self._card(self.content)
-        card = self.update_card
-        card.grid(row=5, column=0, sticky="ew", pady=(0, 14))
-        card.grid_columnconfigure(0, weight=1)
-        self._section_title(card, "03 / Updates", "Update status")
-
-        self.update_toggle_button = ctk.CTkButton(
-            card,
-            text="Show details",
-            width=108,
-            height=32,
-            corner_radius=9,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=MUTED,
-            command=self.toggle_update_panel,
-        )
-        self.update_toggle_button.grid(row=0, column=0, sticky="e", padx=18, pady=(4, 0))
-
-        self.update_body = ctk.CTkFrame(card, fg_color="transparent")
-        body = self.update_body
-        body.grid(row=1, column=0, sticky="ew", padx=18, pady=(14, 18))
-        body.grid_columnconfigure(0, weight=1)
-
-        version_row = ctk.CTkFrame(body, fg_color="transparent")
-        version_row.grid(row=0, column=0, sticky="ew")
-        version_row.grid_columnconfigure(0, weight=1)
-        self.update_status_label = ctk.CTkLabel(
-            version_row,
-            text=f"Current version: v{APP_VERSION}",
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 11),
-            anchor="w",
-        )
-        self.update_status_label.grid(row=0, column=0, sticky="w")
-        self.update_check_button = ctk.CTkButton(
-            version_row,
-            text="Check for updates",
-            width=132,
-            height=36,
-            corner_radius=9,
-            fg_color=SURFACE_3,
-            hover_color="#1B3153",
-            border_width=1,
-            border_color=BORDER,
-            text_color=TEXT,
-            command=lambda: self.check_for_updates(manual=True),
-        )
-        self.update_check_button.grid(row=0, column=1, sticky="e")
-
-        self.update_detail_label = ctk.CTkLabel(
-            body,
-            text="Automatic update checks are enabled." if self.auto_check_updates_var.get() else "Automatic update checks are disabled.",
-            text_color=MUTED,
-            font=("Segoe UI", 10),
-            anchor="w",
-            justify="left",
-            wraplength=940,
-        )
-        self.update_detail_label.grid(row=1, column=0, sticky="ew", pady=(7, 10))
-
-        self.update_notes_label = ctk.CTkLabel(
-            body,
-            text="",
-            text_color="#AFC0D9",
-            font=("Segoe UI", 10),
-            anchor="w",
-            justify="left",
-            wraplength=940,
-        )
-        self.update_notes_label.grid(row=2, column=0, sticky="ew")
-
-        self.update_progress = ctk.CTkProgressBar(
-            body,
-            height=8,
-            corner_radius=6,
-            fg_color=SURFACE_3,
-            progress_color=CYAN,
-        )
-        self.update_progress.grid(row=3, column=0, sticky="ew", pady=(10, 6))
-        self.update_progress.set(0)
-
-        preferences_hint = ctk.CTkFrame(body, fg_color="transparent")
-        preferences_hint.grid(row=4, column=0, sticky="ew", pady=(7, 0))
-        preferences_hint.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            preferences_hint,
-            text="Automatic update preferences are managed in Settings.",
-            text_color=MUTED,
-            font=("Segoe UI", 9),
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(
-            preferences_hint,
-            text="Open Settings",
-            width=100,
-            height=30,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=TEXT,
-            command=self.open_settings,
-        ).grid(row=0, column=1, sticky="e")
-
-        buttons = ctk.CTkFrame(body, fg_color="transparent")
-        buttons.grid(row=5, column=0, sticky="ew", pady=(12, 0))
-        buttons.grid_columnconfigure(0, weight=1)
-        self.update_action_button = ctk.CTkButton(
-            buttons,
-            text="Update Now",
-            width=150,
-            height=40,
-            corner_radius=10,
-            fg_color=PURPLE,
-            hover_color=PURPLE_HOVER,
-            text_color="#FFFFFF",
-            font=("Segoe UI Semibold", 10),
-            command=self.download_or_install_update,
-            state="disabled",
-        )
-        self.update_action_button.grid(row=0, column=0, sticky="w")
-        self.update_later_button = ctk.CTkButton(
-            buttons,
-            text="Later",
-            width=80,
-            height=40,
-            corner_radius=10,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=MUTED,
-            command=self.snooze_update,
-            state="disabled",
-        )
-        self.update_later_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
-
-        self.update_cancel_button = ctk.CTkButton(
-            buttons,
-            text="Cancel download",
-            width=112,
-            height=40,
-            corner_radius=10,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=MUTED,
-            command=self.cancel_update_download,
-            state="disabled",
-        )
-        self.update_cancel_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
-
-        self.release_button = ctk.CTkButton(
-            buttons,
-            text="Open latest release",
-            width=105,
-            height=40,
-            corner_radius=10,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=MUTED,
-            command=self.open_release_page,
-            state="normal",
-        )
-        self.release_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
-
-        self.update_body.grid_remove()
-
-    def toggle_update_panel(self) -> None:
-        self.update_expanded = not self.update_expanded
-        if self.update_expanded:
-            self.update_body.grid()
-            self.update_toggle_button.configure(text="Hide details")
-        else:
-            self.update_body.grid_remove()
-            self.update_toggle_button.configure(text="Show details")
-
-    def _build_footer(self) -> None:
-        footer = ctk.CTkFrame(self.content, fg_color="transparent")
-        footer.grid(row=6, column=0, sticky="ew", pady=(2, 12))
-        footer.grid_columnconfigure(0, weight=1)
-        self.save_location_label = ctk.CTkLabel(
-            footer,
-            text=f"SAVE LOCATION  •  {self.download_dir}",
-            text_color="#637696",
-            font=("Segoe UI", 9),
-        )
-        self.save_location_label.grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(
-            footer,
-            text="Diagnostics",
-            width=108,
-            height=26,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            text_color=MUTED,
-            font=("Segoe UI", 9),
-            command=self.open_diagnostics,
-        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
-        ctk.CTkLabel(
-            footer,
-            text="Use only for content you own or have permission to download.",
-            text_color="#637696",
-            font=("Segoe UI", 9),
-        ).grid(row=0, column=1, sticky="e")
-        ctk.CTkButton(
-            footer,
-            text="Developed by Md Omar Faruk  •  GitHub ↗",
-            width=220,
-            height=26,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            text_color=CYAN,
-            font=("Segoe UI", 9),
-            command=lambda: webbrowser.open("https://github.com/umar-vai"),
-        ).grid(row=1, column=1, sticky="e", pady=(5, 0))
-
-    def _sync_mode(self, value: str | None = None) -> None:
-        mode = value or self.mode_var.get()
-        is_video = mode == "Video"
-        self.mode_var.set(mode)
-        self.video_quality.configure(state="normal" if is_video else "disabled")
-        self.audio_format.configure(state="disabled" if is_video else "normal")
-        self.audio_quality.configure(state="disabled" if is_video else "normal")
-        self.quality_label.configure(text_color=TEXT if is_video else "#50617C")
-        self.audio_format_label.configure(text_color="#50617C" if is_video else TEXT)
-        self.audio_quality_label.configure(text_color="#50617C" if is_video else TEXT)
-        self.download_button.configure(text="Download video" if is_video else "Download audio")
-        self.output_hint.configure(
-            text="MP4 video\nFFmpeg merge when needed" if is_video else "Audio-only export\nChoose format + bitrate"
-        )
 
     def paste_from_clipboard(self) -> None:
         try:
@@ -1285,7 +445,7 @@ class DownloaderApp(ctk.CTk):
         self.download_button.configure(state="disabled")
         if not silent:
             self.task_state = TaskState.CANCELLED
-            self.media_badge.configure(text="ANALYSIS CANCELLED", fg_color="#2D2514", text_color=WARNING)
+            self.media_badge.configure(text="ANALYSIS CANCELLED", fg_color=ui.WARNING_SOFT, text_color=WARNING)
             self._set_status("Analysis cancelled. Paste or analyze another link.", "cancelled")
         LOGGER.info("Analysis %s cancellation requested", job_id)
 
@@ -1304,161 +464,12 @@ class DownloaderApp(ctk.CTk):
         self.download_button.configure(state="disabled")
         self.title_label.configure(text="Analysis timed out")
         self.meta_label.configure(text="The website did not return media information in time.")
-        self.media_badge.configure(text="ANALYSIS TIMEOUT", fg_color="#351722", text_color=DANGER)
+        self.media_badge.configure(text="ANALYSIS TIMEOUT", fg_color=ui.DANGER_SOFT, text_color=DANGER)
         self.media_action_hint.configure(text="Press Analyze to retry, or paste another link.")
         self.task_state = TaskState.ERROR
         self._set_status("Analysis timed out after 60 seconds", "error")
         self._finish_analysis(job_id)
         LOGGER.warning("Analysis %s timed out url=%s", job_id, url)
-
-    def _set_status(self, text: str, kind: str = "ready") -> None:
-        palette = {
-            "ready": ("#0D2A2A", SUCCESS, "READY"),
-            "working": ("#162344", CYAN, "WORKING"),
-            "success": ("#0E3025", SUCCESS, "COMPLETE"),
-            "cancelled": ("#2D2514", WARNING, "CANCELLED"),
-            "error": ("#351722", DANGER, "FAILED"),
-        }
-        bg, fg, chip = palette.get(kind, palette["ready"])
-        self.status_chip.configure(text=chip, fg_color=bg, text_color=fg)
-        self.status_label.configure(text=text)
-
-    def _schedule_download_activity_refresh(self, delay_ms: int = 120) -> None:
-        if self._download_activity_after_id is not None:
-            return
-
-        def run() -> None:
-            self._download_activity_after_id = None
-            self._render_download_activity()
-
-        self._download_activity_after_id = self.after(max(40, int(delay_ms)), run)
-
-    def _render_download_activity(self) -> None:
-        if not hasattr(self, "downloads_list"):
-            return
-
-        for child in self.downloads_list.winfo_children():
-            child.destroy()
-
-        snapshots = self.download_queue.snapshot()
-        active = self.download_queue.running_count()
-        queued = self.download_queue.queued_count()
-        self.downloads_summary.configure(text=f"{active} active • {queued} queued")
-        self.cancel_all_downloads_button.configure(
-            state="normal" if active + queued > 0 else "disabled"
-        )
-
-        if not snapshots:
-            ctk.CTkLabel(
-                self.downloads_list,
-                text="No downloads yet. Analyze a video and press Download.",
-                text_color="#637696",
-                font=("Segoe UI", 10),
-                anchor="w",
-            ).grid(row=0, column=0, sticky="ew", pady=(8, 12))
-            return
-
-        visible = snapshots[:6]
-        status_palette = {
-            "queued": ("QUEUED", MUTED),
-            "running": ("DOWNLOADING", CYAN),
-            "cancelling": ("CANCELLING", WARNING),
-            "completed": ("DONE", SUCCESS),
-            "failed": ("FAILED", DANGER),
-            "cancelled": ("CANCELLED", WARNING),
-        }
-
-        for row_index, item in enumerate(visible):
-            request_id = str(item.get("id") or "")
-            status = str(item.get("status") or "queued")
-            label, status_color = status_palette.get(status, (status.upper(), MUTED))
-            title = str(item.get("name") or "Media download")
-            detail = str(item.get("detail") or "")
-            error = str(item.get("error") or "")
-            progress_value = max(0.0, min(1.0, float(item.get("progress") or 0.0)))
-
-            row = ctk.CTkFrame(
-                self.downloads_list,
-                fg_color=SURFACE_2,
-                corner_radius=11,
-                border_width=1,
-                border_color="#203654",
-            )
-            row.grid(row=row_index, column=0, sticky="ew", pady=(0, 7))
-            row.grid_columnconfigure(0, weight=1)
-
-            top = ctk.CTkFrame(row, fg_color="transparent")
-            top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(9, 4))
-            top.grid_columnconfigure(0, weight=1)
-
-            ctk.CTkLabel(
-                top,
-                text=title,
-                text_color=TEXT,
-                font=("Segoe UI Semibold", 10),
-                anchor="w",
-            ).grid(row=0, column=0, sticky="ew")
-
-            ctk.CTkLabel(
-                top,
-                text=label,
-                text_color=status_color,
-                font=("Segoe UI Semibold", 9),
-            ).grid(row=0, column=1, sticky="e", padx=(8, 0))
-
-            bar = ctk.CTkProgressBar(row, height=7, corner_radius=5, fg_color=SURFACE_3, progress_color=PURPLE)
-            bar.grid(row=1, column=0, sticky="ew", padx=(12, 8), pady=(0, 8))
-            bar.set(1.0 if status == "completed" else progress_value)
-
-            info_text = error if status == "failed" and error else detail
-            if not info_text:
-                if status == "queued":
-                    position = int(item.get("position") or 0)
-                    info_text = f"Waiting • queue position {position}" if position else "Waiting"
-                elif status == "completed":
-                    info_text = "Download completed"
-                elif status == "cancelled":
-                    info_text = "Download cancelled"
-                else:
-                    info_text = "Starting…"
-
-            ctk.CTkLabel(
-                row,
-                text=info_text[:150],
-                text_color=MUTED,
-                font=("Segoe UI", 9),
-                anchor="w",
-            ).grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 9))
-
-            if status in {"queued", "running", "cancelling"}:
-                button = ctk.CTkButton(
-                    row,
-                    text="Cancel",
-                    width=72,
-                    height=29,
-                    corner_radius=8,
-                    fg_color="transparent",
-                    hover_color="#2A1B27",
-                    border_width=1,
-                    border_color="#5B3440",
-                    text_color=WARNING,
-                    command=lambda rid=request_id: self.cancel_download(rid),
-                    state="disabled" if status == "cancelling" else "normal",
-                )
-                button.grid(row=1, column=1, rowspan=2, sticky="e", padx=(0, 12), pady=(0, 8))
-            elif status == "failed":
-                button = ctk.CTkButton(
-                    row,
-                    text="Retry",
-                    width=72,
-                    height=29,
-                    corner_radius=8,
-                    fg_color=PURPLE,
-                    hover_color=PURPLE_HOVER,
-                    text_color="#FFFFFF",
-                    command=lambda rid=request_id: self.retry_download(rid),
-                )
-                button.grid(row=1, column=1, rowspan=2, sticky="e", padx=(0, 12), pady=(0, 8))
 
     def analyze_media(self) -> None:
         self._cancel_auto_analyze()
@@ -1484,7 +495,7 @@ class DownloaderApp(ctk.CTk):
         self._set_status(f"Analyzing {platform_name(url)}…", "working")
         self.media_badge.configure(
             text=f"{platform_name(url).upper()} • ANALYZING",
-            fg_color="#162344",
+            fg_color=ui.INFO_SOFT,
             text_color=CYAN,
         )
 
@@ -1585,30 +596,7 @@ class DownloaderApp(ctk.CTk):
         return f"{base} {int(time.time())}"
 
     def open_batch_downloads(self) -> None:
-        existing = self.batch_window
-        if existing is not None:
-            try:
-                if existing.winfo_exists():
-                    existing.deiconify()
-                    existing.lift()
-                    existing.focus_force()
-                    return
-            except Exception:
-                self.batch_window = None
-        try:
-            self.batch_window = BatchDownloadWindow(
-                self,
-                on_enqueue=self._enqueue_batch_downloads,
-                on_cancel=self.cancel_download,
-                on_retry=self.retry_download,
-                get_snapshots=self.download_queue.snapshot,
-                settings=self.settings,
-            )
-            self.batch_window.focus()
-        except Exception:
-            LOGGER.exception("Unable to open Desktop Batch Download")
-            self.batch_window = None
-            messagebox.showerror(APP_NAME, "Could not open Batch Download. Check diagnostics log.")
+        self.show_page("batch")
 
     def _enqueue_batch_downloads(
         self, text: str, options: dict[str, str]
@@ -1645,7 +633,7 @@ class DownloaderApp(ctk.CTk):
             }
             payloads.append({
                 "url": url,
-                "name": f"{prefix}_{index:03d}_media",
+                "name": f"Link {index} • {urlsplit(url).hostname or 'media'}",
                 "batch_id": batch_id,
                 "batch_index": index,
                 "download_dir": str(self.download_dir),
@@ -1820,47 +808,6 @@ class DownloaderApp(ctk.CTk):
         finally:
             self._put_download_event("download_finished", request_id)
 
-    def _reset_thumbnail_label(self) -> None:
-        """Clear a previous CTkImage without allowing a Tk image error to abort analysis."""
-        self.thumbnail_image = None
-        try:
-            self.thumbnail_label.configure(image="", text="VIDEO\nPREVIEW")
-            return
-        except Exception:
-            LOGGER.exception("Could not clear existing thumbnail label; rebuilding it")
-
-        try:
-            self.thumbnail_label.destroy()
-        except Exception:
-            pass
-        self.thumbnail_label = ctk.CTkLabel(
-            self.thumbnail_frame,
-            text="VIDEO\nPREVIEW",
-            text_color="#526683",
-            font=("Segoe UI Semibold", 11),
-        )
-        self.thumbnail_label.place(relx=0.5, rely=0.5, anchor="center")
-
-    def _apply_thumbnail(self, raw: bytes | None) -> None:
-        if not raw:
-            self._reset_thumbnail_label()
-            return
-        try:
-            image = Image.open(io.BytesIO(raw)).convert("RGB")
-            target = (214, 122)
-            image.thumbnail(target, Image.Resampling.LANCZOS)
-            canvas = Image.new("RGB", target, (16, 28, 49))
-            canvas.paste(image, ((target[0] - image.width) // 2, (target[1] - image.height) // 2))
-            self.thumbnail_image = ctk.CTkImage(
-                light_image=canvas,
-                dark_image=canvas,
-                size=target,
-            )
-            self.thumbnail_label.configure(image=self.thumbnail_image, text="")
-        except Exception:
-            LOGGER.exception("Could not render media thumbnail")
-            self._reset_thumbnail_label()
-
     def _drain_events(self) -> None:
         with self._download_progress_lock:
             progress_items = list(self._latest_download_progress.items())
@@ -1909,7 +856,7 @@ class DownloaderApp(ctk.CTk):
                         )
                         self.media_badge.configure(
                             text=f"{platform_label.upper()} • READY",
-                            fg_color="#0E3025",
+                            fg_color=ui.SUCCESS_SOFT,
                             text_color=SUCCESS,
                         )
                         self.media_action_hint.configure(
@@ -1931,7 +878,7 @@ class DownloaderApp(ctk.CTk):
                         self.task_state = TaskState.ERROR
                         self.title_label.configure(text="Could not analyze this link")
                         self.meta_label.configure(text="All compatible extraction paths failed.")
-                        self.media_badge.configure(text="ANALYSIS FAILED", fg_color="#351722", text_color=DANGER)
+                        self.media_badge.configure(text="ANALYSIS FAILED", fg_color=ui.DANGER_SOFT, text_color=DANGER)
                         self.media_action_hint.configure(text="Try Re-analyze or paste another public link.")
                         self._set_status("Analysis failed", "error")
                         self._finish_analysis(job_id)
@@ -1944,7 +891,7 @@ class DownloaderApp(ctk.CTk):
                         self.task_state = TaskState.CANCELLED
                         self.title_label.configure(text="Analysis cancelled")
                         self.meta_label.configure(text="Paste another link or press Analyze to try again.")
-                        self.media_badge.configure(text="ANALYSIS CANCELLED", fg_color="#2D2514", text_color=WARNING)
+                        self.media_badge.configure(text="ANALYSIS CANCELLED", fg_color=ui.WARNING_SOFT, text_color=WARNING)
                         self._set_status(str(data or "Analysis cancelled."), "cancelled")
                         self._finish_analysis(job_id)
 
@@ -1972,7 +919,7 @@ class DownloaderApp(ctk.CTk):
                         detail = dict(data or {})
                         completed_path = Path(str(detail.get("path") or ""))
                         edit_after = bool((request_state or {}).get("edit_after_download"))
-                        self.download_queue.complete(request_id, detail=completed_path.name)
+                        self.download_queue.complete(request_id, detail=completed_path.name, path=str(completed_path))
                         self.last_file = completed_path
                         self.task_state = TaskState.DOWNLOADED
                         self._set_status(f"Download completed: {completed_path.name}", "success")
@@ -2063,14 +1010,14 @@ class DownloaderApp(ctk.CTk):
             self.download_dir_var.set(str(self.download_dir))
             self.settings["download_dir"] = str(self.download_dir)
             save_settings(self.settings)
-            self.save_location_label.configure(text=f"SAVE LOCATION  •  {self.download_dir}")
+            self.save_location_label.configure(text=f"Saving to  {self.download_dir}")
 
     def reset_download_folder(self) -> None:
         self.download_dir = DEFAULT_DOWNLOAD_DIR
         self.download_dir_var.set(str(self.download_dir))
         self.settings["download_dir"] = str(self.download_dir)
         save_settings(self.settings)
-        self.save_location_label.configure(text=f"SAVE LOCATION  •  {self.download_dir}")
+        self.save_location_label.configure(text=f"Saving to  {self.download_dir}")
 
     def open_download_folder(self) -> None:
         self.download_dir.mkdir(parents=True, exist_ok=True)
@@ -2500,6 +1447,12 @@ class DownloaderApp(ctk.CTk):
             self._start_available_downloads()
         self._schedule_download_activity_refresh(20)
 
+    def clear_finished_downloads(self) -> None:
+        removed = self.download_queue.clear_finished()
+        if removed:
+            self._set_status(f"Cleared {removed} finished item{'s' if removed != 1 else ''}", "ready")
+        self._schedule_download_activity_refresh(20)
+
     def cancel_all_downloads(self) -> None:
         for item in self.download_queue.snapshot():
             if str(item.get("status") or "") in {"queued", "running", "cancelling"}:
@@ -2619,8 +1572,9 @@ class DownloaderApp(ctk.CTk):
         self.auto_check_updates_var.set(bool(normalized["auto_check_updates"]))
         self.auto_download_updates_var.set(bool(normalized["auto_download_updates"]))
 
-        self.save_location_label.configure(text=f"SAVE LOCATION  •  {self.download_dir}")
+        self.save_location_label.configure(text=f"Saving to  {self.download_dir}")
         self._sync_mode(str(normalized["default_mode"]))
+        self.batch_page.set_defaults(normalized)
 
         if not self.latest_release:
             self.update_detail_label.configure(

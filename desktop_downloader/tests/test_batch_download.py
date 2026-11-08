@@ -124,3 +124,27 @@ class DesktopBatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BatchParsingRobustnessTests(unittest.TestCase):
+    def test_bad_lines_are_skipped_instead_of_rejecting_the_batch(self) -> None:
+        from batch_download import parse_batch_urls_detailed
+
+        urls, duplicates, invalid = parse_batch_urls_detailed(
+            "1. https://example.com/a,\n'https://example.com/b'\nftp://example.com/c\n"
+            "https://example.com/a\nhttps://u:p@example.com/x\n"
+        )
+        self.assertEqual(urls, ["https://example.com/a", "https://example.com/b"])
+        self.assertEqual(duplicates, 1)
+        self.assertGreaterEqual(invalid, 2)
+
+    def test_queue_clear_finished_keeps_active_items(self) -> None:
+        queue = DownloadQueue(max_concurrent=1)
+        first = queue.enqueue({"url": "https://example.com/1"})
+        second = queue.enqueue({"url": "https://example.com/2"})
+        queue.start_available()
+        queue.complete(first.id, path="C:/x/a.mp4")
+        self.assertEqual(queue.get(first.id)["result_path"], "C:/x/a.mp4")
+        self.assertEqual(queue.clear_finished(), 1)
+        self.assertIsNone(queue.get(first.id))
+        self.assertIsNotNone(queue.get(second.id))

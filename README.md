@@ -10,7 +10,8 @@ The transcriber repository is now focused only on transcription. Downloader-spec
 
 Location: `desktop_downloader/`
 
-- Native Windows-style CustomTkinter UI
+- Single-window canvas-drawn UI (sidebar + Download / Batch / Queue / Updates pages) that resizes smoothly
+- Batch download built into the main window, with live per-link and overall progress
 - YouTube video download
 - Audio-only download
 - MP3 / M4A output

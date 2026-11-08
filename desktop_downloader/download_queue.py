@@ -20,6 +20,7 @@ class DownloadRequest:
     progress: float = 0.0
     detail: str = ""
     error: str = ""
+    result_path: str = ""
     created_at: float = field(default_factory=time.time)
     started_at: float = 0.0
     finished_at: float = 0.0
@@ -36,6 +37,7 @@ class DownloadRequest:
             "progress": self.progress,
             "detail": self.detail,
             "error": self.error,
+            "result_path": self.result_path,
             "position": position,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -133,9 +135,19 @@ class DownloadQueue:
                 return
             request.detail = str(detail or request.detail)
 
-    def complete(self, request_id: str, detail: str = "") -> None:
+    def complete(self, request_id: str, detail: str = "", path: str = "") -> None:
         with self._lock:
             self._finish_locked(request_id, "completed", detail=detail)
+            request = self._find_locked(request_id)
+            if request is not None and path:
+                request.result_path = str(path)
+
+    def clear_finished(self) -> int:
+        """Drop completed/failed/cancelled entries from the list. Returns how many were removed."""
+        with self._lock:
+            before = len(self._items)
+            self._items = [item for item in self._items if item.status not in TERMINAL_STATUSES]
+            return before - len(self._items)
 
     def fail(self, request_id: str, error: str) -> None:
         with self._lock:
@@ -154,6 +166,7 @@ class DownloadQueue:
             request.progress = 0.0
             request.detail = "Retry queued"
             request.error = ""
+            request.result_path = ""
             request.started_at = 0.0
             request.finished_at = 0.0
             self._pending.append(request.id)
@@ -198,8 +211,8 @@ class DownloadQueue:
         with self._lock:
             return sum(
                 1
-                for request_id in self._pending
-                if (request := self._find_locked(request_id)) is not None and request.status == "queued"
+                for item in self._items
+                if item.status == "queued" and item.id in self._pending
             )
 
     def running_count(self) -> int:
@@ -208,8 +221,9 @@ class DownloadQueue:
 
     def snapshot(self) -> list[dict[str, Any]]:
         with self._lock:
+            positions = {request_id: index for index, request_id in enumerate(self._pending, 1)}
             return [
-                item.snapshot(position=self._position_locked(item.id))
+                item.snapshot(position=positions.get(item.id, 0))
                 for item in reversed(self._items)
             ]
 

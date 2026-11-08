@@ -178,14 +178,47 @@ def analyze_url(
     return _public_summary(url, info), info
 
 
+def _files_with_stem(directory: Path, stem: str) -> list[Path]:
+    """Files named ``<stem>.<ext>``. Compares names directly instead of using glob,
+    because titles such as ``Song [Official] *Live*`` contain glob metacharacters
+    and would never match (breaking duplicate detection and final-file lookup)."""
+    found: list[Path] = []
+    try:
+        for path in directory.iterdir():
+            if path.is_file() and path.stem == stem:
+                found.append(path)
+    except OSError:
+        pass
+    return found
+
+
 def _available_name(directory: Path, requested: str) -> str:
     base = safe_filename(requested)
     candidate = base
     index = 2
-    while any(path.is_file() and path.stem == candidate for path in directory.glob(f"{candidate}.*")):
+    while _files_with_stem(directory, candidate):
         candidate = f"{base} ({index})"
         index += 1
     return candidate
+
+
+def _format_size(value: float) -> str:
+    size = float(value or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return ""
+
+
+def _format_eta(seconds: Any) -> str:
+    try:
+        total = max(0, int(seconds))
+    except (TypeError, ValueError):
+        return ""
+    minutes, secs = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
 def download_from_analysis(
@@ -208,20 +241,65 @@ def download_from_analysis(
     name = _available_name(download_dir, filename)
     started_at = time.time()
 
+    # Video+audio are downloaded as separate streams and then merged. A naive hook
+    # reports each stream from 0-100% so the bar runs forward, snaps back and runs
+    # again. Track every stream, weight it by its size and only ever move forward.
+    stream_state: dict[str, dict[str, float]] = {}
+    expected_streams = 1
+    weights: dict[str, float] = {}
+    if isinstance(cached_info, dict):
+        requested = cached_info.get("requested_formats") or []
+        if isinstance(requested, list) and len(requested) > 1:
+            expected_streams = len(requested)
+            for item in requested:
+                if isinstance(item, dict):
+                    weights[str(item.get("format_id") or "")] = float(
+                        item.get("filesize") or item.get("filesize_approx") or 0
+                    )
+    best_progress = 0.0
+
+    def overall_progress() -> float:
+        nonlocal best_progress
+        streams = list(stream_state.items())
+        count = max(expected_streams, len(streams))
+        weight_total = sum(weights.values()) if weights and all(weights.values()) else 0.0
+        value = 0.0
+        for key, state in streams:
+            fraction = state["done"] if state.get("finished") else state["fraction"]
+            weight = (weights.get(key, 0.0) / weight_total) if weight_total else 1.0 / count
+            value += fraction * weight
+        # leave headroom for the merge / conversion step
+        value = min(value, 0.985)
+        best_progress = max(best_progress, value)
+        return best_progress
+
     def hook(data: dict[str, Any]) -> None:
         _check_cancel(cancel_event)
         status = data.get("status")
+        info_dict = data.get("info_dict") or {}
+        key = str(info_dict.get("format_id") or data.get("filename") or "stream")
+        state = stream_state.setdefault(key, {"fraction": 0.0, "done": 1.0, "finished": 0.0})
         if status == "downloading":
             downloaded = int(data.get("downloaded_bytes") or 0)
             total = int(data.get("total_bytes") or data.get("total_bytes_estimate") or 0)
-            progress = (downloaded / total) if total else 0.0
+            if total:
+                fraction = downloaded / total
+            elif data.get("fragment_count"):
+                fraction = float(data.get("fragment_index") or 0) / float(data["fragment_count"])
+            else:
+                fraction = state["fraction"]
+            state["fraction"] = max(state["fraction"], max(0.0, min(1.0, fraction)))
             speed = data.get("speed")
             eta = data.get("eta")
             bits: list[str] = []
             if speed:
-                bits.append(f"{float(speed) / 1024 / 1024:.1f} MB/s")
+                bits.append(f"{_format_size(float(speed))}/s")
+            if total and downloaded:
+                bits.append(f"{_format_size(downloaded)} of {_format_size(total)}")
+            elif downloaded:
+                bits.append(_format_size(downloaded))
             if eta is not None:
-                bits.append(f"ETA {int(eta)}s")
+                bits.append(f"{_format_eta(eta)} left")
             if on_metrics:
                 on_metrics(
                     {
@@ -232,14 +310,35 @@ def download_from_analysis(
                     }
                 )
             if on_progress:
-                on_progress(max(0.0, min(1.0, progress)), " • ".join(bits) or "Downloading")
-        elif status == "finished" and on_status:
-            on_status("Finalizing file")
+                if len(stream_state) > 1 or expected_streams > 1:
+                    index = list(stream_state).index(key) + 1
+                    bits.insert(0, f"Part {index}/{max(expected_streams, len(stream_state))}")
+                on_progress(overall_progress(), " • ".join(bits) or "Downloading")
+        elif status == "finished":
+            state["fraction"] = 1.0
+            state["finished"] = 1.0
+            if on_progress:
+                on_progress(overall_progress(), "Download finished")
+            if on_status and len(stream_state) >= expected_streams:
+                on_status("Finalizing file")
+
+    def post_hook(data: dict[str, Any]) -> None:
+        _check_cancel(cancel_event)
+        if data.get("status") == "started" and on_status:
+            names = {
+                "Merger": "Merging video and audio",
+                "FFmpegMerger": "Merging video and audio",
+                "ExtractAudio": "Converting audio",
+                "FFmpegExtractAudio": "Converting audio",
+                "MoveFiles": "Saving file",
+            }
+            on_status(names.get(str(data.get("postprocessor") or ""), "Processing file"))
 
     opts: dict[str, Any] = {
         "outtmpl": str(download_dir / f"{name}.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
+        "noprogress": True,
         "no_warnings": True,
         "cachedir": False,
         "socket_timeout": 30,
@@ -247,6 +346,7 @@ def download_from_analysis(
         "fragment_retries": 4,
         "concurrent_fragment_downloads": 4,
         "progress_hooks": [hook],
+        "postprocessor_hooks": [post_hook],
         "overwrites": False,
         "continuedl": True,
         "ffmpeg_location": get_ffmpeg_exe(),
@@ -276,7 +376,7 @@ def download_from_analysis(
 
     def cleanup_transient_files() -> None:
         # Keep .part/.ytdl so yt-dlp can resume after a retry or process restart.
-        for partial in download_dir.glob(f"{name}.*"):
+        for partial in _files_with_stem(download_dir, name):
             if partial.suffix.lower() in {".tmp", ".temp"}:
                 try:
                     partial.unlink()
@@ -358,8 +458,8 @@ def download_from_analysis(
         )
 
     candidates: list[Path] = []
-    for path in download_dir.glob(f"{name}.*"):
-        if not path.is_file() or path.suffix.lower() in {".part", ".ytdl", ".tmp", ".temp"}:
+    for path in _files_with_stem(download_dir, name):
+        if path.suffix.lower() in {".part", ".ytdl", ".tmp", ".temp"}:
             continue
         try:
             if path.stat().st_mtime >= started_at - 2:
