@@ -18,6 +18,7 @@ class SettingsNormalizationTests(unittest.TestCase):
         self.assertEqual(settings["video_quality"], "720p")
         self.assertEqual(settings["audio_format"], "MP3")
         self.assertEqual(settings["audio_quality"], "192")
+        self.assertEqual(settings["max_concurrent_downloads"], 6)
         self.assertTrue(settings["auto_analyze_links"])
         self.assertTrue(settings["confirm_before_exit"])
 
@@ -34,6 +35,7 @@ class SettingsNormalizationTests(unittest.TestCase):
                 "open_editor_after_download": "false",
                 "confirm_before_exit": 0,
                 "snooze_until": "not-a-number",
+                "max_concurrent_downloads": "bad",
             }
         )
         self.assertEqual(settings["default_mode"], "Video")
@@ -46,6 +48,12 @@ class SettingsNormalizationTests(unittest.TestCase):
         self.assertFalse(settings["open_editor_after_download"])
         self.assertTrue(settings["confirm_before_exit"])
         self.assertEqual(settings["snooze_until"], 0)
+        self.assertEqual(settings["max_concurrent_downloads"], 6)
+
+    def test_download_limits_are_normalized(self) -> None:
+        self.assertEqual(normalize_settings({"max_concurrent_downloads": 0})["max_concurrent_downloads"], 1)
+        self.assertEqual(normalize_settings({"max_concurrent_downloads": 99})["max_concurrent_downloads"], 10)
+        self.assertEqual(normalize_settings({"max_concurrent_downloads": "8"})["max_concurrent_downloads"], 8)
 
     def test_valid_preferences_are_preserved(self) -> None:
         settings = normalize_settings(
