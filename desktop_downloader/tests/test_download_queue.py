@@ -30,6 +30,32 @@ class DownloadQueueTests(unittest.TestCase):
         self.assertEqual(queue.running_count(), 3)
         self.assertEqual(queue.queued_count(), 1)
 
+    def test_configurable_limit_starts_six_and_holds_remaining_jobs(self) -> None:
+        queue = DownloadQueue(max_concurrent=6)
+        requests = [
+            queue.enqueue({"url": f"https://example.com/{index}"})
+            for index in range(10)
+        ]
+        self.assertEqual(len(queue.start_available()), 6)
+        self.assertEqual(queue.queued_count(), 4)
+        queue.complete(requests[0].id)
+        self.assertEqual(len(queue.start_available()), 1)
+
+    def test_concurrent_limit_is_safely_capped_at_ten(self) -> None:
+        queue = DownloadQueue(max_concurrent=50)
+        self.assertEqual(queue.max_concurrent, 10)
+        self.assertEqual(DownloadQueue(max_concurrent=-5).max_concurrent, 1)
+
+    def test_live_concurrency_change_only_fills_available_slots(self) -> None:
+        queue = DownloadQueue(max_concurrent=2)
+        for index in range(8):
+            queue.enqueue({"url": f"https://example.com/{index}"})
+        self.assertEqual(len(queue.start_available()), 2)
+        queue.max_concurrent = 6
+        self.assertEqual(len(queue.start_available()), 4)
+        self.assertEqual(queue.running_count(), 6)
+        self.assertEqual(len(queue.start_available()), 0)
+
     def test_running_download_can_enter_cancelling_state(self) -> None:
         queue = DownloadQueue(max_concurrent=2)
         request = queue.enqueue({"url": "https://example.com/1", "name": "Video"})
