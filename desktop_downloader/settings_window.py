@@ -55,6 +55,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.video_quality_var = ctk.StringVar(value=str(settings.get("video_quality") or "720p"))
         self.audio_format_var = ctk.StringVar(value=str(settings.get("audio_format") or "MP3"))
         self.audio_quality_var = ctk.StringVar(value=str(settings.get("audio_quality") or "192"))
+        self.max_concurrent_var = ctk.StringVar(value=str(settings.get("max_concurrent_downloads", 6)))
         self.auto_analyze_var = ctk.BooleanVar(value=bool(settings.get("auto_analyze_links", True)))
         self.open_editor_after_var = ctk.BooleanVar(value=bool(settings.get("open_editor_after_download", False)))
         self.confirm_exit_var = ctk.BooleanVar(value=bool(settings.get("confirm_before_exit", True)))
@@ -76,6 +77,7 @@ class SettingsWindow(ctk.CTkToplevel):
             self.video_quality_var,
             self.audio_format_var,
             self.audio_quality_var,
+            self.max_concurrent_var,
             self.auto_analyze_var,
             self.open_editor_after_var,
             self.confirm_exit_var,
@@ -284,6 +286,33 @@ class SettingsWindow(ctk.CTkToplevel):
             button_color=PURPLE,
         ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
 
+        self._section_label(tab, "BATCH DOWNLOAD PERFORMANCE", 5)
+        parallel = ctk.CTkFrame(tab, fg_color=SURFACE_2, corner_radius=10)
+        parallel.grid(row=6, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
+        parallel.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            parallel,
+            text="Simultaneous downloads (1–10)",
+            text_color=TEXT,
+            font=("Segoe UI", 11),
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
+        ctk.CTkOptionMenu(
+            parallel,
+            variable=self.max_concurrent_var,
+            values=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+            width=110,
+            fg_color=SURFACE_3,
+            button_color=PURPLE,
+        ).grid(row=0, column=1, sticky="e", padx=12, pady=(10, 2))
+        ctk.CTkLabel(
+            parallel,
+            text="Default: 6. Higher numbers can cause site rate limits or slower individual downloads.",
+            text_color=MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+            wraplength=580,
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 10))
+
     def _build_updates_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_columnconfigure(0, weight=1)
         self._section_label(tab, "AUTOMATIC UPDATES", 0)
@@ -437,6 +466,7 @@ class SettingsWindow(ctk.CTkToplevel):
                 "video_quality": self.video_quality_var.get(),
                 "audio_format": self.audio_format_var.get(),
                 "audio_quality": self.audio_quality_var.get(),
+                "max_concurrent_downloads": int(self.max_concurrent_var.get()),
                 "auto_analyze_links": bool(self.auto_analyze_var.get()),
                 "open_editor_after_download": bool(self.open_editor_after_var.get()),
                 "confirm_before_exit": bool(self.confirm_exit_var.get()),
