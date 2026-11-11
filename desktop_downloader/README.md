@@ -13,6 +13,26 @@ Downloaded files are saved to:
 
 You can change the save location from Settings.
 
+## v3.11.3 — tray-safe updates and single-instance launch
+
+- Normal window Close continues to hide to the system tray; background downloads
+  remain active, as before.
+- Restart & Update now requests a real app shutdown (including the tray icon)
+  instead of destroying only its window, which prevented the updater from
+  replacing a locked executable.
+- If transfers or queued jobs exist, the app asks before stopping them for an
+  update. Finish important downloads before updating; the desktop queue does not
+  survive a restart.
+- Windows allows only one Media Downloader GUI instance per logged-in session,
+  preventing multiple tray icons after repeated app launches.
+- Each update handoff uses its own updater executable to avoid collisions with
+  earlier failed updater processes; stale copies are cleaned up on later startup.
+- For users of versions 3.11.1/3.11.2 whose auto-update already loops, the
+  *one-time recovery* is to finish active downloads, Quit all old tray icons,
+  then manually run MediaDownloaderSetup.exe (installed mode) or replace the
+  portable EXE using the verified official 3.11.3 release. Subsequent updates
+  can use the fixed Restart & Update flow.
+
 ## v3.11.2 — batch concurrency and useful link diagnostics
 
 - Batch mode now defaults to **6 simultaneous downloads** rather than 3, with a
