@@ -138,6 +138,7 @@ def default_settings() -> dict[str, Any]:
         "video_quality": "720p",
         "audio_format": "MP3",
         "audio_quality": "192",
+        "max_concurrent_downloads": 6,
         "snooze_version": "",
         "snooze_until": 0,
     }
@@ -163,6 +164,12 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
 
     audio_quality = str(settings.get("audio_quality") or "192")
     settings["audio_quality"] = audio_quality if audio_quality in {"320", "256", "192", "128"} else "192"
+
+    try:
+        concurrent = int(settings.get("max_concurrent_downloads", 6))
+    except (TypeError, ValueError, OverflowError):
+        concurrent = 6
+    settings["max_concurrent_downloads"] = max(1, min(10, concurrent))
 
     download_dir = str(settings.get("download_dir") or DEFAULT_DOWNLOAD_DIR).strip()
     settings["download_dir"] = download_dir or str(DEFAULT_DOWNLOAD_DIR)
@@ -281,7 +288,6 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.diagnostics_window: DiagnosticsWindow | None = None
         self.settings_window: SettingsWindow | None = None
         self.history_window: HistoryWindow | None = None
-        self.download_queue = DownloadQueue(max_concurrent=3)
         self.task_state = TaskState.IDLE
 
         self._analysis_counter = 0
@@ -306,6 +312,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self._download_activity_after_id: str | None = None
 
         self.settings = load_settings()
+        self.download_queue = DownloadQueue(max_concurrent=self.settings["max_concurrent_downloads"])
         self.history_store = HistoryStore(HISTORY_FILE)
         self.download_dir = Path(str(self.settings.get("download_dir") or DEFAULT_DOWNLOAD_DIR)).expanduser()
         self.latest_release: ReleaseInfo | None = None
@@ -1771,6 +1778,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         if not save_settings(normalized):
             raise RuntimeError(f"Could not save settings to {CONFIG_FILE}.")
         self.settings = normalized
+        self.download_queue.max_concurrent = normalized["max_concurrent_downloads"]
 
         self.download_dir = download_dir
         self.download_dir_var.set(str(download_dir))
@@ -1785,6 +1793,8 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.save_location_label.configure(text=f"Saving to  {self.download_dir}")
         self._sync_mode(str(normalized["default_mode"]))
         self.batch_page.set_defaults(normalized)
+        # Fill newly available slots immediately when the user raises the limit.
+        self._start_available_downloads()
 
         if not self.latest_release:
             self.update_detail_label.configure(

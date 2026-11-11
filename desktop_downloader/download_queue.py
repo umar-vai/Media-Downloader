@@ -48,9 +48,9 @@ class DownloadRequest:
 class DownloadQueue:
     """Thread-safe queue that can run several pasted-link downloads concurrently."""
 
-    def __init__(self, *, history_limit: int = 120, max_concurrent: int = 3) -> None:
+    def __init__(self, *, history_limit: int = 120, max_concurrent: int = 6) -> None:
         self.history_limit = max(20, int(history_limit))
-        self.max_concurrent = max(1, min(6, int(max_concurrent)))
+        self.max_concurrent = max(1, min(10, int(max_concurrent)))
         self._items: list[DownloadRequest] = []
         self._pending: deque[str] = deque()
         self._active_ids: set[str] = set()

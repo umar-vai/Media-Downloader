@@ -13,6 +13,21 @@ Downloaded files are saved to:
 
 You can change the save location from Settings.
 
+## v3.11.2 — batch concurrency and useful link diagnostics
+
+- Batch mode now defaults to **6 simultaneous downloads** rather than 3, with a
+  selectable **1–10** limit under Settings → Downloads.
+- New slots are filled as soon as the setting increases; reducing it never
+  interrupts an already-running download.
+- Failed page extraction reports a likely cause (rate limit, access restriction,
+  missing stream, expired link, or network failure) instead of only one generic
+  message. The hint is diagnostic, not a guarantee that any particular website
+  supports downloading.
+- 50 URLs may still be queued in one batch. The concurrency limit controls how
+  many workers are active at once, not how many links may be submitted.
+- Large parallel batches can increase HTTP 429 failures. If this happens, lower
+  the setting to 2–3 and retry failed items.
+
 ## Link support
 
 Any valid `http://` or `https://` URL is accepted by the extraction engine. The app tries:

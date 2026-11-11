@@ -69,6 +69,24 @@ def _public_summary(url: str, info: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def extraction_failure_hint(errors: list[str]) -> str:
+    """Explain common extraction failures without exposing raw URLs or session cookies."""
+    joined = " ".join(errors).lower()
+    if any(word in joined for word in ("widevine", "drm protected", "drm-protected", "encrypted media")):
+        return "This media appears DRM-protected; protected streams cannot be downloaded."
+    if any(word in joined for word in ("429", "too many requests", "rate limit", "rate-limit")):
+        return "The website is rate-limiting requests. Reduce simultaneous downloads and retry later."
+    if any(word in joined for word in ("403", "401", "sign in", "login required", "cookies", "unauthorized", "forbidden")):
+        return "The website may require an authorized browser session or is denying access."
+    if any(word in joined for word in ("404", "410 gone", "video unavailable", "video has been removed")):
+        return "The original video URL may be expired, removed, or unavailable."
+    if any(word in joined for word in ("timed out", "timeout", "ssl", "tls", "connection reset", "connection aborted")):
+        return "A connection or TLS failure prevented extraction. Check connectivity and retry."
+    if any(word in joined for word in ("unsupported url", "no video formats", "no playable", "did not observe")):
+        return "The player did not expose a supported media stream. Try a direct, public media URL."
+    return "No supported media stream was detected. The page may require an interactive player."
+
+
 def analyze_url(
     url: str,
     *,
@@ -163,12 +181,14 @@ def analyze_url(
         if is_pornhub_url(url):
             raise RuntimeError(
                 "Could not find a playable stream from this page. "
+                + extraction_failure_hint(errors) + " "
                 "Tried the site extractor, legacy HTTPS transport, installed-browser session cookies, "
                 "and browser media capture. If the video plays in your normal browser, keep that browser "
                 "profile available and Analyze again. DRM-protected streams are not supported."
             )
         raise RuntimeError(
             "Could not find a playable stream from this page. "
+            + extraction_failure_hint(errors) + " "
             "Tried legacy HTTPS, the site/Generic extractor, installed-browser session cookies, "
             "and browser media capture. If the page plays only after selecting an episode/server or "
             "passing a browser challenge, open it once in Chrome/Edge and Analyze again. "
