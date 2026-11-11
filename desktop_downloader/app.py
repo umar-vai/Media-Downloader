@@ -297,6 +297,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.analysis_running = False
 
         self._quitting = False
+        self._update_handoff_started = False
         self.tray: TrayController | None = None
         self._tray_hint_shown = False
         self._tray_status_text = ""
@@ -425,9 +426,10 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 if hidden and self.tray is not None:
                     self.tray.notify(str(item.get("name") or "Download"), "Download complete")
 
-    def _close_app(self) -> None:
+    def _close_app(self, *, for_update: bool = False) -> None:
         if (
-            not self._quitting
+            not for_update
+            and not self._quitting
             and self.tray is not None
             and bool(self.settings.get("close_to_tray", True))
         ):
@@ -436,14 +438,16 @@ class DownloaderApp(UIMixin, ctk.CTk):
         active_downloads = self.download_queue.queued_count() + self.download_queue.running_count()
         active = self.analysis_running or self.update_downloading or active_downloads > 0
         if active:
-            should_confirm = bool(self.settings.get("confirm_before_exit", True))
+            should_confirm = not for_update and bool(self.settings.get("confirm_before_exit", True))
             if should_confirm and not messagebox.askyesno(
                 APP_NAME,
                 "Tasks are still running. Cancel them and close Media Downloader?",
                 parent=self,
             ):
+                self._quitting = False
                 return
 
+        self._quitting = True
         if self.analysis_cancel_event is not None:
             self.analysis_cancel_event.set()
         for event in list(self.download_cancel_events.values()):
@@ -1518,6 +1522,8 @@ class DownloaderApp(UIMixin, ctk.CTk):
         append_update_log("Update download cancelled.")
 
     def _launch_updater(self) -> None:
+        if self._update_handoff_started:
+            return
         if not self.latest_release or not self.downloaded_update:
             return
         if not is_frozen_windows_app():
@@ -1527,6 +1533,22 @@ class DownloaderApp(UIMixin, ctk.CTk):
             )
             return
 
+        active_downloads = self.download_queue.queued_count() + self.download_queue.running_count()
+        paused_downloads = sum(
+            item.get("status") == "paused" for item in self.download_queue.snapshot()
+        )
+        if active_downloads or paused_downloads or self.analysis_running:
+            if not messagebox.askyesno(
+                APP_NAME,
+                "Installing the update requires exiting Media Downloader completely, "
+                "including the system tray. Active downloads will be stopped and "
+                "queued/paused jobs will not be kept after restart.\n\n"
+                f"Active/queued: {active_downloads}  -  Paused: {paused_downloads}\n\n"
+                "Finish important downloads first, or choose Yes to update now.",
+                parent=self,
+            ):
+                return
+
         bundled = get_bundled_updater_path()
         if not bundled:
             messagebox.showerror(APP_NAME, "The updater component is missing from this build.")
@@ -1535,7 +1557,8 @@ class DownloaderApp(UIMixin, ctk.CTk):
 
         try:
             UPDATE_DIR.mkdir(parents=True, exist_ok=True)
-            updater_copy = UPDATE_DIR / "MediaDownloaderUpdater.exe"
+            # Avoid clobbering a previous still-running updater process.
+            updater_copy = UPDATE_DIR / f"MediaDownloaderUpdater-run-{uuid.uuid4().hex}.exe"
             shutil.copy2(bundled, updater_copy)
             command = [
                 str(updater_copy),
@@ -1556,11 +1579,15 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 command.append("--installer")
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             subprocess.Popen(command, close_fds=True, creationflags=creationflags)
+            self._update_handoff_started = True
+            self.update_action_button.configure(state="disabled")
             mode = "installer" if is_installed_mode() else "portable"
             append_update_log(f"Updater launched for version {self.latest_release.version} in {mode} mode.")
             self.update_detail_label.configure(text="Restarting to complete the update…")
-            self.after(250, self.destroy)
+            # Standard quit also stops the tray event loop, unlike destroy().
+            self.after(250, lambda: self._close_app(for_update=True))
         except Exception as exc:
+            self._update_handoff_started = False
             append_update_log(f"Could not launch updater: {exc}")
             messagebox.showerror(
                 APP_NAME,
