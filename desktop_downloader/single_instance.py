@@ -31,6 +31,8 @@ def claim_single_instance() -> bool:
         # Never make a desktop application unusable due to unusual mutex errors.
         return True
     if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
         kernel32.CloseHandle(ctypes.c_void_p(handle))
         return False
     _mutex_handle = handle
