@@ -30,6 +30,7 @@ from batch_download import batch_filename, parse_batch_urls
 from app_ui import UIMixin
 import power
 from tray import TrayController
+from single_instance import cleanup_stale_updater_copies
 import ui_kit as ui
 from download_queue import DownloadQueue, DownloadRequest
 from history_store import HistoryStore, make_history_entry
@@ -313,6 +314,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self._download_activity_after_id: str | None = None
 
         self.settings = load_settings()
+        cleanup_stale_updater_copies(UPDATE_DIR)
         self.download_queue = DownloadQueue(max_concurrent=self.settings["max_concurrent_downloads"])
         self.history_store = HistoryStore(HISTORY_FILE)
         self.download_dir = Path(str(self.settings.get("download_dir") or DEFAULT_DOWNLOAD_DIR)).expanduser()
