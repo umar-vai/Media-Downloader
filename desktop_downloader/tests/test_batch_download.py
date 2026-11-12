@@ -25,7 +25,7 @@ class DesktopBatchTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 parse_batch_urls(bad)
         with self.assertRaises(ValueError):
-            parse_batch_urls("\n".join(f"https://example.com/{i}" for i in range(51)))
+            parse_batch_urls("\n".join(f"https://example.com/{i}" for i in range(301)))
 
     def test_batch_filename_is_plain_sanitized_title(self) -> None:
         name = batch_filename("12345678abcdef", 1, "Same: Video.mp4")
@@ -88,7 +88,7 @@ class DesktopBatchTests(unittest.TestCase):
 
     def test_reject_queue_over_capacity_without_partial_enqueue(self) -> None:
         queue = DownloadQueue(max_concurrent=3)
-        for i in range(120):
+        for i in range(580):
             queue.enqueue({"url": f"https://example.com/{i}"})
         before = len(queue.snapshot())
         with self.assertRaises(ValueError):

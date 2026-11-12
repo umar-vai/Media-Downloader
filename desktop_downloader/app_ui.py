@@ -199,7 +199,7 @@ class UIMixin:
         self.quality_label = ui.Label(p, "VIDEO QUALITY", fg=ui.MUTED, size=9, bold=True)
         self.video_quality = ui.Select(p, ["360p", "480p", "720p", "1080p", "Best available"], self.video_quality_var)
         self.audio_format_label = ui.Label(p, "AUDIO FORMAT", fg=ui.MUTED, size=9, bold=True)
-        self.audio_format = ui.Select(p, ["MP3", "M4A"], self.audio_format_var)
+        self.audio_format = ui.Select(p, ["MP3", "M4A", "FLAC", "OPUS", "WAV"], self.audio_format_var)
         self.audio_quality_label = ui.Label(p, "BITRATE (KBPS)", fg=ui.MUTED, size=9, bold=True)
         self.audio_quality = ui.Select(p, ["128", "192", "256", "320"], self.audio_quality_var)
         self.output_hint = ui.Label(p, "MP4 video • FFmpeg merge when needed", fg=ui.FAINT, size=10)
@@ -215,6 +215,7 @@ class UIMixin:
         self.view_all_button = ui.Btn(p, "View all", lambda: self.show_page("queue"), style="secondary", size=10)
         self.recent_list = ActivityList(p, on_cancel=self.cancel_download, on_retry=self.retry_download,
                                        on_pause=self.pause_download, on_resume=self.resume_download,
+                                        on_details=self.show_failure_details,
                                         empty_text="Nothing downloaded yet — paste a link above.")
         self.status_label.show(False)
 
@@ -315,6 +316,7 @@ class UIMixin:
             on_retry=self.retry_download,
             on_pause=self.pause_download,
             on_resume=self.resume_download,
+            on_details=self.show_failure_details,
             get_snapshots=self.download_queue.snapshot,
             settings=self.settings,
         )
@@ -342,6 +344,7 @@ class UIMixin:
         self.queue_card = ui.Card(p)
         self.queue_list = ActivityList(p, on_cancel=self.cancel_download, on_retry=self.retry_download,
                                        on_pause=self.pause_download, on_resume=self.resume_download,
+                                       on_details=self.show_failure_details,
                                        empty_text="No downloads yet. Analyze a link and press Download.")
 
     def _layout_queue(self, w: int, h: int) -> int:

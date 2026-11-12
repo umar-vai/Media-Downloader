@@ -39,6 +39,7 @@ class TraySafeUpdateTests(unittest.TestCase):
             destroy=Mock(),
             show_from_tray=Mock(),
             _close_app=Mock(),
+            _stop_integrations=Mock(),
             latest_release=SimpleNamespace(version="3.11.3"),
             downloaded_update=Path("downloaded-update.exe"),
             update_action_button=Mock(),

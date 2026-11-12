@@ -79,6 +79,13 @@ jobs:
           python -m py_compile desktop_downloader/shared_engine.py
           python -m py_compile desktop_downloader/update_manager.py
           python -m py_compile desktop_downloader/updater.py
+          python -m py_compile desktop_downloader/download_rules.py
+          python -m py_compile desktop_downloader/hotkey.py
+          python -m py_compile desktop_downloader/extension_server.py
+          python -m py_compile desktop_downloader/browser_extension.py
+          python -m py_compile desktop_downloader/failure_dialog.py
+          python -m py_compile desktop_downloader/command_palette.py
+          python -m py_compile media_core/options.py
           python -m py_compile desktop_downloader/version.py
           python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from version import APP_VERSION; parts=APP_VERSION.split('.'); assert len(parts)==3 and all(part.isdigit() for part in parts), APP_VERSION; print('APP_VERSION=' + APP_VERSION)"
           python -m unittest discover -s desktop_downloader/tests -v

@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -38,7 +39,13 @@ from history_window import HistoryWindow
 from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
 from media_sources import detect_platform, platform_name
-from shared_engine import Cancelled as SharedCancelled, analyze_url as shared_analyze_url, download_from_analysis as shared_download_from_analysis
+from shared_engine import Cancelled as SharedCancelled, analyze_url as shared_analyze_url, download_from_analysis as shared_download_from_analysis, engine_options
+from batch_download import parse_batch_urls_detailed
+from command_palette import CommandPalette
+from download_rules import parse_rules, resolve_target
+from extension_server import ExtensionServer, purge_old_cookie_files, write_cookie_file
+from failure_dialog import FailureDialog
+from hotkey import GlobalHotkey, MOD_ALT, MOD_CONTROL
 from settings_window import SettingsWindow
 from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_installer_release, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
@@ -46,6 +53,9 @@ from version import APP_VERSION
 APP_NAME = "Media Downloader"
 APP_USER_MODEL_ID = "TeamFahad.MediaDownloader"
 MAX_AUTO_RETRIES = 3
+AUDIO_FORMATS = {"MP3", "M4A", "FLAC", "OPUS", "WAV"}
+# Batch auto-retry never loops on errors that can only be fixed by the user.
+_NO_AUTO_RETRY = re.compile(r"drm.protected|widevine|valid http|no space left", re.IGNORECASE)
 _PERMANENT_ERRORS = re.compile(
     r"unsupported url|private video|sign in|log in|login|members.only|removed|copyright|"
     r"not available in your country|age.restricted|video unavailable|does not exist|no space left",
@@ -75,6 +85,7 @@ CONFIG_FILE = CONFIG_DIR / "settings.json"
 HISTORY_FILE = CONFIG_DIR / "history.json"
 LEGACY_CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / ("Team" + "Fahad" + "Downloader")
 LEGACY_CONFIG_FILE = LEGACY_CONFIG_DIR / "settings.json"
+EXT_COOKIE_DIR = CONFIG_DIR / "ext_cookies"
 UPDATE_DIR = Path(os.getenv("LOCALAPPDATA") or CONFIG_DIR) / "MediaDownloader" / "updates"
 UPDATE_RESULT_FILE = CONFIG_DIR / "update-result.json"
 UPDATE_LOG_FILE = CONFIG_DIR / "update.log"
@@ -140,6 +151,19 @@ def default_settings() -> dict[str, Any]:
         "audio_format": "MP3",
         "audio_quality": "192",
         "max_concurrent_downloads": 6,
+        "skip_existing": True,
+        "organize_by_site": False,
+        "fast_mode": True,
+        "embed_metadata": True,
+        "embed_thumbnail": False,
+        "subtitles": "Off",
+        "subtitle_langs": "en",
+        "folder_rules": "",
+        "cookies_file": "",
+        "cookies_browser": "None",
+        "clipboard_hotkey": True,
+        "extension_enabled": True,
+        "extension_token": "",
         "snooze_version": "",
         "snooze_until": 0,
     }
@@ -161,7 +185,15 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
     )
 
     audio_format = str(settings.get("audio_format") or "MP3").upper()
-    settings["audio_format"] = audio_format if audio_format in {"MP3", "M4A"} else "MP3"
+    settings["audio_format"] = audio_format if audio_format in AUDIO_FORMATS else "MP3"
+
+    subtitles = str(settings.get("subtitles") or "Off")
+    settings["subtitles"] = subtitles if subtitles in {"Off", "Sidecar file", "Embed in video"} else "Off"
+    settings["subtitle_langs"] = str(settings.get("subtitle_langs") or "en").strip() or "en"
+    browser = str(settings.get("cookies_browser") or "None")
+    settings["cookies_browser"] = browser if browser in {"None", "Firefox", "Chrome", "Edge", "Brave"} else "None"
+    for key in ("folder_rules", "cookies_file", "extension_token"):
+        settings[key] = str(settings.get(key) or "")
 
     audio_quality = str(settings.get("audio_quality") or "192")
     settings["audio_quality"] = audio_quality if audio_quality in {"320", "256", "192", "128"} else "192"
@@ -182,6 +214,13 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         ("open_editor_after_download", False),
         ("confirm_before_exit", True),
         ("close_to_tray", True),
+        ("skip_existing", True),
+        ("organize_by_site", False),
+        ("fast_mode", True),
+        ("embed_metadata", True),
+        ("embed_thumbnail", False),
+        ("clipboard_hotkey", True),
+        ("extension_enabled", True),
     ):
         value = settings.get(key, fallback)
         settings[key] = value if isinstance(value, bool) else fallback
@@ -314,6 +353,13 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self._download_activity_after_id: str | None = None
 
         self.settings = load_settings()
+        self._hotkeys: list[GlobalHotkey] = []
+        self.extension_server: ExtensionServer | None = None
+        if not self.settings.get("extension_token"):
+            self.settings["extension_token"] = secrets.token_urlsafe(24)
+            save_settings(self.settings)
+        self._configure_engine()
+        purge_old_cookie_files(EXT_COOKIE_DIR)
         cleanup_stale_updater_copies(UPDATE_DIR)
         self.download_queue = DownloadQueue(max_concurrent=self.settings["max_concurrent_downloads"])
         self.history_store = HistoryStore(HISTORY_FILE)
@@ -343,6 +389,9 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self._sync_recent_file()
         LOGGER.info("App started version=%s executable=%s", APP_VERSION, sys.executable)
         self.after(120, self._drain_events)
+        self.after(900, self._start_integrations)
+        self.bind_all("<Control-k>", lambda _e: self.open_command_palette())
+        self.bind_all("<Control-K>", lambda _e: self.open_command_palette())
         self.after(700, lambda: self._show_update_result(attempt=0))
         if self.auto_check_updates_var.get():
             self.after(1500, lambda: self.check_for_updates(manual=False))
@@ -464,6 +513,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
             self.update_downloading,
         )
         power.keep_system_awake(False)
+        self._stop_integrations()
         if self.tray is not None:
             self.tray.stop()
         self.destroy()
@@ -750,7 +800,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.show_page("batch")
 
     def _enqueue_batch_downloads(
-        self, text: str, options: dict[str, str]
+        self, text: str, options: dict[str, str], extra: dict[str, Any] | None = None
     ) -> tuple[str, int, int]:
         urls, duplicates = parse_batch_urls(text)
         mode = str(options.get("mode") or "Video")
@@ -761,24 +811,34 @@ class DownloaderApp(UIMixin, ctk.CTk):
             raise ValueError("Select Video or Audio.")
         if quality not in {"Best available", "1080p", "720p", "480p", "360p"}:
             raise ValueError("Invalid video quality.")
-        if audio_format not in {"MP3", "M4A"} or bitrate not in {"128", "192", "256", "320"}:
+        if audio_format not in AUDIO_FORMATS or bitrate not in {"128", "192", "256", "320"}:
             raise ValueError("Invalid audio output settings.")
 
         self.download_dir.mkdir(parents=True, exist_ok=True)
         batch_id = uuid.uuid4().hex
         payloads = []
+        rules = parse_rules(str(self.settings.get("folder_rules") or ""))
         for index, url in enumerate(urls, 1):
+            target_dir, url_quality = resolve_target(
+                url,
+                rules=rules,
+                default_dir=self.download_dir,
+                default_quality=quality,
+                organize_by_site=bool(self.settings.get("organize_by_site", False)),
+                platform=platform_name(url),
+            )
             request_settings = {
+                **(extra or {}),
                 "batch_id": batch_id,
                 "batch_index": index,
                 "mode": mode,
-                "video_quality": quality,
+                "video_quality": url_quality,
                 "audio_format": audio_format.lower(),
                 "audio_quality": bitrate,
                 "source_url": url,
                 "history_title": f"Batch item {index}",
                 "history_platform": platform_name(url),
-                "history_quality": quality if mode == "Video" else f"{audio_format} {bitrate} kbps",
+                "history_quality": url_quality if mode == "Video" else f"{audio_format} {bitrate} kbps",
                 "history_duration": 0,
             }
             payloads.append({
@@ -786,7 +846,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 "name": f"Link {index} • {urlsplit(url).hostname or 'media'}",
                 "batch_id": batch_id,
                 "batch_index": index,
-                "download_dir": str(self.download_dir),
+                "download_dir": str(target_dir),
                 "request_settings": request_settings,
                 "cached_info": None,
             })
@@ -820,6 +880,14 @@ class DownloaderApp(UIMixin, ctk.CTk):
 
         name = self._available_download_name(self.name_var.get())
         info = dict(self.current_info)
+        target_dir, rule_quality = resolve_target(
+            url,
+            rules=parse_rules(str(self.settings.get("folder_rules") or "")),
+            default_dir=self.download_dir,
+            default_quality=self.video_quality_var.get(),
+            organize_by_site=bool(self.settings.get("organize_by_site", False)),
+            platform=platform_name(url),
+        )
         try:
             history_duration = max(0, int(float(info.get("duration") or 0)))
         except (TypeError, ValueError):
@@ -828,7 +896,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         mode = self.mode_var.get()
         audio_format = self.audio_format_var.get()
         audio_quality = self.audio_quality_var.get()
-        video_quality = self.video_quality_var.get()
+        video_quality = rule_quality
 
         request_settings = {
             "mode": mode,
@@ -851,7 +919,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
             {
                 "url": url,
                 "name": name,
-                "download_dir": str(self.download_dir),
+                "download_dir": str(target_dir),
                 "request_settings": request_settings,
                 "cached_info": copy.deepcopy(info),
             },
@@ -880,6 +948,10 @@ class DownloaderApp(UIMixin, ctk.CTk):
         request_settings: dict[str, Any],
         cached_info: dict[str, Any] | None = None,
     ) -> None:
+        engine_options.set_request_context(
+            cookiefile=str(request_settings.get("cookiefile") or ""),
+            referer=str(request_settings.get("referer") or ""),
+        )
         try:
             if request_settings.get("batch_id"):
                 if cancel_event.is_set():
@@ -977,6 +1049,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 LOGGER.exception("Download request %s failed", request_id)
                 self._put_download_event("download_error", request_id, str(exc))
         finally:
+            engine_options.clear_request_context()
             self._put_download_event("download_finished", request_id)
 
     def _drain_events(self) -> None:
@@ -1071,6 +1144,15 @@ class DownloaderApp(UIMixin, ctk.CTk):
 
                     continue
 
+                if kind == "external_download":
+                    if isinstance(payload, dict):
+                        self._handle_external_download(payload)
+                    continue
+                if kind == "hotkey_clipboard":
+                    if isinstance(payload, dict):
+                        self._download_clipboard_link(str(payload.get("mode") or "Video"))
+                    continue
+
                 if kind.startswith("download_"):
                     if not isinstance(payload, dict):
                         continue
@@ -1091,6 +1173,12 @@ class DownloaderApp(UIMixin, ctk.CTk):
                         completed_path = Path(str(detail.get("path") or ""))
                         edit_after = bool((request_state or {}).get("edit_after_download"))
                         self.download_queue.complete(request_id, detail=completed_path.name, path=str(completed_path))
+                        cookie_path = str(((request_state or {}).get("cookiefile")) or "")
+                        if cookie_path:
+                            try:
+                                Path(cookie_path).unlink(missing_ok=True)
+                            except OSError:
+                                pass
                         self.last_file = completed_path
                         self.task_state = TaskState.DOWNLOADED
                         self._set_status(f"Download completed: {completed_path.name}", "success")
@@ -1133,9 +1221,19 @@ class DownloaderApp(UIMixin, ctk.CTk):
                         self._schedule_download_activity_refresh(30)
 
                     elif kind == "download_error":
-                        self.download_queue.fail(request_id, str(data or "Download failed"))
-                        self.task_state = TaskState.ERROR
-                        self._set_status("A download failed. See Download Activity for details.", "error")
+                        delay = (
+                            None
+                            if _NO_AUTO_RETRY.search(str(data or ""))
+                            else self.download_queue.schedule_auto_retry(request_id, str(data or ""))
+                        )
+                        if delay is not None:
+                            LOGGER.info("Batch item failed, auto-retry in %ss request=%s: %s", delay, request_id, data)
+                            self.after(int(delay * 1000), lambda rid=request_id: self._release_auto_retry(rid))
+                            self._set_status("A batch link failed — retrying automatically.", "ready")
+                        else:
+                            self.download_queue.fail(request_id, str(data or "Download failed"))
+                            self.task_state = TaskState.ERROR
+                            self._set_status("A download failed. See Download Activity for details.", "error")
                         self._schedule_download_activity_refresh(30)
 
                     elif kind == "download_cancelled":
@@ -1605,6 +1703,187 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.top_update_button.grid_remove()
         self.update_detail_label.configure(text="Update reminder snoozed for 24 hours.")
 
+    # ---- integrations: engine options, hotkeys, browser extension, palette ----------
+    def _configure_engine(self) -> None:
+        s = self.settings
+        engine_options.configure(
+            cookies_file=str(s.get("cookies_file") or ""),
+            cookies_browser="" if s.get("cookies_browser") == "None" else str(s.get("cookies_browser") or ""),
+            skip_existing=bool(s.get("skip_existing", True)),
+            fast_mode=bool(s.get("fast_mode", True)),
+            embed_metadata=bool(s.get("embed_metadata", True)),
+            embed_thumbnail=bool(s.get("embed_thumbnail", False)),
+            subtitles=str(s.get("subtitles") or "Off"),
+            subtitle_langs=str(s.get("subtitle_langs") or "en"),
+        )
+
+    def _start_integrations(self) -> None:
+        self._sync_hotkeys()
+        if self.extension_server is None and self.settings.get("extension_enabled", True):
+            server = ExtensionServer(
+                token=str(self.settings.get("extension_token") or ""),
+                on_download=lambda data: bool(self.events.put(("external_download", dict(data))) or True),
+                app_version=APP_VERSION,
+            )
+            if server.start():
+                self.extension_server = server
+                LOGGER.info("Browser extension server listening on 127.0.0.1:%s", server.port)
+            else:
+                LOGGER.warning("Browser extension server could not bind a port")
+
+    def _sync_hotkeys(self) -> None:
+        wanted = bool(self.settings.get("clipboard_hotkey", True))
+        if wanted and not self._hotkeys:
+            for vk, mode, ident in ((0x44, "Video", 0x4D44), (0x4D, "Audio", 0x4D4D)):
+                hotkey = GlobalHotkey(
+                    lambda m=mode: self.events.put(("hotkey_clipboard", {"mode": m})),
+                    modifiers=MOD_CONTROL | MOD_ALT, vk=vk, hotkey_id=ident,
+                )
+                if hotkey.start():
+                    self._hotkeys.append(hotkey)
+                else:
+                    LOGGER.warning("Global hotkey %s unavailable (already in use?)", mode)
+        elif not wanted and self._hotkeys:
+            for hotkey in self._hotkeys:
+                hotkey.stop()
+            self._hotkeys = []
+
+    def _stop_integrations(self) -> None:
+        for hotkey in self._hotkeys:
+            hotkey.stop()
+        self._hotkeys = []
+        if self.extension_server is not None:
+            self.extension_server.stop()
+            self.extension_server = None
+
+    def _default_batch_options(self, mode: str | None = None) -> dict[str, str]:
+        return {
+            "mode": mode or str(self.settings.get("default_mode") or "Video"),
+            "video_quality": str(self.settings.get("video_quality") or "720p"),
+            "audio_format": str(self.settings.get("audio_format") or "MP3"),
+            "audio_quality": str(self.settings.get("audio_quality") or "192"),
+        }
+
+    def _download_clipboard_link(self, mode: str | None = None) -> None:
+        try:
+            text = self.clipboard_get()
+        except Exception:
+            text = ""
+        try:
+            urls, _dupes, _bad = parse_batch_urls_detailed(text)
+        except ValueError:
+            if self.tray is not None:
+                self.tray.notify("No link found in the clipboard.", "Media Downloader")
+            self._set_status("No link found in the clipboard.", "error")
+            return
+        try:
+            self._enqueue_batch_downloads("\n".join(urls), self._default_batch_options(mode))
+        except (ValueError, OSError) as exc:
+            self._set_status(str(exc), "error")
+            return
+        message = f"Added {len(urls)} link{'s' if len(urls) != 1 else ''} from the clipboard"
+        if self.tray is not None:
+            self.tray.notify(message, "Media Downloader")
+
+    def _handle_external_download(self, data: dict[str, Any]) -> None:
+        url = str(data.get("url") or "").strip()
+        extra: dict[str, Any] = {}
+        referer = str(data.get("referer") or "").strip()
+        if referer.startswith(("http://", "https://")):
+            extra["referer"] = referer
+        cookies = data.get("cookies")
+        if isinstance(cookies, list) and cookies:
+            try:
+                path = write_cookie_file(EXT_COOKIE_DIR, uuid.uuid4().hex, cookies[:2000])
+            except OSError:
+                path = None
+            if path is not None:
+                extra["cookiefile"] = str(path)
+        try:
+            self._enqueue_batch_downloads(url, self._default_batch_options(), extra=extra)
+        except (ValueError, OSError) as exc:
+            LOGGER.warning("Extension link rejected: %s", exc)
+            return
+        if self.tray is not None:
+            self.tray.notify("Link added from the browser.", "Media Downloader")
+
+    def export_browser_extension(self) -> None:
+        from browser_extension import export_extension
+
+        target = Path.home() / "Documents" / "MediaDownloader-Browser-Extension"
+        try:
+            export_extension(target)
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"Could not export the extension.\n\n{exc}")
+            return
+        try:
+            os.startfile(str(target))  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        messagebox.showinfo(
+            APP_NAME,
+            f"Extension files exported to:\n{target}\n\nLoad that folder as an unpacked extension in your browser, "
+            "then paste the pairing token in the extension options.",
+        )
+
+    def open_command_palette(self) -> None:
+        existing = getattr(self, "_palette", None)
+        try:
+            if existing is not None and existing.winfo_exists():
+                existing.destroy()
+        except Exception:
+            pass
+        commands: list[tuple[str, Any]] = [
+            ("Go to Download", lambda: self.show_page("download")),
+            ("Go to Batch", lambda: self.show_page("batch")),
+            ("Go to Queue", lambda: self.show_page("queue")),
+            ("Go to Updates", lambda: self.show_page("updates")),
+            ("Download link from clipboard (video)", lambda: self._download_clipboard_link("Video")),
+            ("Download link from clipboard (audio only)", lambda: self._download_clipboard_link("Audio")),
+            ("Pause all downloads", self.pause_all_downloads),
+            ("Resume all downloads", self.resume_all_downloads),
+            ("Retry all failed downloads", self.retry_all_failed),
+            ("Clear finished downloads", self.clear_finished_downloads),
+            ("Cancel all downloads", self.cancel_all_downloads),
+            ("Open download folder", self.open_download_folder),
+            ("Open media editor", self.open_editor),
+            ("Open history", self.open_history),
+            ("Open settings", self.open_settings),
+            ("Export browser extension", self.export_browser_extension),
+            ("Check for updates", lambda: self.check_for_updates(manual=True)),
+        ]
+        self._palette = CommandPalette(self, commands)
+
+    def retry_all_failed(self) -> None:
+        for item in self.download_queue.snapshot():
+            if item.get("status") == "failed":
+                self.download_queue.retry(str(item["id"]))
+        self._schedule_download_activity_refresh(20)
+        self._start_available_downloads()
+
+    def show_failure_details(self, request_id: str) -> None:
+        item = self.download_queue.get(request_id)
+        if item is None:
+            return
+        FailureDialog(self, item, on_retry=self._retry_with_url)
+
+    def _retry_with_url(self, request_id: str, url: str) -> None:
+        if not self.download_queue.update_url(request_id, url):
+            self._set_status("This download can no longer be edited.", "error")
+            return
+        state = self.download_queue.get(request_id) or {}
+        if state.get("status") == "queued":
+            self.download_queue.release_auto_retry(request_id)
+            self._schedule_download_activity_refresh(20)
+            self._start_available_downloads()
+        else:
+            self.retry_download(request_id)
+
+    def _release_auto_retry(self, request_id: str) -> None:
+        if self.download_queue.release_auto_retry(request_id):
+            self._schedule_download_activity_refresh(20)
+            self._start_available_downloads()
+
     def _start_available_downloads(self) -> None:
         for request in self.download_queue.start_available():
             payload = dict(request.payload or {})
@@ -1769,6 +2048,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 on_open_diagnostics=self.open_diagnostics,
                 on_open_log=self.open_app_log,
                 on_open_release=self.open_release_page,
+                on_export_extension=self.export_browser_extension,
             )
             self.settings_window.bind(
                 "<Destroy>",
@@ -1808,6 +2088,8 @@ class DownloaderApp(UIMixin, ctk.CTk):
             raise RuntimeError(f"Could not save settings to {CONFIG_FILE}.")
         self.settings = normalized
         self.download_queue.max_concurrent = normalized["max_concurrent_downloads"]
+        self._configure_engine()
+        self._sync_hotkeys()
 
         self.download_dir = download_dir
         self.download_dir_var.set(str(download_dir))

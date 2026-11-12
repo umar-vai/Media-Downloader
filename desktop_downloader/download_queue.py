@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 import uuid
@@ -9,6 +10,11 @@ from typing import Any
 
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+MAX_BATCH_ITEMS = 300
+MAX_OUTSTANDING = 600
+_RATE_LIMIT_RE = re.compile(r"429|too many requests|rate.?limit", re.IGNORECASE)
+RATE_LIMIT_COOLDOWN = 120.0
+RATE_LIMIT_CONCURRENCY = 2
 
 
 @dataclass
@@ -37,6 +43,9 @@ class DownloadRequest:
             "progress": self.progress,
             "detail": self.detail,
             "error": self.error,
+            "last_error": str(self.payload.get("last_error") or self.error or ""),
+            "auto_attempts": int(self.payload.get("auto_attempts") or 0),
+            "cookiefile": str((self.payload.get("request_settings") or {}).get("cookiefile") or ""),
             "result_path": self.result_path,
             "position": position,
             "created_at": self.created_at,
@@ -55,6 +64,35 @@ class DownloadQueue:
         self._pending: deque[str] = deque()
         self._active_ids: set[str] = set()
         self._lock = threading.RLock()
+        self._throttle_until = 0.0
+
+    def note_error(self, error: str) -> None:
+        """Slow the queue down for a while when a site answers 'too many requests'."""
+        if _RATE_LIMIT_RE.search(str(error or "")):
+            with self._lock:
+                self._throttle_until = time.time() + RATE_LIMIT_COOLDOWN
+
+    @property
+    def throttled(self) -> bool:
+        return time.time() < self._throttle_until
+
+    def effective_concurrency(self) -> int:
+        return min(self.max_concurrent, RATE_LIMIT_CONCURRENCY) if self.throttled else self.max_concurrent
+
+    def update_url(self, request_id: str, url: str) -> bool:
+        """Replace the link of a failed/queued item (used by 'edit and retry')."""
+        url = str(url or "").strip()
+        with self._lock:
+            request = self._find_locked(request_id)
+            if request is None or request.status in {"running", "cancelling"} or not url:
+                return False
+            if url != str(request.payload.get("url") or ""):
+                request.payload["url"] = url
+                request.payload["cached_info"] = None
+                settings = request.payload.get("request_settings")
+                if isinstance(settings, dict):
+                    settings["source_url"] = url
+            return True
 
     def enqueue(
         self,
@@ -75,12 +113,12 @@ class DownloadQueue:
 
     def enqueue_batch(self, payloads: list[dict[str, Any]]) -> list[DownloadRequest]:
         """Enqueue a batch atomically, preserving submitted order."""
-        if not payloads or len(payloads) > 50:
-            raise ValueError("Batch must contain between 1 and 50 items.")
+        if not payloads or len(payloads) > MAX_BATCH_ITEMS:
+            raise ValueError(f"Batch must contain between 1 and {MAX_BATCH_ITEMS} items.")
         with self._lock:
             outstanding = self.queued_count() + self.running_count()
-            if outstanding + len(payloads) > 150:
-                raise ValueError("Download queue is full (150 pending/running items maximum).")
+            if outstanding + len(payloads) > MAX_OUTSTANDING:
+                raise ValueError(f"Download queue is full ({MAX_OUTSTANDING} pending/running items maximum).")
             requests = [self.enqueue(payload, edit_after_download=False) for payload in payloads]
         return requests
 
@@ -93,7 +131,7 @@ class DownloadQueue:
     def start_available(self) -> list[DownloadRequest]:
         started: list[DownloadRequest] = []
         with self._lock:
-            while self._pending and len(self._active_ids) < self.max_concurrent:
+            while self._pending and len(self._active_ids) < self.effective_concurrency():
                 request_id = self._pending.popleft()
                 request = self._find_locked(request_id)
                 if request is None or request.status != "queued":
@@ -152,7 +190,47 @@ class DownloadQueue:
 
     def fail(self, request_id: str, error: str) -> None:
         with self._lock:
+            request = self._find_locked(request_id)
+            if request is not None:
+                request.payload["last_error"] = str(error or "")
+            self.note_error(error)
             self._finish_locked(request_id, "failed", error=error, detail="Download failed")
+
+    def schedule_auto_retry(self, request_id: str, error: str) -> float | None:
+        """Keep a failed batch item alive as 'queued' and return the backoff delay in seconds.
+
+        Returns None when the item is not a batch item (or is gone), so the caller marks it failed.
+        The item is not in the pending deque until `release_auto_retry` is called.
+        """
+        with self._lock:
+            request = self._find_locked(request_id)
+            if request is None or not request.payload.get("batch_id"):
+                return None
+            attempts = int(request.payload.get("auto_attempts") or 0) + 1
+            request.payload["auto_attempts"] = attempts
+            delay = float(min(300, 10 * (2 ** min(attempts - 1, 5))))
+            request.status = "queued"
+            request.progress = 0.0
+            request.error = ""
+            request.payload["last_error"] = str(error or "")
+            self.note_error(error)
+            if _RATE_LIMIT_RE.search(str(error or "")):
+                delay = max(delay, 60.0)
+            reason = " ".join(str(error or "").split())[:90]
+            request.detail = f"Auto-retry #{attempts} in {int(delay)}s" + (f" • {reason}" if reason else "")
+            request.finished_at = 0.0
+            self._active_ids.discard(request.id)
+            return delay
+
+    def release_auto_retry(self, request_id: str) -> bool:
+        """Put a backing-off item into the pending queue, unless it was cancelled/paused meanwhile."""
+        with self._lock:
+            request = self._find_locked(request_id)
+            if request is None or request.status != "queued" or request.id in self._pending:
+                return False
+            request.detail = "Retrying…"
+            self._pending.append(request.id)
+            return True
 
     def pause(self, request_id: str) -> str:
         """Pause a queued download now, or flag a running one so the worker can stop it."""

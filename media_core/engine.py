@@ -10,6 +10,7 @@ from typing import Any, Callable
 import yt_dlp
 from imageio_ffmpeg import get_ffmpeg_exe
 
+from . import options as engine_options
 from .browser_resolver import resolve_with_installed_browser
 from .sources import (
     browser_session_attempts,
@@ -37,7 +38,7 @@ def _check_cancel(cancel_event: threading.Event) -> None:
 
 def safe_filename(value: str, fallback: str = "media_download") -> str:
     text = str(value or "").strip()
-    text = re.sub(r"\.(mp3|m4a|mp4|webm|mkv|mov|wav)$", "", text, flags=re.I)
+    text = re.sub(r"\.(mp3|m4a|mp4|webm|mkv|mov|wav|flac|opus|ogg)$", "", text, flags=re.I)
     text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text)
     text = re.sub(r"\s+", " ", text).strip(" ._")
     return (text[:150] or fallback).strip()
@@ -109,7 +110,7 @@ def analyze_url(
         force_generic = bool(options.pop("_force_generic_extractor", False))
         try:
             with yt_dlp.YoutubeDL(
-                {
+                engine_options.apply_request_options({
                     "quiet": True,
                     "no_warnings": True,
                     "skip_download": True,
@@ -119,7 +120,7 @@ def analyze_url(
                     "retries": 0,
                     "fragment_retries": 0,
                     **options,
-                }
+                })
             ) as ydl:
                 info = ydl.extract_info(
                     attempt_url,
@@ -141,7 +142,7 @@ def analyze_url(
             force_generic = bool(options.pop("_force_generic_extractor", False))
             try:
                 with yt_dlp.YoutubeDL(
-                    {
+                    engine_options.apply_request_options({
                         "quiet": True,
                         "no_warnings": True,
                         "skip_download": True,
@@ -151,7 +152,7 @@ def analyze_url(
                         "retries": 1,
                         "fragment_retries": 1,
                         **options,
-                    }
+                    })
                 ) as ydl:
                     info = ydl.extract_info(
                         attempt_url,
@@ -216,7 +217,7 @@ def _available_name(directory: Path, requested: str) -> str:
     base = safe_filename(requested)
     candidate = base
     index = 2
-    while _files_with_stem(directory, candidate):
+    while [p for p in _files_with_stem(directory, candidate) if engine_options.is_final_media(p)]:
         candidate = f"{base} ({index})"
         index += 1
     return candidate
@@ -258,6 +259,24 @@ def download_from_analysis(
 ) -> Path:
     download_dir = Path(download_dir).expanduser()
     download_dir.mkdir(parents=True, exist_ok=True)
+    if engine_options.get("skip_existing", True):
+        wanted_audio = mode.lower() == "audio"
+        audio_suffixes = {".mp3", ".m4a", ".aac", ".flac", ".opus", ".ogg", ".wav"}
+        for existing in _files_with_stem(download_dir, safe_filename(filename)):
+            try:
+                usable = (
+                    engine_options.is_final_media(existing)
+                    and existing.stat().st_size > 0
+                    and (existing.suffix.lower() in audio_suffixes) == wanted_audio
+                )
+            except OSError:
+                usable = False
+            if usable:
+                if on_status:
+                    on_status("Already downloaded — skipped")
+                if on_progress:
+                    on_progress(1.0, "Already downloaded")
+                return existing
     name = _available_name(download_dir, filename)
     started_at = time.time()
 
@@ -384,22 +403,28 @@ def download_from_analysis(
         "ffmpeg_location": get_ffmpeg_exe(),
     }
 
+    extra_opts, extra_processors = engine_options.download_extras(mode)
+    opts.update(extra_opts)
     if mode.lower() == "audio":
+        codec = engine_options.AUDIO_CODECS.get(str(audio_format or "mp3").lower(), "mp3")
         opts.update(
             {
                 "format": "bestaudio/best",
                 "postprocessors": [
                     {
                         "key": "FFmpegExtractAudio",
-                        "preferredcodec": str(audio_format or "mp3").lower(),
+                        "preferredcodec": codec,
                         "preferredquality": str(audio_quality or "192"),
-                    }
+                    },
+                    *extra_processors,
                 ],
             }
         )
     else:
         opts["format"] = video_format_selector(url, video_quality or "Best available")
         opts["merge_output_format"] = "mp4"
+        if extra_processors:
+            opts["postprocessors"] = list(extra_processors)
 
     errors: list[str] = []
     downloaded_ok = False
@@ -424,7 +449,7 @@ def download_from_analysis(
             if attempts:
                 cached_network_options = dict(attempts[0][1] or {})
                 cached_network_options.pop("_force_generic_extractor", None)
-            with yt_dlp.YoutubeDL({**opts, **cached_network_options}) as ydl:
+            with yt_dlp.YoutubeDL(engine_options.apply_request_options({**opts, **cached_network_options})) as ydl:
                 ydl.process_ie_result(copy.deepcopy(cached_info), download=True)
             downloaded_ok = True
         except Cancelled:
@@ -451,7 +476,7 @@ def download_from_analysis(
             if attempts:
                 refreshed_network_options = dict(attempts[0][1] or {})
                 refreshed_network_options.pop("_force_generic_extractor", None)
-            with yt_dlp.YoutubeDL({**opts, **refreshed_network_options}) as ydl:
+            with yt_dlp.YoutubeDL(engine_options.apply_request_options({**opts, **refreshed_network_options})) as ydl:
                 ydl.process_ie_result(copy.deepcopy(refreshed_info), download=True)
             downloaded_ok = True
         except Cancelled:
@@ -468,7 +493,7 @@ def download_from_analysis(
             attempt_options = dict(network_options or {})
             force_generic = bool(attempt_options.pop("_force_generic_extractor", False))
             try:
-                with yt_dlp.YoutubeDL({**opts, **attempt_options}) as ydl:
+                with yt_dlp.YoutubeDL(engine_options.apply_request_options({**opts, **attempt_options})) as ydl:
                     ydl.extract_info(
                         attempt_url,
                         download=True,
@@ -491,7 +516,7 @@ def download_from_analysis(
 
     candidates: list[Path] = []
     for path in _files_with_stem(download_dir, name):
-        if path.suffix.lower() in {".part", ".ytdl", ".tmp", ".temp"}:
+        if not engine_options.is_final_media(path):
             continue
         try:
             if path.stat().st_mtime >= started_at - 2:

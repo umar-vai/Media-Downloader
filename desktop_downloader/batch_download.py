@@ -5,7 +5,7 @@ from collections import Counter
 from typing import Any
 from urllib.parse import urlsplit
 
-MAX_BATCH_URLS = 50
+MAX_BATCH_URLS = 300
 ACTIVE = frozenset({"queued", "running", "cancelling"})
 
 
@@ -61,7 +61,7 @@ def parse_batch_urls_detailed(text: str) -> tuple[list[str], int, int]:
 
 
 def parse_batch_urls(text: str) -> tuple[list[str], int]:
-    """Validate 1–50 HTTP(S) URLs; preserve order and skip duplicates."""
+    """Validate 1–300 HTTP(S) URLs; preserve order and skip duplicates."""
     urls, duplicates, _invalid = parse_batch_urls_detailed(text)
     return urls, duplicates
 

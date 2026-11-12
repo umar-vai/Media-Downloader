@@ -50,9 +50,11 @@ class DownloadRow:
     def __init__(self, page: ui.Page, *, on_cancel: Callable[[str], None],
                  on_retry: Callable[[str], None],
                  on_pause: Callable[[str], None] | None = None,
-                 on_resume: Callable[[str], None] | None = None) -> None:
+                 on_resume: Callable[[str], None] | None = None,
+                 on_details: Callable[[str], None] | None = None) -> None:
         self.page = page
         self.request_id = ""
+        self._on_details = on_details
         self._on_cancel = on_cancel
         self._on_retry = on_retry
         self._on_pause = on_pause
@@ -72,11 +74,13 @@ class DownloadRow:
         self.action = ui.Btn(page, "Cancel", self._act, style="danger", size=11, padx=14, radius=8)
         self.show_btn = ui.Btn(page, "Show in folder", self._show, style="ghost", size=11, padx=14, radius=8)
         self.pause_btn = ui.Btn(page, "Pause", self._pause_click, style="secondary", size=11, padx=14, radius=8)
+        self.details_btn = ui.Btn(page, "Details", self._details_click, style="ghost", size=11, padx=14, radius=8)
         self.action.show(False)
         self.show_btn.show(False)
         self.pause_btn.show(False)
+        self.details_btn.show(False)
         self.parts = [self.bg, self.index, self.title, self.chip, self.bar, self.detail,
-                      self.action, self.show_btn, self.pause_btn]
+                      self.action, self.show_btn, self.pause_btn, self.details_btn]
 
     def destroy(self) -> None:
         for part in self.parts:
@@ -93,6 +97,10 @@ class DownloadRow:
             self._on_pause(self.request_id)
         elif self._pause_mode == "resume" and self._on_resume:
             self._on_resume(self.request_id)
+
+    def _details_click(self) -> None:
+        if self._on_details:
+            self._on_details(self.request_id)
 
     def _show(self) -> None:
         if self._path:
@@ -147,7 +155,10 @@ class DownloadRow:
             pause_mode = "pause"
         elif self._on_resume and status == "paused":
             pause_mode = "resume"
-        sig = (mode, status == "completed" and bool(path), pause_mode)
+        has_details = bool(self._on_details) and (
+            status == "failed" or (status == "queued" and int(item.get("auto_attempts") or 0) > 0)
+        )
+        sig = (mode, status == "completed" and bool(path), pause_mode, has_details)
         self._path = path
         if self._state.get("actions") != sig:
             self._state["actions"] = sig
@@ -165,6 +176,7 @@ class DownloadRow:
                 self.pause_btn.configure(text="Pause" if pause_mode == "pause" else "Resume",
                                          style="secondary" if pause_mode == "pause" else "primary")
             self.pause_btn.show(bool(pause_mode))
+            self.details_btn.show(has_details)
             self.bg.relayout()
 
     def place(self, x: float, y: float, w: float) -> None:
@@ -181,7 +193,7 @@ class DownloadRow:
         self.title.place(left, y + px(13), max(20, right - chip_w - px(12) - left))
 
         edge = right
-        for button in (self.action, self.show_btn, self.pause_btn):
+        for button in (self.action, self.show_btn, self.pause_btn, self.details_btn):
             if button.visible:
                 width = button.natural_w(minimum=82)
                 button.place(edge - width, y + px(40), width, px(28))
@@ -198,8 +210,10 @@ class ActivityList:
     def __init__(self, page: ui.Page, *, on_cancel: Callable[[str], None], on_retry: Callable[[str], None],
                  empty_text: str, numbered: bool = False,
                  on_pause: Callable[[str], None] | None = None,
-                 on_resume: Callable[[str], None] | None = None) -> None:
+                 on_resume: Callable[[str], None] | None = None,
+                 on_details: Callable[[str], None] | None = None) -> None:
         self.page = page
+        self._on_details = on_details
         self._on_cancel = on_cancel
         self._on_retry = on_retry
         self._on_pause = on_pause
@@ -224,7 +238,8 @@ class ActivityList:
             row = self.rows.get(request_id)
             if row is None:
                 row = DownloadRow(self.page, on_cancel=self._on_cancel, on_retry=self._on_retry,
-                                  on_pause=self._on_pause, on_resume=self._on_resume)
+                                  on_pause=self._on_pause, on_resume=self._on_resume,
+                                  on_details=self._on_details)
                 row.request_id = request_id
                 self.rows[request_id] = row
                 changed = True

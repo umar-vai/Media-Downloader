@@ -27,7 +27,7 @@ class SettingsNormalizationTests(unittest.TestCase):
             {
                 "default_mode": "SomethingElse",
                 "video_quality": "16K",
-                "audio_format": "FLAC",
+                "audio_format": "AAC",
                 "audio_quality": "999",
                 "auto_check_updates": "yes",
                 "auto_download_updates": 1,

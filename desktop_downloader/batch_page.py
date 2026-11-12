@@ -24,6 +24,7 @@ class BatchSection:
         on_retry: Callable[[str], None],
         on_pause: Callable[[str], None] | None = None,
         on_resume: Callable[[str], None] | None = None,
+        on_details: Callable[[str], None] | None = None,
         get_snapshots: Callable[[], list[dict[str, Any]]],
         settings: dict[str, Any],
     ) -> None:
@@ -48,7 +49,7 @@ class BatchSection:
                                     relayout=False)
         self.url_area = ui.TextArea(page)
         self.url_area.text.bind("<KeyRelease>", self._update_count)
-        self.url_area.text.bind("<<Paste>>", lambda _e: page.after(40, self._update_count), add="+")
+        self.url_area.text.bind("<<Paste>>", lambda _e: page.after(40, self._after_paste), add="+")
 
         self.cap_type = ui.Label(page, "OUTPUT TYPE", fg=ui.MUTED, size=9, bold=True)
         self.cap_quality = ui.Label(page, "VIDEO QUALITY", fg=ui.MUTED, size=9, bold=True)
@@ -56,13 +57,14 @@ class BatchSection:
         self.cap_bitrate = ui.Label(page, "BITRATE (KBPS)", fg=ui.MUTED, size=9, bold=True)
         self.mode_control = ui.Segmented(page, ["Video", "Audio"], self.mode_var, command=lambda _v: self._sync_mode())
         self.quality_select = ui.Select(page, VIDEO_QUALITIES, self.quality_var)
-        self.format_select = ui.Select(page, ["MP3", "M4A"], self.audio_format_var)
+        self.format_select = ui.Select(page, ["MP3", "M4A", "FLAC", "OPUS", "WAV"], self.audio_format_var)
         self.bitrate_select = ui.Select(page, ["128", "192", "256", "320"], self.audio_quality_var)
 
         self.start_button = ui.Btn(page, "Add batch to queue", self._enqueue, style="primary", size=12)
         self.paste_button = ui.Btn(page, "Paste", self._paste, style="secondary", size=12)
+        self.file_button = ui.Btn(page, "Load .txt", self._load_file, style="secondary", size=12)
         self.clear_button = ui.Btn(page, "Clear", self._clear, style="ghost", size=12)
-        self.status_label = ui.Label(page, "Paste one link per line — up to 50 at a time.", fg=ui.MUTED, size=11,
+        self.status_label = ui.Label(page, "Paste one link per line, or load a .txt file — up to 300 at a time.", fg=ui.MUTED, size=11,
                                      anchor="ne", ellipsis=True, relayout=False)
 
         # progress card
@@ -78,7 +80,7 @@ class BatchSection:
                                       ellipsis=True)
         self.percent_label = ui.Label(page, "", fg=ui.TEXT, size=11, bold=True, anchor="ne", relayout=False)
         self.overall_bar = ui.Bar(page, height=8, color=ui.ACCENT)
-        self.items = ActivityList(page, on_cancel=on_cancel, on_retry=on_retry, on_pause=on_pause, on_resume=on_resume, numbered=False,
+        self.items = ActivityList(page, on_cancel=on_cancel, on_retry=on_retry, on_pause=on_pause, on_resume=on_resume, on_details=on_details, numbered=False,
                                   empty_text="Links you add will appear here with live progress.")
         self._sync_mode()
 
@@ -115,6 +117,8 @@ class BatchSection:
         bx += self.start_button.natural_w() + px(8)
         self.paste_button.place(bx, action_y, self.paste_button.natural_w(), px(46))
         bx += self.paste_button.natural_w() + px(8)
+        self.file_button.place(bx, action_y, self.file_button.natural_w(), px(46))
+        bx += self.file_button.natural_w() + px(8)
         self.clear_button.place(bx, action_y, self.clear_button.natural_w(), px(46))
         bx += self.clear_button.natural_w() + px(16)
         self.status_label.place(x0 + cw - pad, action_y + px(14), max(40, x0 + cw - pad - bx))
@@ -171,13 +175,55 @@ class BatchSection:
         self.count_label.configure(text=f"{count} / {MAX_BATCH_URLS} links{extra}",
                                    text_color=ui.DANGER if count > MAX_BATCH_URLS else ui.MUTED)
 
+    def _after_paste(self) -> None:
+        """Move the cursor to a fresh line after a pasted link so the next paste lands on its own line."""
+        text = self.url_area.text
+        try:
+            line_start = text.index("insert linestart")
+            before_cursor = text.get(line_start, "insert")
+            after_cursor = text.get("insert", "insert lineend")
+            if before_cursor.strip() and not after_cursor.strip():
+                text.insert("insert", "\n")
+                text.mark_set("insert", "insert lineend")
+                text.see("insert")
+        except tk.TclError:
+            pass
+        self._update_count()
+
     def _paste(self) -> None:
         try:
             value = self.page.clipboard_get()
         except Exception:
             return
-        existing = self._text().strip()
-        self.url_area.text.insert("end", ("\n" if existing else "") + value.strip())
+        text = self.url_area.text
+        existing = self._text()
+        if existing and not existing.endswith("\n"):
+            text.insert("end-1c", "\n")
+        text.insert("end-1c", value.strip() + "\n")
+        text.see("end")
+        self._update_count()
+
+    def _load_file(self) -> None:
+        from tkinter import filedialog
+
+        path = filedialog.askopenfilename(
+            title="Load links from a text file",
+            filetypes=[("Text files", "*.txt *.csv *.list *.md"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                content = handle.read(2_000_000)
+        except OSError as exc:
+            messagebox.showerror("Batch Download", f"Could not read the file. {exc}")
+            return
+        text = self.url_area.text
+        existing = self._text()
+        if existing and not existing.endswith("\n"):
+            text.insert("end-1c", "\n")
+        text.insert("end-1c", content.strip() + "\n")
+        text.see("end")
         self._update_count()
 
     def _clear(self) -> None:
