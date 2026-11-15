@@ -36,7 +36,8 @@ from single_instance import cleanup_stale_updater_copies
 import ui_kit as ui
 from download_queue import DownloadQueue, DownloadRequest
 from history_store import HistoryStore, make_history_entry
-from history_window import HistoryWindow
+from history_window import HistoryPage
+from media_probe import probe_media
 from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
 from media_sources import detect_platform, platform_name
@@ -47,7 +48,7 @@ from download_rules import parse_rules, resolve_target
 from extension_server import ExtensionServer, purge_old_cookie_files, write_cookie_file
 from failure_dialog import FailureDialog
 from hotkey import GlobalHotkey, MOD_ALT, MOD_CONTROL
-from settings_window import SettingsWindow
+from settings_window import SettingsPanel
 from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_installer_release, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
 
@@ -337,8 +338,8 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.last_file: Path | None = None
         self.editor_window: MediaEditorWindow | None = None
         self.diagnostics_window: DiagnosticsWindow | None = None
-        self.settings_window: SettingsWindow | None = None
-        self.history_window: HistoryWindow | None = None
+        self.settings_panel: SettingsPanel | None = None
+        self.history_page: HistoryPage | None = None
         self.task_state = TaskState.IDLE
 
         self._analysis_counter = 0
@@ -832,14 +833,20 @@ class DownloaderApp(UIMixin, ctk.CTk):
         batch_id = uuid.uuid4().hex
         payloads = []
         rules = parse_rules(str(self.settings.get("folder_rules") or ""))
+        # A stream sent by the browser extension lives on a CDN; website folder rules and the
+        # history's "website" use the page it was playing on.
+        page_url = str((extra or {}).get("page_url") or "") if len(urls) == 1 else ""
+        if not page_url.startswith(("http://", "https://")):
+            page_url = ""
         for index, url in enumerate(urls, 1):
+            site_url = page_url or url
             target_dir, url_quality = resolve_target(
-                url,
+                site_url,
                 rules=rules,
                 default_dir=self.download_dir,
                 default_quality=quality,
                 organize_by_site=bool(self.settings.get("organize_by_site", False)),
-                platform=platform_name(url),
+                platform=platform_name(site_url),
             )
             request_settings = {
                 **(extra or {}),
@@ -850,8 +857,9 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 "audio_format": audio_format.lower(),
                 "audio_quality": bitrate,
                 "source_url": url,
+                "page_url": site_url,
                 "history_title": f"Batch item {index}",
-                "history_platform": platform_name(url),
+                "history_platform": platform_name(site_url),
                 "history_quality": url_quality if mode == "Video" else f"{audio_format} {bitrate} kbps",
                 "history_duration": 0,
             }
@@ -927,6 +935,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 else f"{audio_format.upper()} {audio_quality} kbps"
             ),
             "source_url": url,
+            "page_url": url,
         }
 
         request = self.download_queue.enqueue(
@@ -966,6 +975,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
             cookiefile=str(request_settings.get("cookiefile") or ""),
             referer=str(request_settings.get("referer") or ""),
             headers=dict(request_settings.get("http_headers") or {}),
+            skip_existing=False if request_settings.get("force_redownload") else None,
         )
         try:
             if request_settings.get("batch_id"):
@@ -1046,10 +1056,13 @@ class DownloaderApp(UIMixin, ctk.CTk):
                     if cancel_event.wait(min(3 * attempt, 15)):
                         raise SharedCancelled("Download cancelled while waiting to retry.")
 
+            probe = probe_media(Path(final_path))
             self._put_download_event(
                 "download_done",
                 request_id,
                 {
+                    "probe": probe,
+                    "attempts": attempt,
                     "path": str(final_path),
                     "title": request_settings.get("history_title") or name,
                     "source_url": request_settings.get("source_url") or url,
@@ -1203,29 +1216,9 @@ class DownloaderApp(UIMixin, ctk.CTk):
                         self.task_state = TaskState.DOWNLOADED
                         self._set_status(f"Download completed: {completed_path.name}", "success")
 
-                        try:
-                            entry = make_history_entry(
-                                completed_path,
-                                title=str(detail.get("title") or completed_path.stem),
-                                source_url=str(detail.get("source_url") or ""),
-                                platform=str(detail.get("platform") or ""),
-                                creator=str(detail.get("creator") or ""),
-                                mode=str(detail.get("mode") or "Video"),
-                                quality=str(detail.get("quality") or ""),
-                                duration_seconds=int(detail.get("duration_seconds") or 0),
-                            )
-                            self.history_store.add(entry)
-                            LOGGER.info("Download history recorded file=%s", completed_path)
-                        except Exception:
-                            LOGGER.exception("Could not save download history file=%s", completed_path)
+                        self._record_history(request_id, "completed", path=completed_path, detail=detail)
 
                         self._sync_recent_file()
-                        if self.history_window is not None:
-                            try:
-                                if self.history_window.winfo_exists():
-                                    self.history_window.refresh()
-                            except Exception:
-                                self.history_window = None
 
                         if edit_after:
                             existing = self.editor_window
@@ -1252,6 +1245,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
                             self._set_status("A batch link failed — retrying automatically.", "ready")
                         else:
                             self.download_queue.fail(request_id, str(data or "Download failed"))
+                            self._record_history(request_id, "failed", error=str(data or "Download failed"))
                             self.task_state = TaskState.ERROR
                             self._set_status("A download failed. See Download Activity for details.", "error")
                         self._schedule_download_activity_refresh(30)
@@ -1263,6 +1257,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
                             self._set_status("Download paused", "ready")
                         else:
                             self.download_queue.cancel(request_id)
+                            self._record_history(request_id, "cancelled")
                             self._set_status("Download cancelled", "cancelled")
                         self._schedule_download_activity_refresh(30)
 
@@ -1836,6 +1831,9 @@ class DownloaderApp(UIMixin, ctk.CTk):
         title = " ".join(str(data.get("title") or "").split())[:180]
         if title:
             extra["title_hint"] = title
+        page_url = str(data.get("pageUrl") or "").strip()
+        if page_url.startswith(("http://", "https://")):
+            extra["page_url"] = page_url
         options = self._default_batch_options()
         quality = str(data.get("quality") or "")
         if is_valid_quality(quality):
@@ -2040,84 +2038,140 @@ class DownloaderApp(UIMixin, ctk.CTk):
         if hasattr(self, "open_file_button"):
             self.open_file_button.configure(state="normal" if self.last_file else "disabled")
 
+    # ------------------------------------------------------------ history page
     def open_history(self) -> None:
-        existing = self.history_window
-        if existing is not None:
-            try:
-                if existing.winfo_exists():
-                    existing.deiconify()
-                    existing.lift()
-                    existing.focus_force()
-                    return
-            except Exception:
-                self.history_window = None
+        self.show_page("history")
 
+    def _build_history_page(self) -> HistoryPage:
+        page = HistoryPage(
+            self.stage,
+            self.history_store,
+            on_edit=lambda path: self.open_editor(path),
+            on_change=self._sync_recent_file,
+            on_redownload=self.redownload_from_history,
+        )
+        self.history_page = page
+        return page
+
+    def _record_history(
+        self,
+        request_id: str,
+        status: str,
+        *,
+        path: Path | None = None,
+        detail: dict[str, Any] | None = None,
+        error: str = "",
+    ) -> None:
+        """Save one finished/failed/cancelled download with everything Properties shows."""
         try:
-            self.history_window = HistoryWindow(
-                self,
-                self.history_store,
-                on_edit=lambda path: self.open_editor(path),
-                on_change=self._sync_recent_file,
+            snapshot = self.download_queue.get(request_id) or {}
+            queued = self.download_queue.payload(request_id) or {}
+            settings = dict(queued.get("request_settings") or {})
+            detail = dict(detail or {})
+            probe = dict(detail.get("probe") or {})
+            source_url = str(detail.get("source_url") or settings.get("source_url") or queued.get("url") or "")
+            started = float(snapshot.get("started_at") or snapshot.get("created_at") or 0)
+            finished = float(snapshot.get("finished_at") or 0) or time.time()
+            mode = str(settings.get("mode") or "Video")
+            title = (detail.get("title") or settings.get("history_title") or settings.get("title_hint")
+                     or (path.stem if path else snapshot.get("name")) or "Media")
+            entry = make_history_entry(
+                path,
+                status=status,
+                title=str(title),
+                source_url=source_url,
+                platform=str(detail.get("platform") or settings.get("history_platform") or ""),
+                creator=str(detail.get("creator") or settings.get("history_creator") or ""),
+                mode=mode,
+                quality=str(detail.get("quality") or settings.get("history_quality") or ""),
+                duration_seconds=int(probe.get("duration_seconds") or detail.get("duration_seconds")
+                                     or settings.get("history_duration") or 0),
+                started_at=started,
+                finished_at=finished,
+                page_url=str(settings.get("page_url") or source_url),
+                download_url=str(queued.get("url") or source_url),
+                referer=str(settings.get("referer") or ""),
+                http_headers={k: v for k, v in dict(settings.get("http_headers") or {}).items()
+                              if str(k).lower() in {"origin", "user-agent"}},
+                download_dir=str(path.parent if path else queued.get("download_dir") or ""),
+                audio_format=str(settings.get("audio_format") or ""),
+                audio_quality=str(settings.get("audio_quality") or ""),
+                video_quality=str(settings.get("video_quality") or ""),
+                batch_id=str(settings.get("batch_id") or ""),
+                attempts=int(detail.get("attempts") or 1),
+                error=(str(error or snapshot.get("last_error") or "")[:2000] if status != "completed" else ""),
+                resolution=str(probe.get("resolution") or ""),
+                video_codec=str(probe.get("video_codec") or ""),
+                audio_codec=str(probe.get("audio_codec") or ""),
+                container=str(probe.get("container") or ""),
+                bitrate_kbps=int(probe.get("bitrate_kbps") or 0),
             )
-            self.history_window.bind(
-                "<Destroy>",
-                lambda event: self._history_destroyed(event),
-                add="+",
-            )
-            self.history_window.focus()
-            LOGGER.info("Download history window opened")
-        except Exception as exc:
-            LOGGER.exception("Could not open download history")
-            self.history_window = None
-            messagebox.showerror(APP_NAME, f"Could not open Download History.\n\n{exc}")
+            self.history_store.add(entry)
+            LOGGER.info("History recorded status=%s request=%s", status, request_id)
+        except Exception:
+            LOGGER.exception("Could not save download history request=%s", request_id)
+            return
+        page = self.history_page
+        if page is not None:
+            try:
+                page.refresh()
+            except Exception:
+                LOGGER.exception("History page refresh failed")
 
-    def _history_destroyed(self, event: Any) -> None:
-        window = self.history_window
-        if window is not None and event.widget is window:
-            self.history_window = None
-            self._sync_recent_file()
-            LOGGER.info("Download history window closed")
+    def redownload_from_history(self, entry: dict[str, Any], *, resume: bool = False) -> None:
+        """IDM-style Resume (continue a failed/cancelled download) or Redownload (fresh copy)."""
+        url = str(entry.get("download_url") or entry.get("source_url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            messagebox.showerror(APP_NAME, "This history item has no download link.")
+            return
+        mode = str(entry.get("mode") or "Video")
+        options = self._default_batch_options(mode)
+        quality = str(entry.get("video_quality") or "")
+        if is_valid_quality(quality):
+            options["video_quality"] = quality
+        audio_format = str(entry.get("audio_format") or "").upper()
+        if audio_format in AUDIO_FORMATS:
+            options["audio_format"] = audio_format
+        if str(entry.get("audio_quality") or "") in {"128", "192", "256", "320"}:
+            options["audio_quality"] = str(entry["audio_quality"])
+        extra: dict[str, Any] = {"title_hint": str(entry.get("title") or "")}
+        page_url = str(entry.get("page_url") or "")
+        if page_url.startswith(("http://", "https://")):
+            extra["page_url"] = page_url
+        referer = str(entry.get("referer") or "")
+        if referer.startswith(("http://", "https://")):
+            extra["referer"] = referer
+        headers = entry.get("http_headers")
+        if isinstance(headers, dict) and headers:
+            extra["http_headers"] = {str(k): str(v) for k, v in headers.items()}
+        if not resume:
+            extra["force_redownload"] = True
+        try:
+            self._enqueue_batch_downloads(url, options, extra=extra)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror(APP_NAME, "Could not add the download." + chr(10) + chr(10) + str(exc))
+            return
+        self._set_status("Resuming download" if resume else "Downloading again", "working")
+        self.show_page("queue")
 
+    # ----------------------------------------------------------- settings page
     def open_settings(self) -> None:
-        existing = self.settings_window
-        if existing is not None:
-            try:
-                if existing.winfo_exists():
-                    existing.deiconify()
-                    existing.lift()
-                    existing.focus_force()
-                    return
-            except Exception:
-                self.settings_window = None
+        self.show_page("settings")
 
-        try:
-            self.settings_window = SettingsWindow(
-                self,
-                self.settings,
-                on_save=self._apply_settings,
-                on_check_updates=lambda: self.check_for_updates(manual=True),
-                on_open_diagnostics=self.open_diagnostics,
-                on_open_log=self.open_app_log,
-                on_open_release=self.open_release_page,
-                on_export_extension=self.export_browser_extension,
-            )
-            self.settings_window.bind(
-                "<Destroy>",
-                lambda event: self._settings_destroyed(event),
-                add="+",
-            )
-            self.settings_window.focus()
-            LOGGER.info("Settings window opened")
-        except Exception as exc:
-            LOGGER.exception("Could not open settings window")
-            self.settings_window = None
-            messagebox.showerror(APP_NAME, f"Could not open Settings.\n\n{exc}")
-
-    def _settings_destroyed(self, event: Any) -> None:
-        window = self.settings_window
-        if window is not None and event.widget is window:
-            self.settings_window = None
-            LOGGER.info("Settings window closed")
+    def _build_settings_panel(self) -> SettingsPanel:
+        panel = SettingsPanel(
+            self.stage,
+            self.settings,
+            on_save=self._apply_settings,
+            on_check_updates=lambda: self.check_for_updates(manual=True),
+            on_open_diagnostics=self.open_diagnostics,
+            on_open_log=self.open_app_log,
+            on_open_release=self.open_release_page,
+            on_export_extension=self.export_browser_extension,
+            on_close=lambda: self.show_page("download"),
+        )
+        self.settings_panel = panel
+        return panel
 
     def _apply_settings(self, payload: dict[str, Any]) -> None:
         candidate = dict(self.settings)

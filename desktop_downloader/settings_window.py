@@ -7,6 +7,7 @@ from typing import Any, Callable
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
+from download_rules import QUALITIES, parse_rules
 from install_mode import install_mode_name
 from version import APP_VERSION
 
@@ -21,9 +22,33 @@ CYAN = "#23D5FF"
 PURPLE = "#7657FF"
 PURPLE_HOVER = "#6547E9"
 SUCCESS = "#24D18C"
+DANGER = "#FF647C"
+SITE_QUALITIES = ["Default", "Best available", "1080p", "720p", "480p", "360p"]
 
 
-class SettingsWindow(ctk.CTkToplevel):
+def rules_from_rows(rows: list[tuple[str, str, str]]) -> str:
+    """Serialize the Website folders table to the ``folder_rules`` text format."""
+    lines: list[str] = []
+    for host, folder, quality in rows:
+        host = str(host or "").strip()
+        folder = str(folder or "").strip()
+        quality = str(quality or "").strip()
+        if quality not in QUALITIES:
+            quality = ""
+        if not host or (not folder and not quality):
+            continue
+        line = host
+        if folder:
+            line += f" => {folder}"
+        if quality:
+            line += f" | {quality}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+class SettingsPanel(ctk.CTkFrame):
+    """Settings, shown as a page inside the main window (not a separate window)."""
+
     def __init__(
         self,
         master: ctk.CTkBaseClass,
@@ -35,13 +60,11 @@ class SettingsWindow(ctk.CTkToplevel):
         on_open_log: Callable[[], None],
         on_open_release: Callable[[], None],
         on_export_extension: Callable[[], None] | None = None,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
-        super().__init__(master)
-        self.title("Media Downloader Settings")
-        self.geometry("760x650")
-        self.minsize(700, 570)
-        self.configure(fg_color=BG)
-        self.transient(master)
+        super().__init__(master, fg_color=BG, corner_radius=0)
+        self._on_close = on_close
+        self._site_rows: list[dict[str, Any]] = []
 
         self._original = copy.deepcopy(settings)
         self._on_save = on_save
@@ -89,7 +112,6 @@ class SettingsWindow(ctk.CTkToplevel):
         self._build_header()
         self._build_tabs()
         self._build_footer()
-        self.protocol("WM_DELETE_WINDOW", self._close)
 
         for var in (
             self.download_dir_var,
@@ -110,17 +132,17 @@ class SettingsWindow(ctk.CTkToplevel):
             var.trace_add("write", lambda *_args: self._mark_dirty())
 
     def _build_header(self) -> None:
-        header = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=0)
-        header.grid(row=0, column=0, sticky="ew")
+        header = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        header.grid(row=0, column=0, sticky="ew", padx=12)
         header.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
             header,
-            text="SETTINGS",
+            text="Settings",
             text_color=TEXT,
-            font=("Segoe UI Semibold", 18),
+            font=("Segoe UI Semibold", 26),
             anchor="w",
-        ).grid(row=0, column=0, sticky="w", padx=20, pady=(18, 2))
+        ).grid(row=0, column=0, sticky="w", padx=20, pady=(26, 2))
         ctk.CTkLabel(
             header,
             text="Configure downloads, app behavior, updates and support tools.",
@@ -151,13 +173,14 @@ class SettingsWindow(ctk.CTkToplevel):
             segmented_button_unselected_color=SURFACE_2,
             segmented_button_unselected_hover_color=SURFACE_3,
         )
-        self.tabs.grid(row=1, column=0, sticky="nsew", padx=18, pady=16)
-        for name in ("General", "Downloads", "Files & rules", "Browser", "Updates", "About"):
+        self.tabs.grid(row=1, column=0, sticky="nsew", padx=30, pady=12)
+        for name in ("General", "Downloads", "Website folders", "Files", "Browser", "Updates", "About"):
             self.tabs.add(name)
 
         self._build_general_tab(self.tabs.tab("General"))
         self._build_downloads_tab(self.tabs.tab("Downloads"))
-        self._build_files_tab(self.tabs.tab("Files & rules"))
+        self._build_sites_tab(self.tabs.tab("Website folders"))
+        self._build_files_tab(self.tabs.tab("Files"))
         self._build_browser_tab(self.tabs.tab("Browser"))
         self._build_updates_tab(self.tabs.tab("Updates"))
         self._build_about_tab(self.tabs.tab("About"))
@@ -360,7 +383,7 @@ class SettingsWindow(ctk.CTkToplevel):
                      "If a finished file with the same name already exists in the folder, the link is marked done instead of downloading again.")
         self._switch(area, 2, "Organize into a folder per website",
                      self._extra_vars["organize_by_site"],
-                     "Saves into sub-folders such as YouTube or Facebook. Folder rules below take priority.")
+                     "Saves into sub-folders such as YouTube or Facebook. Websites listed under Website folders take priority.")
         self._switch(area, 3, "Fast mode (16 parallel fragments)",
                      self._extra_vars["fast_mode"],
                      "Downloads HLS/DASH streams with more parallel connections. Turn off if a site rate-limits you.")
@@ -382,25 +405,107 @@ class SettingsWindow(ctk.CTkToplevel):
                      border_color=BORDER, placeholder_text="Languages, e.g. en,bn").grid(
             row=0, column=1, sticky="ew", padx=(0, 12), pady=12)
 
-        self._section_label(area, "FOLDER & QUALITY RULES", 8)
-        rules = ctk.CTkFrame(area, fg_color=SURFACE_2, corner_radius=10)
-        rules.grid(row=9, column=0, sticky="ew", padx=10, pady=5)
-        rules.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            rules,
-            text="One rule per line:  website => folder | quality\nExample:  example.com => D:\\Videos\\Example | 1080p",
-            text_color=MUTED, font=("Segoe UI", 9), anchor="w", justify="left",
-        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 4))
-        self.rules_box = ctk.CTkTextbox(rules, height=110, fg_color=SURFACE_3, border_color=BORDER,
-                                        border_width=1, font=("Consolas", 11))
-        self.rules_box.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
-        self.rules_box.insert("1.0", self._folder_rules_initial)
-        self.rules_box.bind("<KeyRelease>", lambda _e: self._mark_dirty())
-
         self._section_label(area, "SHORTCUTS", 10)
         self._switch(area, 11, "Global hotkeys: Ctrl+Alt+D (video) and Ctrl+Alt+M (audio)",
                      self._extra_vars["clipboard_hotkey"],
                      "Copy a link anywhere, press the hotkey, and it is added to the queue, even while the app is in the tray. Ctrl+K opens the command palette inside the app.")
+
+    # ------------------------------------------------------------ website folders
+    def _build_sites_tab(self, tab: ctk.CTkFrame) -> None:
+        area = self._scroll_area(tab)
+        self._section_label(area, "SAVE DOWNLOADS FROM A WEBSITE IN ITS OWN FOLDER", 0)
+        ctk.CTkLabel(
+            area,
+            text="Downloads from a website listed here go to its folder (and use its quality, if set) instead of the "
+                 "default download folder. A site also covers its subdomains, e.g. youtube.com covers m.youtube.com. "
+                 "Links sent by the browser extension use the page you were watching, not the video server.",
+            text_color=MUTED, font=("Segoe UI", 9), wraplength=600, justify="left", anchor="w",
+        ).grid(row=1, column=0, sticky="w", padx=14, pady=(0, 8))
+
+        self.sites_box = ctk.CTkFrame(area, fg_color=SURFACE_2, corner_radius=10)
+        self.sites_box.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
+        self.sites_box.grid_columnconfigure(0, weight=2, minsize=150)
+        self.sites_box.grid_columnconfigure(1, weight=5, minsize=200)
+        for column, text in enumerate(("Website", "Save to folder", "", "Quality", "")):
+            ctk.CTkLabel(self.sites_box, text=text, text_color=MUTED, font=("Segoe UI Semibold", 9),
+                         anchor="w").grid(row=0, column=column, sticky="w", padx=(12 if column == 0 else 4, 4),
+                                          pady=(10, 2))
+        self.sites_empty = ctk.CTkLabel(self.sites_box, text="No websites yet. Press Add website.",
+                                        text_color=MUTED, font=("Segoe UI", 10))
+
+        buttons = ctk.CTkFrame(area, fg_color="transparent")
+        buttons.grid(row=3, column=0, sticky="w", padx=10, pady=(6, 10))
+        ctk.CTkButton(buttons, text="+  Add website", height=36, fg_color=PURPLE, hover_color=PURPLE_HOVER,
+                      command=lambda: self._add_site_row(focus=True)).grid(row=0, column=0, padx=(0, 8))
+
+        for rule in parse_rules(self._folder_rules_initial):
+            self._add_site_row(rule.host, rule.folder, rule.quality, mark=False)
+        self._layout_site_rows()
+
+    def _add_site_row(self, host: str = "", folder: str = "", quality: str = "", *, focus: bool = False,
+                      mark: bool = True) -> None:
+        row: dict[str, Any] = {
+            "host": ctk.StringVar(value=host),
+            "folder": ctk.StringVar(value=folder),
+            "quality": ctk.StringVar(value=quality if quality in QUALITIES else "Default"),
+        }
+        box = self.sites_box
+        row["widgets"] = [
+            ctk.CTkEntry(box, textvariable=row["host"], height=34, fg_color=SURFACE_3, border_color=BORDER,
+                         placeholder_text="example.com"),
+            ctk.CTkEntry(box, textvariable=row["folder"], height=34, fg_color=SURFACE_3, border_color=BORDER,
+                         placeholder_text="Folder (empty = default folder)"),
+            ctk.CTkButton(box, text="Browse", width=74, height=34, fg_color=SURFACE_3, hover_color="#1B3153",
+                          border_width=1, border_color=BORDER, command=lambda r=row: self._browse_site_folder(r)),
+            ctk.CTkOptionMenu(box, variable=row["quality"], values=SITE_QUALITIES, width=132, height=34,
+                              fg_color=SURFACE_3, button_color=PURPLE),
+            ctk.CTkButton(box, text="Remove", width=70, height=34, fg_color="transparent", hover_color="#30131B",
+                          border_width=1, border_color="#512332", text_color=DANGER,
+                          command=lambda r=row: self._remove_site_row(r)),
+        ]
+        for var in (row["host"], row["folder"], row["quality"]):
+            var.trace_add("write", lambda *_args: self._mark_dirty())
+        self._site_rows.append(row)
+        self._layout_site_rows()
+        if mark:
+            self._mark_dirty()
+        if focus:
+            row["widgets"][0].focus_set()
+
+    def _remove_site_row(self, row: dict[str, Any]) -> None:
+        for widget in row["widgets"]:
+            widget.destroy()
+        self._site_rows.remove(row)
+        self._layout_site_rows()
+        self._mark_dirty()
+
+    def _layout_site_rows(self) -> None:
+        if not self._site_rows:
+            self.sites_empty.grid(row=1, column=0, columnspan=5, sticky="w", padx=12, pady=(4, 12))
+            return
+        self.sites_empty.grid_remove()
+        last = len(self._site_rows)
+        for index, row in enumerate(self._site_rows, start=1):
+            pady = (4, 12 if index == last else 4)
+            for column, widget in enumerate(row["widgets"]):
+                sticky = "ew" if column in (0, 1) else "w"
+                padx = (12, 4) if column == 0 else ((4, 12) if column == 4 else 4)
+                widget.grid(row=index, column=column, sticky=sticky, padx=padx, pady=pady)
+
+    def _browse_site_folder(self, row: dict[str, Any]) -> None:
+        current = Path(row["folder"].get() or self.download_dir_var.get() or Path.home()).expanduser()
+        selected = filedialog.askdirectory(
+            title=f"Folder for {row['host'].get() or 'this website'}",
+            initialdir=str(current if current.exists() else Path.home()),
+            parent=self,
+        )
+        if selected:
+            row["folder"].set(str(Path(selected)))
+
+    def _site_rules_text(self) -> str:
+        return rules_from_rows([
+            (row["host"].get(), row["folder"].get(), row["quality"].get()) for row in self._site_rows
+        ])
 
     def _build_browser_tab(self, tab: ctk.CTkFrame) -> None:
         area = self._scroll_area(tab)
@@ -557,8 +662,8 @@ class SettingsWindow(ctk.CTkToplevel):
         ).grid(row=0, column=1, sticky="ew", padx=(5, 0), pady=5)
 
     def _build_footer(self) -> None:
-        footer = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=0)
-        footer.grid(row=2, column=0, sticky="ew")
+        footer = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=12)
+        footer.grid(row=2, column=0, sticky="ew", padx=30, pady=(0, 18))
         footer.grid_columnconfigure(0, weight=1)
 
         self.status_label = ctk.CTkLabel(
@@ -572,7 +677,7 @@ class SettingsWindow(ctk.CTkToplevel):
 
         ctk.CTkButton(
             footer,
-            text="Cancel",
+            text="Close",
             width=92,
             height=38,
             fg_color="transparent",
@@ -629,7 +734,7 @@ class SettingsWindow(ctk.CTkToplevel):
                 "start_with_windows": bool(self.start_with_windows_var.get()),
                 "auto_check_updates": bool(self.auto_check_updates_var.get()),
                 "auto_download_updates": bool(self.auto_download_updates_var.get()),
-                "folder_rules": self.rules_box.get("1.0", "end-1c").strip(),
+                "folder_rules": self._site_rules_text(),
             }
         )
         for key, var in self._extra_vars.items():
@@ -637,6 +742,13 @@ class SettingsWindow(ctk.CTkToplevel):
         return payload
 
     def _save(self) -> bool:
+        for row in self._site_rows:
+            host = row["host"].get().strip()
+            if not host and (row["folder"].get().strip() or row["quality"].get() != "Default"):
+                messagebox.showerror("Media Downloader Settings",
+                                     "Enter the website (for example youtube.com) for every folder row.", parent=self)
+                self.tabs.set("Website folders")
+                return False
         payload = self._payload()
         try:
             self._on_save(payload)
@@ -656,6 +768,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.save_button.configure(state="disabled")
         self.status_label.configure(text="Settings saved and applied.")
         self.after(1800, lambda: self.status_label.configure(text="Changes are saved only when you press Save settings.") if self.winfo_exists() else None)
+        self._folder_rules_initial = payload.get("folder_rules", "")
         return True
 
     def _check_updates(self) -> None:
@@ -663,12 +776,26 @@ class SettingsWindow(ctk.CTkToplevel):
             return
         self._on_check_updates()
 
+    @property
+    def dirty(self) -> bool:
+        return self._dirty
+
+    def can_leave(self) -> bool:
+        """Ask before leaving the page with unsaved changes; True when it is fine to leave."""
+        if not self._dirty:
+            return True
+        answer = messagebox.askyesnocancel(
+            "Media Downloader Settings",
+            "Save your settings changes before leaving?",
+            parent=self,
+        )
+        if answer is None:
+            return False
+        if answer:
+            return self._save()
+        self._dirty = False
+        return True
+
     def _close(self) -> None:
-        if self._dirty:
-            if not messagebox.askyesno(
-                "Media Downloader Settings",
-                "Discard unsaved settings changes?",
-                parent=self,
-            ):
-                return
-        self.destroy()
+        if self.can_leave() and self._on_close:
+            self._on_close()

@@ -374,7 +374,7 @@ def download_from_analysis(
 ) -> Path:
     download_dir = Path(download_dir).expanduser()
     download_dir.mkdir(parents=True, exist_ok=True)
-    if engine_options.get("skip_existing", True):
+    if engine_options.skip_existing():
         wanted_audio = mode.lower() == "audio"
         audio_suffixes = {".mp3", ".m4a", ".aac", ".flac", ".opus", ".ogg", ".wav"}
         for existing in _files_with_stem(download_dir, safe_filename(filename)):

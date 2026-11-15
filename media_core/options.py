@@ -43,9 +43,17 @@ _FORWARDED_HEADERS = {"origin": "Origin", "user-agent": "User-Agent", "accept-la
 
 
 def set_request_context(
-    *, cookiefile: str = "", referer: str = "", headers: dict[str, Any] | None = None
+    *,
+    cookiefile: str = "",
+    referer: str = "",
+    headers: dict[str, Any] | None = None,
+    skip_existing: bool | None = None,
 ) -> None:
-    """Per-thread overrides (cookies/referer/headers sent by the browser extension for one download)."""
+    """Per-thread overrides (cookies/referer/headers sent by the browser extension for one download).
+
+    ``skip_existing=False`` forces a fresh download (History > Redownload) even when the
+    "skip files that already exist" setting is on."""
+    _LOCAL.skip_existing = skip_existing
     _LOCAL.cookiefile = str(cookiefile or "")
     _LOCAL.referer = str(referer or "")
     clean: dict[str, str] = {}
@@ -55,6 +63,13 @@ def set_request_context(
         if name and text and not any(ch in text for ch in "\r\n") and len(text) <= 1024:
             clean[name] = text
     _LOCAL.headers = clean
+
+
+def skip_existing() -> bool:
+    override = getattr(_LOCAL, "skip_existing", None)
+    if override is not None:
+        return bool(override)
+    return bool(get("skip_existing", True))
 
 
 def clear_request_context() -> None:

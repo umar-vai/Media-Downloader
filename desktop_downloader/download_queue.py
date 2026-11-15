@@ -157,6 +157,17 @@ class DownloadQueue:
                 return None
             return request.snapshot(position=self._position_locked(request.id))
 
+    def payload(self, request_id: str) -> dict[str, Any] | None:
+        """A copy of what was queued (url, folder, request settings) for history/redownload."""
+        with self._lock:
+            request = self._find_locked(request_id)
+            if request is None:
+                return None
+            data = dict(request.payload)
+            data["request_settings"] = dict(data.get("request_settings") or {})
+            data.pop("cached_info", None)
+            return data
+
     def update_progress(self, request_id: str, progress: float, detail: str = "") -> None:
         with self._lock:
             request = self._find_locked(request_id)

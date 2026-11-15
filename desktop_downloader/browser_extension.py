@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-EXTENSION_VERSION = "2.1.0"
+EXTENSION_VERSION = "2.2.0"
 
 MANIFEST = {
     "manifest_version": 3,
@@ -146,6 +146,7 @@ async function sendToApp(payload) {
     title: payload.title || "",
     quality: payload.quality || "",
     mode: payload.mode || "",
+    pageUrl: payload.pageUrl || "",
     cookies,
   };
   try {
@@ -244,7 +245,7 @@ function resolveTick(tabId) {
     try { Promise.resolve(api.tabs.sendMessage(tabId, {type: "md-autoplay"})).catch(() => {}); } catch (e) {}
   }
   const state = tabs.get(tabId);
-  const streams = state ? state.streams.filter(s => !s.drm) : [];
+  const streams = state ? currentStreams(state).filter(s => !s.drm) : [];
   if (streams.length && !entry.firstStream) entry.firstStream = now;
   const hasMaster = streams.some(s => s.master);
   const ready = streams.length && ((hasMaster && now - entry.firstStream > 2500) || now - entry.firstStream > 9000);
@@ -282,7 +283,7 @@ async function finishResolve(tabId, streams, closeTab) {
 
 function announce(tabId) {
   const state = tabs.get(tabId);
-  const count = state ? state.streams.filter(s => !s.drm).length : 0;
+  const count = state ? currentStreams(state).filter(s => !s.drm).length : 0;
   try {
     Promise.resolve(api.action.setBadgeBackgroundColor({tabId, color: "#7657ff"})).catch(() => {});
     Promise.resolve(api.action.setBadgeText({tabId, text: count ? String(count) : ""})).catch(() => {});
@@ -535,10 +536,15 @@ api.tabs.onUpdated.addListener(async (tabId, change) => {
   const state = await tabState(tabId);
   const origin = (() => { try { return new URL(change.url).origin; } catch (e) { return ""; } })();
   if (state.origin && origin !== state.origin) {
-    tabs.set(tabId, {gen: 0, navGen: 0, origin, streams: [], children: []});
+    tabs.set(tabId, {gen: 0, navGen: 0, origin, page: change.url.split("#")[0], streams: [], children: []});
   } else {
     state.origin = origin;
-    if (change.status === "loading") state.navGen = state.gen; // older streams belong to the previous page
+    // A new page (full load or an in-page route change, e.g. the next episode): everything
+    // captured so far belongs to the previous page. Hash-only changes keep the streams.
+    const page = change.url.split("#")[0];
+    if (change.status === "loading" || (state.page && page !== state.page)) state.navGen = state.gen;
+    state.page = page;
+    currentStreams(state);
   }
   persist(tabId);
   announce(tabId);
@@ -582,14 +588,23 @@ function itemsFor(stream) {
     label: (stream.ext || "media").toUpperCase() + " file", detail: fmtSize(stream.size)}];
 }
 
+// Only streams loaded by the page that is open now; anything from pages the tab showed
+// before is hidden (and dropped) so the menu never offers an old video.
+function currentStreams(state) {
+  if (!state) return [];
+  if (state.navGen && state.streams.some(s => s.gen <= state.navGen)) {
+    state.streams = state.streams.filter(s => s.gen > state.navGen);
+  }
+  return state.streams;
+}
+
 async function menuFor(tabId) {
   const state = await tabState(tabId);
-  const sorted = [...state.streams].sort((a, b) => b.gen - a.gen);
+  const sorted = [...currentStreams(state)].sort((a, b) => b.gen - a.gen);
   let nowGiven = false;
   const groups = sorted.map(stream => {
     let label = "Earlier stream";
-    if (!nowGiven && stream.gen > state.navGen) { label = "Now playing"; nowGiven = true; }
-    else if (stream.gen <= state.navGen) label = "From the previous page";
+    if (!nowGiven) { label = "Now playing"; nowGiven = true; }
     const kind = stream.kind === "file" ? (stream.ext || "file").toUpperCase() : stream.kind.toUpperCase();
     const meta = [kind, fmtDuration(stream.duration), hostOf(stream.url)].filter(Boolean).join(" · ");
     return {id: stream.id, label, meta, current: label === "Now playing", items: itemsFor(stream)};

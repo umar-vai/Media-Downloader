@@ -28,6 +28,9 @@ NAV = [
 TOOLS = [("Media editor", "", "open_editor"), ("History", "", "open_history"),
          ("Settings", "", "open_settings")]
 
+# pages shown inside the main window that are not canvas pages -> the sidebar tool that opens them
+PANEL_PAGES = {"settings": "open_settings", "history": "open_history"}
+
 TITLES = {
     "download": ("Download", "Paste a link, pick a format and save it."),
     "batch": ("Batch download", "Add many links at once — everything stays right here."),
@@ -140,18 +143,50 @@ class UIMixin:
         self.sb_divider.place(w - 1, 0, 1, h)
         return h
 
+    def _panel_page(self, name: str):
+        """Settings and History are full CustomTkinter pages shown in the same window."""
+        if name == "settings":
+            # Rebuilt on every visit so it always shows the settings currently in use.
+            old = getattr(self, "settings_panel", None)
+            if old is not None:
+                old.destroy()
+            return self._build_settings_panel()
+        page = getattr(self, "history_page", None)
+        if page is None:
+            page = self._build_history_page()
+        else:
+            page.refresh()
+        return page
+
     def show_page(self, name: str) -> None:
-        if name not in self.pages:
+        if name not in self.pages and name not in PANEL_PAGES:
             return
+        current = getattr(self, "current_page", "")
+        panel = getattr(self, "settings_panel", None)
+        if current == "settings" and name != "settings" and panel is not None and not panel.can_leave():
+            return
+        if name == current and name in PANEL_PAGES:
+            return
+        widget = self._panel_page(name) if name in PANEL_PAGES else None
         self.current_page = name
         for key, page in self.pages.items():
             if key == name:
                 page.grid()
             else:
                 page.grid_remove()
+        for key in PANEL_PAGES:
+            other = getattr(self, "settings_panel" if key == "settings" else "history_page", None)
+            if other is not None and key != name:
+                other.grid_remove()
+        if widget is not None:
+            widget.grid(row=0, column=0, sticky="nsew")
+            widget.lift()
         for key, button in self.nav_buttons.items():
             button.set_active(key == name)
-        self.pages[name].request_layout()
+        for (_label, _glyph, method), button in zip(TOOLS, self.tool_buttons):
+            button.set_active(PANEL_PAGES.get(name) == method)
+        if name in self.pages:
+            self.pages[name].request_layout()
         self._render_download_activity()
         if name == "download":
             self.url_entry.focus_set()
