@@ -85,6 +85,19 @@ class RowTests(unittest.TestCase):
         self.assertEqual((retry["status"], retry["has_details"]), ("retrying", True))
         self.assertTrue(dl.queue_row(snap(status="failed", error="boom"))["has_details"])
 
+    def test_merge_and_other_running_phases_are_named(self) -> None:
+        merging = dl.queue_row(snap(status="running", progress=0.985, detail="Merging video and audio…"),
+                               {"speed_bps": 9_000_000, "eta_seconds": 0})
+        self.assertEqual((merging["status"], merging["status_text"], merging["speed_text"]),
+                         ("finishing", "Merging…", ""))
+        self.assertIn("stop", dl.available_actions([merging]))
+        self.assertEqual(dl.queue_row(snap(status="running", progress=0.99, detail="Finalizing file…"))["status_text"],
+                         "Finishing…")
+        self.assertEqual(dl.queue_row(snap(status="running", detail="Analyzing batch link…"))["status_text"],
+                         "Analyzing…")
+        self.assertEqual(dl.queue_row(snap(status="running", progress=0.4, detail="2.0 MB/s"))["status_text"], "40.0%")
+        self.assertEqual(dl.totals([merging])["downloading"], 1)
+
     def test_speed_is_hidden_once_not_running(self) -> None:
         row = dl.queue_row(snap(status="paused", progress=0.2), {"speed_bps": 5000, "eta_seconds": 9})
         self.assertEqual((row["speed_text"], row["eta_text"]), ("", ""))

@@ -36,6 +36,7 @@ from single_instance import cleanup_stale_updater_copies
 import theme
 import ui_kit as ui
 import download_list
+import file_download
 from download_queue import DownloadQueue, DownloadRequest
 from history_store import HistoryStore, make_history_entry
 from media_probe import probe_media
@@ -49,7 +50,7 @@ from download_rules import parse_rules, resolve_target
 from extension_server import ExtensionServer, purge_old_cookie_files, write_cookie_file
 from failure_dialog import FailureDialog
 from hotkey import GlobalHotkey, MOD_ALT, MOD_CONTROL
-from settings_window import SettingsPanel
+from options_dialog import OptionsDialog
 from update_manager import LATEST_RELEASE_WEB, ReleaseInfo, download_installer_release, download_release, fetch_latest_release, is_newer_version
 from version import APP_VERSION
 
@@ -97,6 +98,16 @@ def _recent_ext_analysis(url: str) -> tuple[dict[str, Any], dict[str, Any]] | No
     return copy.deepcopy(hit[1]), copy.deepcopy(hit[2])
 
 
+def _link_label(url: str) -> str:
+    """A readable name for a link that could not be read yet (instead of "Batch item 1")."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "link").removeprefix("www.")
+    tail = parts.path.rstrip("/").rsplit("/", 1)[-1]
+    if parts.query and len(parts.query) <= 40:
+        tail = f"{tail}?{parts.query}" if tail else f"?{parts.query}"
+    return f"{host}/{tail}"[:120] if tail else host
+
+
 def _looks_transient(message: str) -> bool:
     return not _PERMANENT_ERRORS.search(message) and bool(_TRANSIENT_ERRORS.search(message))
 
@@ -114,6 +125,7 @@ HISTORY_FILE = CONFIG_DIR / "history.json"
 LEGACY_CONFIG_DIR = Path(os.getenv("APPDATA") or Path.home()) / ("Team" + "Fahad" + "Downloader")
 LEGACY_CONFIG_FILE = LEGACY_CONFIG_DIR / "settings.json"
 EXT_COOKIE_DIR = CONFIG_DIR / "ext_cookies"
+EXTENSION_DIR = Path.home() / "Documents" / "MediaDownloader-Browser-Extension"
 UPDATE_DIR = Path(os.getenv("LOCALAPPDATA") or CONFIG_DIR) / "MediaDownloader" / "updates"
 UPDATE_RESULT_FILE = CONFIG_DIR / "update-result.json"
 UPDATE_LOG_FILE = CONFIG_DIR / "update.log"
@@ -375,7 +387,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.last_file: Path | None = None
         self.editor_window: MediaEditorWindow | None = None
         self.diagnostics_window: DiagnosticsWindow | None = None
-        self.settings_panel: SettingsPanel | None = None
+        self.settings_panel: OptionsDialog | None = None
         self.settings_window: Any = None
         self.task_state = TaskState.IDLE
 
@@ -768,7 +780,25 @@ class DownloaderApp(UIMixin, ctk.CTk):
         ).start()
         self.after(150_000, lambda jid=job_id, source=url: self._analysis_watchdog(jid, source))
 
+    def _file_analysis(self, url: str, name: str = "") -> dict[str, Any]:
+        """Add URL with a link to a plain file (zip, exe, pdf...): no video to read, just save it."""
+        name = name or file_download.name_from_url(url) or "download"
+        return {
+            "source_url": url,
+            "title": name,
+            "channel": urlsplit(url).hostname or "File",
+            "duration": "--:--",
+            "views": None,
+            "platform": "file",
+            "info": {"direct_file": True, "title": name},
+            "thumbnail": None,
+        }
+
     def _analyze_media_worker(self, job_id: int, cancel_event: threading.Event, url: str) -> None:
+        if file_download.looks_like_file(url):
+            self._put_analysis_event("analysis_info", job_id, self._file_analysis(url))
+            self._put_analysis_event("analysis_finished", job_id)
+            return
         try:
             summary, info = shared_analyze_url(
                 url,
@@ -779,6 +809,10 @@ class DownloaderApp(UIMixin, ctk.CTk):
                     f"{text}…" if text and not str(text).endswith("…") else str(text),
                 ),
             )
+            if file_download.is_plain_file_info(info) and not cancel_event.is_set():
+                found = file_download.probe_file(url) or {}
+                self._put_analysis_event("analysis_info", job_id, self._file_analysis(url, found.get("name", "")))
+                return
 
             thumb_bytes = None
             thumbnail_url = str(summary.get("thumbnail") or "")
@@ -811,6 +845,11 @@ class DownloaderApp(UIMixin, ctk.CTk):
         except SharedCancelled:
             self._put_analysis_event("analysis_cancelled", job_id, "Analysis cancelled.")
         except Exception as exc:
+            found = None if cancel_event.is_set() else file_download.probe_file(url)
+            if found:
+                LOGGER.info("Analysis %s: link is a plain file", job_id)
+                self._put_analysis_event("analysis_info", job_id, self._file_analysis(url, found["name"]))
+                return
             LOGGER.exception("Analysis %s failed", job_id)
             self._put_analysis_event(
                 "analysis_error",
@@ -896,14 +935,15 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 "audio_quality": bitrate,
                 "source_url": url,
                 "page_url": site_url,
-                "history_title": f"Batch item {index}",
+                "history_title": str((extra or {}).get("title_hint") or "") or _link_label(url),
                 "history_platform": platform_name(site_url),
                 "history_quality": url_quality if mode == "Video" else f"{audio_format} {bitrate} kbps",
                 "history_duration": 0,
             }
+            file_name = str((extra or {}).get("file_name") or "") if len(urls) == 1 else ""
             payloads.append({
                 "url": url,
-                "name": f"Link {index} • {urlsplit(url).hostname or 'media'}",
+                "name": file_name or _link_label(url),
                 "batch_id": batch_id,
                 "batch_index": index,
                 "download_dir": str(target_dir),
@@ -975,6 +1015,11 @@ class DownloaderApp(UIMixin, ctk.CTk):
             "source_url": url,
             "page_url": url,
         }
+        if info.get("direct_file"):
+            # A plain file: keep the name the user typed, with the link's file extension.
+            ext = os.path.splitext(str(info.get("title") or ""))[1]
+            request_settings.update({"direct": True, "history_quality": "",
+                                     "file_name": name if name.lower().endswith(ext.lower()) else name + ext})
 
         request = self.download_queue.enqueue(
             {
@@ -1020,8 +1065,9 @@ class DownloaderApp(UIMixin, ctk.CTk):
             headers=dict(request_settings.get("http_headers") or {}),
             skip_existing=False if request_settings.get("force_redownload") else None,
         )
+        direct = bool(request_settings.get("direct"))
         try:
-            if request_settings.get("batch_id"):
+            if request_settings.get("batch_id") and not direct:
                 if cancel_event.is_set():
                     raise SharedCancelled("Batch item cancelled before analysis.")
                 self._put_download_event(
@@ -1040,20 +1086,41 @@ class DownloaderApp(UIMixin, ctk.CTk):
                     )
 
                 fallback_url = str(request_settings.get("fallback_url") or "")
+
+                def plain_file() -> bool:
+                    found = file_download.probe_file(
+                        url,
+                        headers=dict(request_settings.get("http_headers") or {}),
+                        cookiefile=str(request_settings.get("cookiefile") or ""),
+                        referer=str(request_settings.get("referer") or ""),
+                    )
+                    if found and not request_settings.get("file_name"):
+                        request_settings["file_name"] = found["name"]
+                    return found is not None
+
                 try:
                     summary, extracted_info = analyze(url)
                 except SharedCancelled:
                     raise
                 except Exception as exc:
-                    # The page could not be read: use the stream the browser captured instead.
-                    if not fallback_url or fallback_url == url or cancel_event.is_set():
+                    if fallback_url and fallback_url != url and not cancel_event.is_set():
+                        # The page could not be read: use the stream the browser captured instead.
+                        LOGGER.info("Page analysis failed request=%s, using captured stream: %s", request_id, exc)
+                        url = fallback_url
+                        request_settings.pop("fallback_url", None)
+                        summary, extracted_info = analyze(url)
+                    elif not cancel_event.is_set() and plain_file():
+                        # Not a video page but a file (download.php?id=..., an attachment...): save it as-is.
+                        LOGGER.info("Link is a plain file, downloading it directly request=%s", request_id)
+                        direct = True
+                        summary, extracted_info = {}, {}
+                    else:
                         raise
-                    LOGGER.info("Page analysis failed request=%s, using captured stream: %s", request_id, exc)
-                    url = fallback_url
-                    request_settings.pop("fallback_url", None)
-                    summary, extracted_info = analyze(url)
+                if not direct and file_download.is_plain_file_info(extracted_info) and plain_file():
+                    direct = True
                 if cancel_event.is_set():
                     raise SharedCancelled("Batch item cancelled after analysis.")
+            if request_settings.get("batch_id") and not direct:
                 cached_info = extracted_info
                 # Streams captured by the browser extension carry the page title; a bare
                 # .m3u8 would otherwise be saved as "master" or "index".
@@ -1077,10 +1144,34 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 request_settings["history_duration"] = int(
                     float(summary.get("duration") or 0)
                 )
+            if direct:
+                suggested = str(request_settings.get("file_name") or "") or file_download.name_from_url(url)
+                stem, ext = os.path.splitext(file_download.clean_filename(suggested))
+                name = self._reserve_name(request_id, stem) + ext
+                self._put_download_event("download_name", request_id, name)
+                request_settings["history_title"] = name
+                request_settings["history_quality"] = ""
             attempt = 0
             while True:
                 attempt += 1
                 try:
+                    if direct:
+                        final_path = file_download.direct_download(
+                            url=url,
+                            download_dir=download_dir,
+                            filename=name,
+                            cancel_event=cancel_event,
+                            headers=dict(request_settings.get("http_headers") or {}),
+                            cookiefile=str(request_settings.get("cookiefile") or ""),
+                            referer=str(request_settings.get("referer") or ""),
+                            on_status=lambda text: self._put_download_event("download_status", request_id, f"{text}…"),
+                            on_progress=lambda value, detail: self._put_download_event(
+                                "download_progress", request_id,
+                                {"percent": float(value) * 100.0, "detail": str(detail or "")},
+                            ),
+                            on_metrics=lambda metrics: self._put_download_event("download_metrics", request_id, metrics),
+                        )
+                        break
                     final_path = shared_download_from_analysis(
                         url=url,
                         cached_info=dict(cached_info or {}),
@@ -1118,7 +1209,8 @@ class DownloaderApp(UIMixin, ctk.CTk):
                     if cancel_event.wait(min(3 * attempt, 15)):
                         raise SharedCancelled("Download cancelled while waiting to retry.")
 
-            probe = probe_media(Path(final_path))
+            media_file = download_list.category_for(Path(final_path).name) in {"video", "audio"}
+            probe = probe_media(Path(final_path)) if media_file else {}
             self._put_download_event(
                 "download_done",
                 request_id,
@@ -1203,6 +1295,8 @@ class DownloaderApp(UIMixin, ctk.CTk):
                         )
                         self._apply_thumbnail(media.get("thumbnail"))
                         self.download_button.configure(state="normal")
+                        if isinstance(self.current_info, dict) and self.current_info.get("direct_file"):
+                            self.download_button.configure(text="Download file")
                         self.task_state = TaskState.READY
                         self._set_status(f"{platform_label} media information loaded", "ready")
                         self._finish_analysis(job_id)
@@ -1237,6 +1331,11 @@ class DownloaderApp(UIMixin, ctk.CTk):
                     elif kind == "analysis_finished":
                         self._finish_analysis(job_id)
 
+                    continue
+
+                if kind == "history_loaded":
+                    if isinstance(payload, dict):
+                        self._history_loaded(payload)
                     continue
 
                 if kind == "external_download":
@@ -1809,6 +1908,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
 
     def _start_integrations(self) -> None:
         self._sync_hotkeys()
+        self._refresh_browser_extension()
         if self.extension_server is None and self.settings.get("extension_enabled", True):
             server = ExtensionServer(
                 token=str(self.settings.get("extension_token") or ""),
@@ -1942,8 +2042,17 @@ class DownloaderApp(UIMixin, ctk.CTk):
         if title:
             extra["title_hint"] = title
         page_url = str(data.get("pageUrl") or "").strip()
+        kind = str(data.get("kind") or "")
+        # A download the browser started ("file"), or a right-clicked link to a zip/exe/pdf...,
+        # is saved as-is instead of being read as a video page.
+        direct = kind == "file" or (kind != "media" and file_download.looks_like_file(url))
+        if direct:
+            name = file_download.clean_filename(str(data.get("fileName") or ""), "") or file_download.name_from_url(url)
+            extra["direct"] = True
+            extra["file_name"] = name or "download"
         if page_url.startswith(("http://", "https://")):
             extra["page_url"] = page_url
+        if page_url.startswith(("http://", "https://")) and not direct:
             # A short-lived CDN playlist of a site yt-dlp knows (e.g. Eporner): download the
             # page instead, which gets fresh links; the captured stream stays as a fallback.
             try:
@@ -1973,14 +2082,15 @@ class DownloaderApp(UIMixin, ctk.CTk):
             LOGGER.warning("Extension link rejected: %s", exc)
             return
         if self.tray is not None:
-            self.tray.notify("Link added from the browser.", "Media Downloader")
+            message = f"Downloading {extra['file_name']}" if direct else "Link added from the browser."
+            self.tray.notify(message, "Media Downloader")
 
     def export_browser_extension(self) -> None:
         from browser_extension import export_extension
 
-        target = Path.home() / "Documents" / "MediaDownloader-Browser-Extension"
+        target = EXTENSION_DIR
         try:
-            export_extension(target)
+            export_extension(target, str(self.settings.get("extension_token") or ""))
         except OSError as exc:
             messagebox.showerror(APP_NAME, f"Could not export the extension.\n\n{exc}")
             return
@@ -1988,11 +2098,31 @@ class DownloaderApp(UIMixin, ctk.CTk):
             os.startfile(str(target))  # type: ignore[attr-defined]
         except Exception:
             pass
+        try:
+            self.clipboard_clear()
+            self.clipboard_append("chrome://extensions")
+        except Exception:
+            pass
         messagebox.showinfo(
             APP_NAME,
-            f"Extension files exported to:\n{target}\n\nLoad that folder as an unpacked extension in your browser, "
-            "then paste the pairing token in the extension options.",
+            f"The browser extension is ready in:\n{target}\n\n"
+            "1. Open your browser's extensions page (chrome://extensions is on the clipboard; Edge: edge://extensions).\n"
+            "2. Turn on Developer mode and choose Load unpacked, then pick that folder.\n"
+            "   Already installed? Just press Reload on the extension.\n\n"
+            "It connects to Media Downloader by itself - there is no token to copy. From then on, files you "
+            "download in the browser are downloaded by Media Downloader.",
+            parent=self,
         )
+
+    def _refresh_browser_extension(self) -> None:
+        """After an update, rewrite the extension folder the user installed from (if any)."""
+        from browser_extension import refresh_exported_extension
+
+        try:
+            if refresh_exported_extension(EXTENSION_DIR, str(self.settings.get("extension_token") or "")):
+                LOGGER.info("Browser extension files updated in %s", EXTENSION_DIR)
+        except OSError as exc:
+            LOGGER.warning("Could not update the browser extension files: %s", exc)
 
     def open_command_palette(self) -> None:
         existing = getattr(self, "_palette", None)
@@ -2271,20 +2401,27 @@ class DownloaderApp(UIMixin, ctk.CTk):
     def _persist_settings(self) -> None:
         save_settings(self.settings)
 
-    def _build_settings_panel(self, master: Any, on_close: Any) -> SettingsPanel:
-        panel = SettingsPanel(
-            master,
+    def _build_options_dialog(self, on_close: Any) -> OptionsDialog:
+        server = self.extension_server
+        if server is None:
+            status = "The browser link is off (turn it on below, then restart the app)."
+        elif server.extension_connected:
+            status = "Connected: the browser extension is talking to Media Downloader."
+        else:
+            status = "Ready: install the extension and it connects by itself."
+        return OptionsDialog(
+            self,
             self.settings,
             on_save=self._apply_settings,
-            on_check_updates=lambda: self.check_for_updates(manual=True),
+            on_check_updates=lambda: (self.show_page("updates"), self.check_for_updates(manual=True)),
             on_open_diagnostics=self.open_diagnostics,
             on_open_log=self.open_app_log,
             on_open_release=self.open_release_page,
             on_export_extension=self.export_browser_extension,
             on_close=on_close,
+            extension_status=status,
+            icon=str(_icon_path()) if _icon_path() else None,
         )
-        self.settings_panel = panel
-        return panel
 
     def _apply_settings(self, payload: dict[str, Any]) -> None:
         candidate = dict(self.settings)

@@ -15,23 +15,25 @@ from __future__ import annotations
 import io
 import os
 import subprocess
+import threading
 import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 from typing import Any
 
 import customtkinter as ctk
 from PIL import Image, ImageTk
 
 import download_list as dl
+import native
 import theme
 import ui_kit as ui
 from batch_page import BatchSection
 from history_window import PropertiesDialog
 from icons import IconSet
-from main_window import (CategoryTree, ConfirmDelete, DetailsPane, DownloadTable, PageDialog, SearchBox, StatusBar,
+from main_window import (CategoryTree, ConfirmDelete, DetailsPane, DownloadTable, SearchBox, StatusBar,
                          Toolbar, UpdateBadge, setup_style)
 from theme import C
 from ui_kit import px
@@ -39,12 +41,9 @@ from version import APP_VERSION
 
 THUMB_W, THUMB_H = 184, 104
 _ICON_FILE = Path(__file__).resolve().parent / "assets" / "app_icon.ico"
-STATUS_STYLES = {
-    "ready": (ui.SUCCESS_SOFT, ui.SUCCESS, "READY"),
-    "working": (ui.INFO_SOFT, ui.CYAN, "WORKING"),
-    "success": (ui.SUCCESS_SOFT, ui.SUCCESS, "COMPLETE"),
-    "cancelled": (ui.WARNING_SOFT, ui.WARNING, "CANCELLED"),
-    "error": (ui.DANGER_SOFT, ui.DANGER, "FAILED"),
+STATUS_COLORS = {
+    "ready": C["SUCCESS"], "working": C["ACCENT"], "success": C["SUCCESS"], "cancelled": C["WARNING"],
+    "error": C["DANGER"],
 }
 EMPTY_TEXT = {
     "all": ("No downloads yet", "Click Add URL (Ctrl+N) and paste a link, or send a video from your browser\n"
@@ -93,9 +92,11 @@ class UIMixin:
         self._query = ""
         self._rows: list[dict[str, Any]] = []
         self._rows_by_key: dict[str, dict[str, Any]] = {}
-        self._history_rows: list[dict[str, Any]] | None = None
+        self._history_rows: list[dict[str, Any]] = []
         self._history_entries: dict[str, dict[str, Any]] = {}
         self._history_built_at = 0.0
+        self._history_generation = 0
+        self._history_loading = False
         self._discard_ids: set[str] = set()
         self._heading_drag = False
         self._shown_keys: list[str] = []
@@ -116,6 +117,7 @@ class UIMixin:
         self._bind_shortcuts()
 
         self._sync_mode(self.mode_var.get())
+        self._invalidate_history()
         self.category_tree.select("all")
         self.table.mark_sort(self._sort_column, self._sort_desc)
         self._render_download_activity()
@@ -306,229 +308,168 @@ class UIMixin:
 
     def _on_focus_in(self, _event: Any = None) -> None:
         # Files can be moved or deleted outside the app; check again when the user comes back.
-        if self._history_rows is not None and time.monotonic() - self._history_built_at > 20:
+        if time.monotonic() - self._history_built_at > 20:
             self._invalidate_history()
 
     # ============================================================== dialogs
     def _build_add_dialog(self) -> None:
-        dialog = PageDialog(self, "Add URL", self._layout_add, size=(860, 720), minsize=(720, 560),
-                            icon=self._icon_file)
+        dialog = native.HiddenDialog(self, "Add URL", icon=self._icon_file)
         self.add_dialog = dialog
-        p = dialog.page
-        self.add_title = ui.Label(p, "New download", fg=ui.TEXT, size=21, bold=True)
-        self.add_sub = ui.Label(p, "Paste a link to a video or audio page. It is analyzed automatically.",
-                                fg=ui.MUTED, size=12)
-        self.status_chip = ui.Chip(p, "READY", fg=ui.SUCCESS, bg=ui.SUCCESS_SOFT)
-        self.status_label = ui.Label(p, "", fg=ui.MUTED, size=11, anchor="ne", ellipsis=True, relayout=False)
+        body = dialog.body
+        body.grid_columnconfigure(1, weight=1)
 
-        self.link_card = ui.Card(p)
-        self.link_cap = ui.Label(p, "ADDRESS", fg=ui.CYAN, size=10, bold=True)
-        self.url_entry = ui.Field(p, var=self.url_var, size=13,
-                                  placeholder="https://  — paste any public media link")
-        self.url_entry.bind("<Return>", lambda _e: self.analyze_media())
+        # address
+        ttk.Label(body, text="Address:").grid(row=0, column=0, sticky="w", padx=(0, native.GAP))
+        self.url_entry = ttk.Entry(body, textvariable=self.url_var, width=62)
+        self.url_entry.grid(row=0, column=1, sticky="ew")
+        self.url_entry.bind("<Return>", lambda _e: (self.analyze_media(), "break")[1])
         self.url_entry.bind("<KeyRelease>", self._on_url_changed)
-        self.paste_button = ui.Btn(p, "Paste", self.paste_from_clipboard, style="secondary", size=12)
-        self.read_button = ui.Btn(p, "Analyze", self.analyze_media, style="primary", size=12)
-        self.cancel_analysis_button = ui.Btn(p, "Cancel", self.cancel_analysis, style="ghost", size=12,
-                                             state="disabled")
+        links = ttk.Frame(body)
+        links.grid(row=0, column=2, sticky="e", padx=(native.GAP, 0))
+        self.paste_button = native.Button(links, text="Paste", command=self.paste_from_clipboard, width=9)
+        self.paste_button.pack(side="left")
+        self.read_button = native.Button(links, text="Analyze", command=self.analyze_media, width=11)
+        self.read_button.pack(side="left", padx=(native.GAP, 0))
+        self.cancel_analysis_button = native.Button(links, text="Stop", command=self.cancel_analysis, width=9,
+                                                    state="disabled")
+        self.cancel_analysis_button.pack(side="left", padx=(native.GAP, 0))
+        native.Text(body, "Paste a link to a video, audio or file. It is read automatically.",
+                    style="Hint.TLabel").grid(row=1, column=1, columnspan=2, sticky="w", pady=(2, native.PAD))
 
-        self.media_card = ui.Card(p)
-        self.thumb = ui.Thumb(p)
-        self.media_badge = ui.Chip(p, "WAITING FOR LINK", fg=ui.MUTED, bg=ui.SURFACE_2, size=9)
-        self.title_label = ui.Label(p, "Analyze a link to see its details", fg=ui.TEXT, size=16, bold=True, wrap=True)
-        self.meta_label = ui.Label(p, "Title, creator, platform and duration appear here.", fg=ui.MUTED, size=12,
-                                   wrap=True)
-        self.media_action_hint = ui.Label(p, "Paste a link — it analyzes automatically.", fg=ui.FAINT, size=11,
-                                          wrap=True)
+        # what the link is
+        info = native.group(body, "File information", row=2, column=0, columnspan=3, sticky="ew")
+        info.grid_columnconfigure(1, weight=1)
+        thumb_box = tk.Frame(info, width=px(THUMB_W), height=px(THUMB_H), bg=C["SURFACE_3"],
+                             highlightthickness=1, highlightbackground=C["BORDER"])
+        thumb_box.grid(row=0, column=0, rowspan=4, sticky="nw", padx=(0, native.PAD))
+        thumb_box.grid_propagate(False)
+        thumb_box.pack_propagate(False)
+        self.thumb = _Thumb(thumb_box)
+        self.media_badge = native.Text(info, "WAITING FOR LINK", style="Hint.TLabel")
+        self.media_badge.grid(row=0, column=1, sticky="w")
+        self.title_label = native.Text(info, "Analyze a link to see its details", style="Title.TLabel",
+                                       wrap=px(440))
+        self.title_label.grid(row=1, column=1, sticky="ew", pady=(2, 2))
+        self.meta_label = native.Text(info, "Title, creator, website and length appear here.", wrap=px(440))
+        self.meta_label.grid(row=2, column=1, sticky="ew")
+        self.media_action_hint = native.Text(info, "", style="Hint.TLabel", wrap=px(440))
+        self.media_action_hint.grid(row=3, column=1, sticky="ew", pady=(native.GAP, 0))
 
-        self.opts_card = ui.Card(p)
-        self.opts_cap = ui.Label(p, "SAVE AS", fg=ui.CYAN, size=10, bold=True)
-        self.cap_dl_type = ui.Label(p, "DOWNLOAD TYPE", fg=ui.MUTED, size=9, bold=True)
-        self.mode_control = ui.Segmented(p, ["Video", "Audio"], self.mode_var, command=self._sync_mode)
-        self.cap_name = ui.Label(p, "FILE NAME", fg=ui.MUTED, size=9, bold=True)
-        self.name_entry = ui.Field(p, var=self.name_var, placeholder="Filled in from the title")
-        self.cap_folder = ui.Label(p, "SAVE TO", fg=ui.MUTED, size=9, bold=True)
-        self.folder_entry = ui.Field(p, var=self.download_dir_var, readonly=True, fg=ui.MUTED)
-        self.choose_folder_button = ui.Btn(p, "Browse", self.choose_download_folder, style="secondary", size=11)
-        self.reset_folder_button = ui.Btn(p, "Default", self.reset_download_folder, style="ghost", size=11)
-        self.quality_label = ui.Label(p, "VIDEO QUALITY", fg=ui.MUTED, size=9, bold=True)
-        self.video_quality = ui.Select(p, ["360p", "480p", "720p", "1080p", "Best available"], self.video_quality_var)
-        self.audio_format_label = ui.Label(p, "AUDIO FORMAT", fg=ui.MUTED, size=9, bold=True)
-        self.audio_format = ui.Select(p, ["MP3", "M4A", "FLAC", "OPUS", "WAV"], self.audio_format_var)
-        self.audio_quality_label = ui.Label(p, "BITRATE (KBPS)", fg=ui.MUTED, size=9, bold=True)
-        self.audio_quality = ui.Select(p, ["128", "192", "256", "320"], self.audio_quality_var)
-        self.output_hint = ui.Label(p, "MP4 video • FFmpeg merge when needed", fg=ui.FAINT, size=10)
-        self.open_editor_after_check = ui.Check(p, "Open in editor after download", self.open_editor_after_var)
-        self.add_close_button = ui.Btn(p, "Close", dialog.close, style="ghost", size=12)
-        self.download_button = ui.Btn(p, "Download video", self.download, style="cyan", size=13, state="disabled")
-        self.status_label.show(False)
+        # how to save it
+        save = native.group(body, "Save as", row=3, column=0, columnspan=3, sticky="ew", pady=(native.PAD, 0))
+        save.grid_columnconfigure(1, weight=1)
+        ttk.Label(save, text="Type:").grid(row=0, column=0, sticky="w", padx=(0, native.PAD), pady=2)
+        kinds = ttk.Frame(save)
+        kinds.grid(row=0, column=1, columnspan=3, sticky="w", pady=2)
+        for value in ("Video", "Audio"):
+            ttk.Radiobutton(kinds, text=value, value=value, variable=self.mode_var,
+                            command=self._sync_mode).pack(side="left", padx=(0, native.PAD * 2))
+        self.quality_label = native.Text(save, "Video quality:")
+        self.quality_label.grid(row=1, column=0, sticky="w", padx=(0, native.PAD), pady=2)
+        self.video_quality = _Combo(save, self.video_quality_var, ["Best available", "1080p", "720p", "480p", "360p"])
+        self.video_quality.grid(row=1, column=1, sticky="w", pady=2)
+        self.audio_format_label = native.Text(save, "Audio format:")
+        self.audio_format_label.grid(row=2, column=0, sticky="w", padx=(0, native.PAD), pady=2)
+        audio = ttk.Frame(save)
+        audio.grid(row=2, column=1, columnspan=3, sticky="w", pady=2)
+        self.audio_format = _Combo(audio, self.audio_format_var, ["MP3", "M4A", "FLAC", "OPUS", "WAV"], width=8)
+        self.audio_format.pack(side="left")
+        self.audio_quality_label = native.Text(audio, "Bitrate (kbps):")
+        self.audio_quality_label.pack(side="left", padx=(native.PAD * 2, native.GAP))
+        self.audio_quality = _Combo(audio, self.audio_quality_var, ["128", "192", "256", "320"], width=6)
+        self.audio_quality.pack(side="left")
+        ttk.Label(save, text="File name:").grid(row=3, column=0, sticky="w", padx=(0, native.PAD), pady=2)
+        self.name_entry = ttk.Entry(save, textvariable=self.name_var)
+        self.name_entry.grid(row=3, column=1, columnspan=3, sticky="ew", pady=2)
+        ttk.Label(save, text="Save to:").grid(row=4, column=0, sticky="w", padx=(0, native.PAD), pady=2)
+        self.folder_entry = ttk.Entry(save, textvariable=self.download_dir_var, state="readonly")
+        self.folder_entry.grid(row=4, column=1, sticky="ew", pady=2)
+        self.choose_folder_button = native.Button(save, text="Browse…", command=self.choose_download_folder, width=10)
+        self.choose_folder_button.grid(row=4, column=2, padx=(native.GAP, 0))
+        self.reset_folder_button = native.Button(save, text="Default", command=self.reset_download_folder, width=9)
+        self.reset_folder_button.grid(row=4, column=3, padx=(native.GAP, 0))
+        self.output_hint = native.Text(save, "MP4 video • FFmpeg merge when needed", style="Hint.TLabel")
+        self.output_hint.grid(row=5, column=1, columnspan=3, sticky="w", pady=(2, 0))
+        self.open_editor_after_check = ttk.Checkbutton(body, text="Open in the media editor after downloading",
+                                                       variable=self.open_editor_after_var)
+        self.open_editor_after_check.grid(row=4, column=0, columnspan=3, sticky="w", pady=(native.PAD, 0))
 
-    def _layout_add(self, w: int, h: int) -> int:
-        x0 = px(24)
-        cw = w - 2 * x0 - px(4)
-        pad = px(18)
-        y = px(18)
-        self.add_title.place(x0, y)
-        self.add_sub.place(x0, y + px(34))
-        chip_w = self.status_chip.natural_w()
-        self.status_chip.place(x0 + cw - chip_w, y + px(6))
-        if self.status_label.visible:
-            self.status_label.place(x0 + cw, y + px(36), max(60, min(px(360), cw - px(420))))
-        y += px(66)
-
-        card_h = px(100)
-        self.link_card.place(x0, y, cw, card_h)
-        self.link_cap.place(x0 + pad, y + px(16))
-        bx = x0 + cw - pad
-        for button in (self.cancel_analysis_button, self.read_button, self.paste_button):
-            bw = button.natural_w(minimum=88 if button is not self.paste_button else 80)
-            button.place(bx - bw, y + px(40), bw, px(42))
-            bx -= bw + px(8)
-        self.url_entry.place(x0 + pad, y + px(40), bx - (x0 + pad) + px(4), px(42))
-        y += card_h + px(12)
-
-        tx = x0 + pad + px(THUMB_W) + pad
-        tw = x0 + cw - pad - tx
-        self.thumb.place(x0 + pad, y + pad, px(THUMB_W), px(THUMB_H))
-        self.media_badge.place(tx, y + pad)
-        ty = y + px(48)
-        h1 = self.title_label.place(tx, ty, tw)
-        h2 = self.meta_label.place(tx, ty + h1 + px(6), tw)
-        h3 = self.media_action_hint.place(tx, ty + h1 + px(6) + h2 + px(8), tw)
-        text_h = (ty - y) + h1 + px(6) + h2 + px(8) + h3 + pad
-        media_h = max(px(THUMB_H) + 2 * pad, text_h)
-        self.media_card.place(x0, y, cw, media_h)
-        y += media_h + px(12)
-
-        top = y
-        col_gap = px(24)
-        col_w = (cw - 2 * pad - col_gap) / 2
-        lx, rx = x0 + pad, x0 + pad + col_w + col_gap
-        self.opts_cap.place(lx, top + px(16))
-        r0 = top + px(44)
-        field_h = px(40)
-        self.cap_dl_type.place(lx, r0)
-        self.mode_control.place(lx, r0 + px(20), col_w, field_h)
-        self.cap_name.place(lx, r0 + px(70))
-        self.name_entry.place(lx, r0 + px(90), col_w, field_h)
-        self.cap_folder.place(lx, r0 + px(140))
-        browse_w = self.choose_folder_button.natural_w(minimum=84)
-        default_w = self.reset_folder_button.natural_w(minimum=76)
-        self.reset_folder_button.place(lx + col_w - default_w, r0 + px(160), default_w, field_h)
-        self.choose_folder_button.place(lx + col_w - default_w - px(8) - browse_w, r0 + px(160), browse_w, field_h)
-        self.folder_entry.place(lx, r0 + px(160), col_w - default_w - browse_w - px(16), field_h)
-
-        self.quality_label.place(rx, r0)
-        self.video_quality.place(rx, r0 + px(20), col_w, field_h)
-        half = (col_w - px(12)) / 2
-        self.audio_format_label.place(rx, r0 + px(70))
-        self.audio_quality_label.place(rx + half + px(12), r0 + px(70))
-        self.audio_format.place(rx, r0 + px(90), half, field_h)
-        self.audio_quality.place(rx + half + px(12), r0 + px(90), half, field_h)
-        self.output_hint.place(rx, r0 + px(146))
-        opts_h = (r0 + px(160) + field_h + pad) - top
-        self.opts_card.place(x0, top, cw, opts_h)
-        y = top + opts_h + px(14)
-
-        self.open_editor_after_check.place(x0 + px(2), y, px(44))
-        dl_w = max(px(190), self.download_button.natural_w())
-        self.download_button.place(x0 + cw - dl_w, y, dl_w, px(44))
-        close_w = self.add_close_button.natural_w(minimum=92)
-        self.add_close_button.place(x0 + cw - dl_w - px(10) - close_w, y, close_w, px(44))
-        return int(y + px(44) + px(18))
+        self.status_label = dialog.status
+        self.add_close_button = dialog.add_button("Cancel", dialog.close)
+        self.download_button = native.Button(dialog.buttons, text="Download video", command=self.download, width=16,
+                                             state="disabled", default="active")
+        self.download_button.pack(side="right", padx=(native.GAP, 0))
 
     def _build_batch_dialog(self) -> None:
-        dialog = PageDialog(self, "Add batch download", self._layout_batch, size=(860, 600), minsize=(700, 500),
-                            icon=self._icon_file)
+        dialog = native.HiddenDialog(self, "Add batch download", resizable=True, icon=self._icon_file)
         self.batch_dialog = dialog
-        p = dialog.page
-        self.batch_title = ui.Label(p, "Batch download", fg=ui.TEXT, size=21, bold=True)
-        self.batch_sub = ui.Label(p, "Paste up to 300 links, one per line. They download in the background and "
-                                     "show up in the list under Queues.", fg=ui.MUTED, size=12)
-        self.batch_page = BatchSection(p, on_enqueue=self._enqueue_batch_downloads, settings=self.settings,
-                                       on_queued=self._after_batch_queued, on_close=dialog.close)
-
-    def _layout_batch(self, w: int, h: int) -> int:
-        x0 = px(24)
-        cw = w - 2 * x0 - px(4)
-        y = px(20)
-        self.batch_title.place(x0, y)
-        self.batch_sub.place(x0, y + px(34))
-        end = self.batch_page.layout(x0, y + px(72), cw, h)
-        return int(end + px(22))
+        self.batch_page = BatchSection(dialog, on_enqueue=self._enqueue_batch_downloads, settings=self.settings,
+                                       on_queued=self._after_batch_queued)
 
     def _build_about_dialog(self) -> None:
-        dialog = PageDialog(self, "Updates & about", self._layout_updates, size=(760, 540), minsize=(620, 440),
-                            icon=self._icon_file)
+        dialog = native.HiddenDialog(self, "Updates & about", icon=self._icon_file)
         self.about_dialog = dialog
-        p = dialog.page
-        self.up_title = ui.Label(p, "Media Downloader", fg=ui.TEXT, size=21, bold=True)
-        self.up_sub = ui.Label(p, f"Version {APP_VERSION} • Updates & about", fg=ui.MUTED, size=12)
-        self.update_card_bg = ui.Card(p)
-        self.update_status_label = ui.Label(p, f"Current version: v{APP_VERSION}", fg=ui.TEXT, size=15, bold=True)
-        self.update_check_button = ui.Btn(p, "Check for updates", lambda: self.check_for_updates(manual=True),
-                                          style="secondary", size=11)
-        self.update_detail_label = ui.Label(
-            p,
-            "Automatic update checks are enabled." if self.auto_check_updates_var.get()
-            else "Automatic update checks are disabled.",
-            fg=ui.MUTED, size=11, wrap=True)
-        self.update_notes_label = ui.Label(p, "", fg=ui.MUTED, size=11, wrap=True)
-        self.update_progress = ui.Bar(p, height=8, color=ui.ACCENT)
-        self.update_action_button = ui.Btn(p, "Update now", self.download_or_install_update, style="primary",
-                                           size=12, state="disabled")
-        self.update_later_button = ui.Btn(p, "Later", self.snooze_update, style="ghost", size=12, state="disabled")
-        self.update_cancel_button = ui.Btn(p, "Cancel download", self.cancel_update_download, style="ghost",
-                                           size=12, state="disabled")
-        self.release_button = ui.Btn(p, "Open latest release", self.open_release_page, style="ghost", size=12)
+        body = dialog.body
+        body.grid_columnconfigure(1, weight=1)
+        try:
+            logo = self.icons.tool("folder", px(40))
+            if self._icon_file:
+                from PIL import Image as _Image
+                with _Image.open(self._icon_file) as ico:
+                    ico.size = max(ico.info.get("sizes") or {(48, 48)})
+                    picture = ico.convert("RGBA").resize((px(40), px(40)), _Image.Resampling.LANCZOS)
+                logo = ImageTk.PhotoImage(picture, master=dialog)
+            self._about_logo = logo
+            ttk.Label(body, image=logo).grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, native.PAD))
+        except Exception:
+            pass
+        ttk.Label(body, text="Media Downloader", style="Big.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(body, text=f"Version {APP_VERSION}", style="Hint.TLabel").grid(row=1, column=1, sticky="w")
 
-        self.about_card = ui.Card(p)
-        self.about_cap = ui.Label(p, "ABOUT", fg=ui.CYAN, size=10, bold=True)
-        self.save_location_label = ui.Label(p, f"Saving to  {self.download_dir}", fg=ui.MUTED, size=11,
-                                            ellipsis=True, relayout=False)
-        self.about_note = ui.Label(p, "Use only for content you own or have permission to download.", fg=ui.FAINT,
-                                   size=11)
-        self.diag_button = ui.Btn(p, "Diagnostics", self.open_diagnostics, style="secondary", size=11)
-        self.dev_button = ui.Btn(p, "Developed by Md Omar Faruk  ↗",
-                                 lambda: webbrowser.open("https://github.com/umar-vai"), style="ghost", size=11)
+        box = native.group(body, "Updates", row=2, column=0, columnspan=2, sticky="ew", pady=(native.PAD, 0))
+        box.grid_columnconfigure(0, weight=1)
+        self.update_status_label = native.Text(box, f"Current version: v{APP_VERSION}", style="Title.TLabel")
+        self.update_status_label.grid(row=0, column=0, sticky="w")
+        self.update_check_button = native.Button(box, text="Check for updates", width=18,
+                                                  command=lambda: self.check_for_updates(manual=True))
+        self.update_check_button.grid(row=0, column=1, sticky="e")
+        self.update_detail_label = native.Text(
+            box, "Automatic update checks are enabled." if self.auto_check_updates_var.get()
+            else "Automatic update checks are disabled.", wrap=px(460))
+        self.update_detail_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(native.GAP, 0))
+        self.update_notes_label = native.Text(box, "", style="Hint.TLabel", wrap=px(460))
+        self.update_notes_label.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(native.GAP, 0))
+        self.update_progress = native.Progress(box)
+        self.update_progress.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(native.PAD, 0))
+        actions = ttk.Frame(box)
+        actions.grid(row=4, column=0, columnspan=2, sticky="w", pady=(native.PAD, 0))
+        self.update_action_button = native.Button(actions, text="Update now", command=self.download_or_install_update,
+                                                  state="disabled", width=14)
+        self.update_action_button.pack(side="left")
+        self.update_later_button = native.Button(actions, text="Later", command=self.snooze_update, state="disabled",
+                                                 width=9)
+        self.update_later_button.pack(side="left", padx=(native.GAP, 0))
+        self.update_cancel_button = native.Button(actions, text="Cancel download", width=15, state="disabled",
+                                                  command=self.cancel_update_download)
+        self.update_cancel_button.pack(side="left", padx=(native.GAP, 0))
+        self.release_button = native.Button(actions, text="Open latest release", command=self.open_release_page,
+                                            width=18)
+        self.release_button.pack(side="left", padx=(native.GAP, 0))
 
-    def _layout_updates(self, w: int, h: int) -> int:
-        x0 = px(24)
-        cw = w - 2 * x0 - px(4)
-        pad = px(22)
-        y = px(20)
-        self.up_title.place(x0, y)
-        self.up_sub.place(x0, y + px(34))
-        top = y + px(72)
-        inner_w = cw - 2 * pad
-        self.update_status_label.place(x0 + pad, top + px(24))
-        cb = self.update_check_button.natural_w(minimum=150)
-        self.update_check_button.place(x0 + cw - pad - cb, top + px(16), cb, px(40))
-        cy = top + px(70)
-        cy += self.update_detail_label.place(x0 + pad, cy, inner_w) + px(8)
-        if self.update_notes_label.text:
-            cy += self.update_notes_label.place(x0 + pad, cy, inner_w) + px(8)
-        self.update_progress.place(x0 + pad, cy + px(6), inner_w)
-        cy += px(32)
-        bx = x0 + pad
-        for button in (self.update_action_button, self.update_later_button, self.update_cancel_button,
-                       self.release_button):
-            bw = button.natural_w(minimum=96)
-            button.place(bx, cy, bw, px(42))
-            bx += bw + px(8)
-        card_h = (cy + px(42) + pad) - top
-        self.update_card_bg.place(x0, top, cw, card_h)
-
-        top = top + card_h + px(16)
-        self.about_cap.place(x0 + pad, top + px(22))
-        self.save_location_label.place(x0 + pad, top + px(52), inner_w)
-        self.about_note.place(x0 + pad, top + px(76))
-        dw = self.diag_button.natural_w(minimum=110)
-        self.diag_button.place(x0 + pad, top + px(112), dw, px(38))
-        self.dev_button.place(x0 + pad + dw + px(8), top + px(112), self.dev_button.natural_w(), px(38))
-        about_h = px(112) + px(38) + pad
-        self.about_card.place(x0, top, cw, about_h)
-        return int(top + about_h + px(24))
+        about = native.group(body, "About", row=3, column=0, columnspan=2, sticky="ew", pady=(native.PAD, 0))
+        about.grid_columnconfigure(0, weight=1)
+        self.save_location_label = native.Text(about, f"Saving to  {self.download_dir}", wrap=px(460))
+        self.save_location_label.grid(row=0, column=0, columnspan=2, sticky="ew")
+        native.Text(about, "Use only for content you own or have permission to download.",
+                    style="Hint.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, native.PAD))
+        row = ttk.Frame(about)
+        row.grid(row=2, column=0, sticky="w")
+        self.diag_button = native.Button(row, text="Diagnostics…", command=self.open_diagnostics, width=14)
+        self.diag_button.pack(side="left")
+        self.dev_button = native.Button(row, text="Developer website", width=18,
+                                        command=lambda: webbrowser.open("https://github.com/umar-vai"))
+        self.dev_button.pack(side="left", padx=(native.GAP, 0))
+        dialog.add_button("Close", dialog.close, default=True)
 
     def _open_settings_dialog(self, tab: str | None = None) -> None:
         window = getattr(self, "settings_window", None)
@@ -536,42 +477,16 @@ class UIMixin:
             alive = window is not None and window.winfo_exists()
         except Exception:
             alive = False
-        if alive:
-            window.deiconify()
-            window.lift()
-            window.focus_force()
-            if tab and self.settings_panel is not None:
-                self.settings_panel.tabs.set(tab)
-            return
-        window = ctk.CTkToplevel(self)
-        window.title("Options")
-        window.configure(fg_color=ui.BG)
-        window.transient(self)
-        window.geometry("920x700")
-        window.minsize(760, 560)
-        self.settings_window = window
+        if not alive:
+            def closed() -> None:
+                self.settings_window = None
+                self.settings_panel = None
 
-        def close() -> None:
-            panel = self.settings_panel
-            if panel is not None and not panel.can_leave():
-                return
-            self.settings_panel = None
-            self.settings_window = None
-            window.destroy()
-
-        panel = self._build_settings_panel(window, close)
-        panel.pack(fill="both", expand=True)
+            window = self._build_options_dialog(closed)
+            self.settings_window = self.settings_panel = window
         if tab:
-            panel.tabs.set(tab)
-        window.protocol("WM_DELETE_WINDOW", close)
-        window.bind("<Escape>", lambda _e: close())
-        if self._icon_file:
-            window.after(260, lambda: window.winfo_exists() and window.iconbitmap(self._icon_file))
-        window.update_idletasks()
-        x = self.winfo_rootx() + max(0, (self.winfo_width() - window.winfo_width()) // 2)
-        y = self.winfo_rooty() + max(0, (self.winfo_height() - window.winfo_height()) // 4)
-        tk.Wm.geometry(window, f"+{max(0, x)}+{max(0, y)}")
-        window.after(60, window.focus_force)
+            window.select_tab(tab)
+        window.show()
 
     # =========================================================== navigation
     def show_page(self, name: str) -> None:
@@ -601,7 +516,7 @@ class UIMixin:
                 self.url_var.set(text)
                 self._on_url_changed()
         self.add_dialog.open()
-        self.after(60, self.url_entry.focus_set)
+        self.after(60, lambda: (self.url_entry.focus_set(), self.url_entry.icursor("end")))
 
     def _hide_window(self) -> None:
         if getattr(self, "tray", None) is not None:
@@ -703,23 +618,44 @@ class UIMixin:
         )
 
     def _set_status(self, text: str, kind: str = "ready") -> None:
-        bg, fg, chip = STATUS_STYLES.get(kind, STATUS_STYLES["ready"])
-        self.status_chip.configure(text=chip, fg_color=bg, text_color=fg)
-        self.status_label.configure(text=text)
-        self.status_label.show(bool(text))
-        self.statusbar.set_message(text, fg)
+        color = STATUS_COLORS.get(kind, STATUS_COLORS["ready"])
+        self.status_label.configure(text=text, foreground=color if kind in {"error", "cancelled"} else "")
+        self.statusbar.set_message(text, color)
 
     # ============================================================ list data
     def _invalidate_history(self) -> None:
-        self._history_rows = None
-        self._schedule_download_activity_refresh(40)
+        """Reload the history in the background. Reading it checks every file on the disk, and a
+        sleeping or busy drive must never freeze the window or the progress of running downloads."""
+        self._history_generation += 1
+        self._history_built_at = time.monotonic()
+        if self._history_loading:
+            return  # the running load sees the new generation and loads again when it finishes
+        self._history_loading = True
+        generation = self._history_generation
+
+        def load() -> None:
+            try:
+                entries = self.history_store.list()
+                rows = [dl.history_row(entry) for entry in entries]
+            except Exception:
+                entries, rows = [], []
+            self.events.put(("history_loaded", {"generation": generation, "entries": entries, "rows": rows}))
+
+        threading.Thread(target=load, daemon=True, name="history-load").start()
+
+    def _history_loaded(self, payload: dict[str, Any]) -> None:
+        self._history_loading = False
+        if payload.get("generation") != self._history_generation:
+            self._history_generation -= 1  # a newer change arrived while loading: load again
+            self._invalidate_history()
+            return
+        entries = payload.get("entries") or []
+        self._history_entries = {entry["id"]: entry for entry in entries}
+        self._history_rows = list(payload.get("rows") or [])
+        self._history_built_at = time.monotonic()
+        self._schedule_download_activity_refresh(20)
 
     def _history_rows_cached(self) -> list[dict[str, Any]]:
-        if self._history_rows is None:
-            entries = self.history_store.list()
-            self._history_entries = {entry["id"]: entry for entry in entries}
-            self._history_rows = [dl.history_row(entry) for entry in entries]
-            self._history_built_at = time.monotonic()
         return self._history_rows
 
     def _schedule_download_activity_refresh(self, delay_ms: int = 120) -> None:
@@ -1125,3 +1061,30 @@ class UIMixin:
             self.thumb.set_image(photo)
         except Exception:
             self._reset_thumbnail_label()
+
+
+class _Thumb:
+    """The preview picture in Add URL."""
+
+    def __init__(self, frame: tk.Frame) -> None:
+        self.label = tk.Label(frame, text="No preview", bg=C["SURFACE_3"], fg=C["FAINT"], font=native.font(frame))
+        self.label.pack(fill="both", expand=True)
+
+    def set_image(self, photo: Any) -> None:
+        self.label.configure(image=photo or "", text="" if photo else "No preview")
+
+
+class _Combo(ttk.Combobox):
+    """Read-only combo box; ``state="normal"`` from older code means "enabled" (read-only)."""
+
+    def __init__(self, master: tk.Misc, var: tk.Variable, values: list[str], width: int = 16) -> None:
+        super().__init__(master, textvariable=var, values=values, state="readonly", width=width)
+
+    def configure(self, cnf: Any = None, **kw: Any) -> Any:
+        if kw.get("state") == "normal":
+            kw["state"] = "readonly"
+        if cnf is None and not kw:
+            return super().configure()
+        return super().configure(cnf, **kw)
+
+    config = configure

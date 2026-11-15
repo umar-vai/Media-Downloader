@@ -17,11 +17,9 @@ from ui_kit import px
 
 
 def setup_style(root: tk.Misc) -> ttk.Style:
-    style = ttk.Style(root)
-    try:
-        style.theme_use("clam")
-    except tk.TclError:
-        pass
+    import native
+
+    style = native.setup(root)  # native Windows controls in the light theme
     body = ui.font(13)
     heading = ui.font(12, True)
     style.configure("MD.Treeview", background=C["SURFACE"], fieldbackground=C["SURFACE"], foreground=C["TEXT"],
@@ -468,31 +466,75 @@ class DownloadTable(tk.Frame):
 
 # --------------------------------------------------------------------------- details pane
 class ProgressBar(tk.Canvas):
+    """Glides to each new value; ``busy`` shows a moving segment (connecting, merging)."""
+
     def __init__(self, master: tk.Misc, height: int = 8) -> None:
         super().__init__(master, height=px(height), bg=C["SURFACE"], highlightthickness=0, bd=0)
         self.h = px(height)
         self.value = 0.0
+        self.shown = 0.0
+        self.busy = False
+        self.phase = 0.0
         self.color = C["ACCENT"]
+        self._job: str | None = None
         self.track = self.create_line(0, 0, 0, 0, width=self.h, capstyle="round", fill=C["SURFACE_3"])
         self.fill = self.create_line(0, 0, 0, 0, width=self.h, capstyle="round", fill=self.color)
+        self.glow = self.create_line(0, 0, 0, 0, width=self.h, capstyle="round", fill=C["ACCENT_SOFT"],
+                                     state="hidden")
         self.bind("<Configure>", lambda _e: self._draw())
 
-    def set(self, value: float, color: str | None = None) -> None:
-        self.value = max(0.0, min(1.0, float(value)))
+    def set(self, value: float, color: str | None = None, *, busy: bool = False, animate: bool = True) -> None:
+        value = max(0.0, min(1.0, float(value)))
         if color and color != self.color:
             self.color = color
             self.itemconfigure(self.fill, fill=color)
+        if not animate or value < self.shown - 0.05:
+            self.shown = value
+        self.value = value
+        self.busy = busy
         self._draw()
+        self._schedule()
+
+    def _schedule(self) -> None:
+        moving = self.busy or abs(self.value - self.shown) > 0.001
+        if moving and self._job is None:
+            self._job = self.after(30, self._tick)
+
+    def _tick(self) -> None:
+        self._job = None
+        if not self.winfo_exists():
+            return
+        diff = self.value - self.shown
+        self.shown = self.value if abs(diff) < 0.001 else self.shown + diff * 0.2
+        if self.busy:
+            self.phase = (self.phase + 0.012) % 1.0
+        self._draw()
+        self._schedule()
 
     def _draw(self) -> None:
         w = max(1, self.winfo_width())
         r = self.h / 2
-        self.coords(self.track, r, r, max(r, w - r), r)
-        if self.value <= 0.002:
+        left, right = r, max(r, w - r)
+        self.coords(self.track, left, r, right, r)
+        if self.shown <= 0.002:
             self.itemconfigure(self.fill, state="hidden")
+        else:
+            self.itemconfigure(self.fill, state="normal")
+            self.coords(self.fill, left, r, left + (right - left) * self.shown, r)
+        if not self.busy:
+            self.itemconfigure(self.glow, state="hidden")
             return
-        self.itemconfigure(self.fill, state="normal")
-        self.coords(self.fill, r, r, r + (max(r, w - r) - r) * self.value, r)
+        span = right - left
+        seg = span * 0.22
+        start = left + (span + seg) * self.phase - seg
+        a, b = max(left, start), min(right, start + seg)
+        if b > a:
+            self.coords(self.glow, a, r, b, r)
+            self.itemconfigure(self.glow, state="normal",
+                               fill=C["ACCENT_SOFT"] if self.shown > 0.002 else self.color)
+            self.tag_raise(self.glow)
+        else:
+            self.itemconfigure(self.glow, state="hidden")
 
 
 class DetailsPane(tk.Frame):
@@ -533,13 +575,10 @@ class DetailsPane(tk.Frame):
 
         buttons = tk.Frame(body, bg=C["SURFACE"])
         buttons.grid(row=0, column=2, rowspan=4, sticky="ne", padx=(px(18), 0))
-        self.buttons: dict[str, tk.Button] = {}
+        self.buttons: dict[str, ttk.Button] = {}
         for key, text in (("toggle", "Pause"), ("cancel", "Cancel"), ("open", "Open"), ("open_folder", "Open folder"),
                           ("more", "Details…")):
-            button = tk.Button(buttons, text=text, command=actions[key], font=ui.font(12), relief="flat", bd=0,
-                               bg=C["SURFACE_3"], fg=C["TEXT"], activebackground=C["BORDER"],
-                               activeforeground=C["TEXT"], disabledforeground=C["FAINT"], padx=px(12), pady=px(3),
-                               width=10, cursor="hand2")
+            button = ttk.Button(buttons, text=text, command=actions[key], width=14)
             button.pack(fill="x", pady=(0, px(5)))
             self.buttons[key] = button
         self._sig: tuple | None = None
@@ -554,7 +593,7 @@ class DetailsPane(tk.Frame):
             self.icon.configure(image=self.icons.tree("all", px(28)))
             self.title.configure(text=summary or "No download selected")
             self.state.configure(text="")
-            self.bar.set(0)
+            self.bar.set(0, animate=False)
             for value in self.values.values():
                 value.configure(text="—")
             self.where.configure(text="Select a download to see its progress. Double-click to open a finished file."
@@ -587,11 +626,15 @@ class DetailsPane(tk.Frame):
                tuple(sorted(actions)))
         if sig == self._sig:
             return
+        switched = self._sig is None or self._sig[0] != row["key"]
         self._sig = sig
         self.icon.configure(image=self.icons.file(row["category"], status, px(28)))
         self.title.configure(text=row["name"])
         self.state.configure(text=row["status_text"].upper(), fg=colors.get(status, C["ACCENT"]))
-        self.bar.set(row["progress"], colors.get(status, C["ACCENT"]))
+        if switched:  # another download was selected: jump, do not glide
+            self.bar.set(row["progress"], colors.get(status, C["ACCENT"]), animate=False)
+        self.bar.set(row["progress"], colors.get(status, C["ACCENT"]),
+                     busy=status in {"connecting", "finishing", "retrying"})
         for key, label in self.values.items():
             label.configure(text=values[key])
         self.where.configure(text=where, fg=C["DANGER"] if status == "failed" else C["MUTED"])
@@ -641,117 +684,38 @@ class StatusBar(tk.Frame):
 
 
 # --------------------------------------------------------------------------- dialogs
-class PageDialog(tk.Toplevel):
-    """A dialog that hosts one canvas page; hidden (not destroyed) when closed so the app
-    can keep updating its widgets."""
-
-    def __init__(self, master: tk.Misc, title: str, layout: Callable[[int, int], int], *, size: tuple[int, int],
-                 minsize: tuple[int, int], icon: str | None = None) -> None:
-        super().__init__(master)
-        self.withdraw()
-        self.title(title)
-        self.configure(bg=ui.BG)
-        self.transient(master)
-        if icon:
-            try:
-                self.iconbitmap(icon)
-            except tk.TclError:
-                pass
-        self._size = size
-        self.minsize(px(minsize[0]), px(minsize[1]))
-        self.page = ui.Page(self, layout, bg=ui.BG)
-        self.page.pack(fill="both", expand=True)
-        self.protocol("WM_DELETE_WINDOW", self.close)
-        self.bind("<Escape>", lambda _e: self.close())
-        self._placed = False
-        self.on_close: Callable[[], None] | None = None
-
-    @property
-    def is_open(self) -> bool:
-        try:
-            return self.state() != "withdrawn"
-        except tk.TclError:
-            return False
-
-    def open(self) -> None:
-        if not self._placed:
-            self._placed = True
-            master = self.master
-            w, h = px(self._size[0]), px(self._size[1])
-            try:
-                mx, my = master.winfo_rootx(), master.winfo_rooty()
-                mw, mh = master.winfo_width(), master.winfo_height()
-            except tk.TclError:
-                mx = my = 0
-                mw, mh = w, h
-            x = max(0, mx + (mw - w) // 2)
-            y = max(0, my + max(0, (mh - h) // 3))
-            self.geometry(f"{w}x{h}+{x}+{y}")
-        self.deiconify()
-        self.lift()
-        self.focus_force()
-        self.page.request_layout()
-
-    def close(self) -> None:
-        self.withdraw()
-        if self.on_close:
-            self.on_close()
-        try:
-            self.master.focus_force()
-        except tk.TclError:
-            pass
-
-
-class ConfirmDelete(tk.Toplevel):
+class ConfirmDelete:
     """Delete confirmation with an "also delete the files" option, like a download manager."""
 
-    def __init__(self, master: tk.Misc, *, count: int, files: int, finished_only: bool = False) -> None:
-        super().__init__(master)
-        self.result: tuple[bool, bool] = (False, False)
-        self.title("Delete downloads" if not finished_only else "Delete completed")
-        self.configure(bg=C["SURFACE"])
-        self.transient(master)
-        self.resizable(False, False)
+    @staticmethod
+    def ask(master: tk.Misc, *, count: int, files: int, finished_only: bool = False) -> tuple[bool, bool]:
+        import native
+
+        dialog = native.Dialog(master, "Delete completed" if finished_only else "Delete downloads", modal=True)
         noun = f"{count} download{'s' if count != 1 else ''}"
-        text = (f"Remove {noun} from the list?" if not finished_only
-                else f"Remove {noun} that finished from the list?")
-        body = tk.Frame(self, bg=C["SURFACE"])
-        body.pack(fill="both", expand=True, padx=px(22), pady=(px(20), px(10)))
-        tk.Label(body, text=text, bg=C["SURFACE"], fg=C["TEXT"], font=ui.font(14, True), anchor="w",
-                 justify="left").pack(fill="x")
-        tk.Label(body, text="Unfinished downloads are stopped first. Files stay on the disk unless you tick the box.",
-                 bg=C["SURFACE"], fg=C["MUTED"], font=ui.font(12), anchor="w", justify="left",
-                 wraplength=px(420)).pack(fill="x", pady=(px(6), px(12)))
-        self.delete_files = tk.BooleanVar(value=False)
-        check = tk.Checkbutton(body, text=f"Also delete {files} downloaded file{'s' if files != 1 else ''} from the "
-                                          "disk (cannot be undone)",
-                               variable=self.delete_files, bg=C["SURFACE"], fg=C["TEXT"], selectcolor=C["SURFACE"],
-                               activebackground=C["SURFACE"], activeforeground=C["TEXT"], font=ui.font(12),
-                               anchor="w", state="normal" if files else "disabled")
-        check.pack(fill="x")
-        foot = tk.Frame(self, bg=C["HEADING"])
-        foot.pack(fill="x")
-        tk.Button(foot, text="Cancel", command=self.destroy, font=ui.font(12), relief="flat", bg=C["SURFACE_3"],
-                  fg=C["TEXT"], activebackground=C["BORDER"], padx=px(14), pady=px(4), width=9).pack(
-            side="right", padx=(px(6), px(16)), pady=px(12))
-        tk.Button(foot, text="Delete", command=self._ok, font=ui.font(12, True), relief="flat", bg=C["DANGER"],
-                  fg="#FFFFFF", activebackground=C["DANGER"], activeforeground="#FFFFFF", padx=px(14), pady=px(4),
-                  width=9).pack(side="right", pady=px(12))
-        self.bind("<Escape>", lambda _e: self.destroy())
-        self.bind("<Return>", lambda _e: self._ok())
-        self.update_idletasks()
-        x = master.winfo_rootx() + (master.winfo_width() - self.winfo_reqwidth()) // 2
-        y = master.winfo_rooty() + (master.winfo_height() - self.winfo_reqheight()) // 3
-        self.geometry(f"+{max(0, x)}+{max(0, y)}")
-        self.grab_set()
-        self.focus_force()
+        text = (f"Remove {noun} that finished from the list?" if finished_only
+                else f"Remove {noun} from the list?")
+        body = dialog.body
+        ttk.Label(body, image="::tk::icons::warning").grid(row=0, column=0, rowspan=3, sticky="nw",
+                                                           padx=(0, native.PAD))
+        ttk.Label(body, text=text, style="Title.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(body, text="Unfinished downloads are stopped first. Files stay on the disk unless you tick the "
+                             "box below.", wraplength=380, justify="left").grid(
+            row=1, column=1, sticky="w", pady=(native.GAP, native.PAD))
+        delete_files = tk.BooleanVar(dialog, value=False)
+        box = ttk.Checkbutton(body, text=f"Also delete {files} downloaded file{'s' if files != 1 else ''} from "
+                                         "the disk (cannot be undone)", variable=delete_files)
+        box.grid(row=2, column=1, sticky="w")
+        if not files:
+            box.configure(state="disabled")
+        result = {"ok": False}
 
-    def _ok(self) -> None:
-        self.result = (True, bool(self.delete_files.get()))
-        self.destroy()
+        def confirm() -> None:
+            result["ok"] = True
+            dialog.close()
 
-    @classmethod
-    def ask(cls, master: tk.Misc, **kw: Any) -> tuple[bool, bool]:
-        dialog = cls(master, **kw)
+        dialog.add_button("Cancel", dialog.close)
+        dialog.add_button("Delete", confirm, default=True)
+        dialog.show()
         master.wait_window(dialog)
-        return dialog.result
+        return bool(result["ok"]), bool(result["ok"] and delete_files.get())

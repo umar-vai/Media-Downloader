@@ -458,13 +458,27 @@ def download_from_analysis(
                 bits.append(_format_size(downloaded))
             if eta is not None:
                 bits.append(f"{_format_eta(eta)} left")
+            state["downloaded"] = float(downloaded)
+            state["total"] = float(total)
             if on_metrics:
+                # Video and audio arrive as separate streams: report the whole download, so
+                # "downloaded of size" and the time left describe the file the user gets.
+                done_all = sum(s["total"] if s.get("finished") and s.get("total") else s.get("downloaded", 0.0)
+                               for s in stream_state.values())
+                known_all = sum(s.get("total", 0.0) for s in stream_state.values())
+                weight_all = sum(weights.values()) if weights and all(weights.values()) else 0.0
+                total_all = max(known_all, weight_all)
+                remaining = total_all - done_all
+                if speed and total_all and remaining > 0:
+                    eta_all: int | None = int(remaining / float(speed))
+                else:
+                    eta_all = int(eta) if eta is not None else None
                 on_metrics(
                     {
-                        "downloaded_bytes": downloaded,
-                        "total_bytes": total,
+                        "downloaded_bytes": int(done_all),
+                        "total_bytes": int(total_all),
                         "speed_bps": float(speed or 0.0),
-                        "eta_seconds": int(eta) if eta is not None else None,
+                        "eta_seconds": eta_all,
                     }
                 )
             if on_progress:
@@ -475,6 +489,9 @@ def download_from_analysis(
         elif status == "finished":
             state["fraction"] = 1.0
             state["finished"] = 1.0
+            finished_bytes = float(data.get("total_bytes") or data.get("downloaded_bytes") or 0)
+            if finished_bytes:
+                state["total"] = state["downloaded"] = finished_bytes
             if on_progress:
                 on_progress(overall_progress(), "Download finished")
             if on_status and len(stream_state) >= expected_streams:

@@ -21,7 +21,7 @@ from history_store import HistoryStore, make_history_entry
 from history_window import entry_state, matches, property_rows
 from media_core import options as engine_options
 from media_probe import parse_ffmpeg_output
-from settings_window import rules_from_rows
+from options_dialog import rules_from_rows
 
 FFMPEG_SAMPLE = """Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'ep4.mp4':
   Duration: 00:25:03.12, start: 0.000000, bitrate: 3456 kb/s

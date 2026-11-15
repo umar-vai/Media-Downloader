@@ -17,6 +17,11 @@ Location: `desktop_downloader/`
   details pane and status bar; columns can be shown/hidden and resized
 - Light theme by default, dark theme in View > Theme or Settings; icons drawn at the screen's real DPI
 - Batch download dialog (up to 300 links); each batch shows up under Queues
+- Browser integration: the extension hands the browser's own downloads (zip, exe, pdf, mp4...) to the app,
+  adds "Download link with Media Downloader" to the right-click menu, and keeps the browser download if the
+  app is not running. Alt+click a link to let the browser keep it. Plain files resume after Stop.
+- The exported extension pairs itself with the app (no token to copy) and is kept up to date by the app
+- Options, Properties, Add URL, Batch, error and delete dialogs use native Windows controls
 - YouTube video download
 - Audio-only download
 - MP3 / M4A output

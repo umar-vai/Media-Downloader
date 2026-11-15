@@ -2,76 +2,62 @@
 
 from __future__ import annotations
 
+import tkinter as tk
+from tkinter import ttk
 from typing import Any, Callable
 
-import customtkinter as ctk
-
-from theme import C, ctk_button, ctk_entry
-
-BG = C["BG"]
-SURFACE = C["SURFACE"]
-BORDER = C["BORDER"]
-TEXT = C["TEXT"]
-MUTED = C["MUTED"]
-DANGER = C["DANGER"]
+import native
+from native import GAP, PAD
+from theme import C
 
 
-class FailureDialog(ctk.CTkToplevel):
-    def __init__(
-        self,
-        master: Any,
-        item: dict[str, Any],
-        *,
-        on_retry: Callable[[str, str], None],
-    ) -> None:
-        super().__init__(master)
-        self.title("Download details")
-        self.geometry("720x520")
-        self.minsize(560, 420)
-        self.configure(fg_color=BG)
-        self.transient(master)
+class FailureDialog(native.Dialog):
+    def __init__(self, master: Any, item: dict[str, Any], *, on_retry: Callable[[str, str], None]) -> None:
+        super().__init__(master, "Download error", resizable=True)
         self._item = item
         self._on_retry = on_retry
-
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
-
-        ctk.CTkLabel(self, text=str(item.get("name") or "Download"), text_color=TEXT,
-                     font=("Segoe UI Semibold", 15), anchor="w").grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 2))
         attempts = int(item.get("auto_attempts") or 0)
         status = str(item.get("status") or "")
-        sub = "Failed" if status == "failed" else f"Retrying automatically (attempt {attempts})" if attempts else status.title()
-        ctk.CTkLabel(self, text=sub, text_color=DANGER if status == "failed" else MUTED,
-                     font=("Segoe UI", 11), anchor="w").grid(row=1, column=0, sticky="ew", padx=20)
+        sub = ("The download failed." if status == "failed"
+               else f"Retrying automatically (attempt {attempts})." if attempts else status.title())
 
-        link_row = ctk.CTkFrame(self, fg_color="transparent")
-        link_row.grid(row=2, column=0, sticky="ew", padx=20, pady=(14, 8))
-        link_row.grid_columnconfigure(0, weight=1)
-        self.url_var = ctk.StringVar(value=str(item.get("url") or ""))
-        ctk.CTkEntry(link_row, textvariable=self.url_var, height=36, **ctk_entry()).grid(row=0, column=0, sticky="ew")
-        ctk.CTkLabel(link_row, text="You can fix the link here and press “Retry with this link”.",
-                     text_color=MUTED, font=("Segoe UI", 9), anchor="w").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        body = self.body
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(4, weight=1)
+        ttk.Label(body, image="::tk::icons::error").grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, PAD))
+        ttk.Label(body, text=str(item.get("name") or "Download"), style="Title.TLabel", wraplength=520).grid(
+            row=0, column=1, sticky="w")
+        ttk.Label(body, text=sub, style="Hint.TLabel").grid(row=1, column=1, sticky="w")
 
-        self.box = ctk.CTkTextbox(self, fg_color=SURFACE, border_color=BORDER, border_width=1,
-                                  text_color=TEXT, font=("Consolas", 11), wrap="word")
-        self.box.grid(row=3, column=0, sticky="nsew", padx=20, pady=(0, 10))
-        error = str(item.get("last_error") or item.get("error") or "No error details were recorded.")
-        self.box.insert("1.0", error)
+        ttk.Label(body, text="Address:").grid(row=2, column=0, sticky="w", pady=(PAD, 0))
+        self.url_var = tk.StringVar(self, value=str(item.get("url") or ""))
+        ttk.Entry(body, textvariable=self.url_var, width=70).grid(row=2, column=1, sticky="ew", pady=(PAD, 0))
+        ttk.Label(body, text="Fix the address here if it changed, then press Retry.", style="Hint.TLabel").grid(
+            row=3, column=1, sticky="w", pady=(2, GAP))
+
+        box = native.group(body, "Error details", row=4, column=0, columnspan=2, sticky="nsew")
+        box.grid_columnconfigure(0, weight=1)
+        box.grid_rowconfigure(0, weight=1)
+        self.box = tk.Text(box, height=10, width=80, wrap="word", font=("Consolas", 9), relief="flat", bd=0,
+                           highlightthickness=1, highlightbackground=C["BORDER"], bg=C["SURFACE"], fg=C["TEXT"])
+        scroll = ttk.Scrollbar(box, orient="vertical", command=self.box.yview)
+        self.box.configure(yscrollcommand=scroll.set)
+        self.box.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.box.insert("1.0", str(item.get("last_error") or item.get("error") or "No error details were recorded."))
         self.box.configure(state="disabled")
 
-        buttons = ctk.CTkFrame(self, fg_color="transparent")
-        buttons.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 18))
-        buttons.grid_columnconfigure(0, weight=1)
-        ctk.CTkButton(buttons, text="Copy error", width=100, height=36, **ctk_button(), command=self._copy).grid(row=0, column=1, padx=(0, 8))
-        ctk.CTkButton(buttons, text="Close", width=80, height=36, **ctk_button(), command=self.destroy).grid(row=0, column=2, padx=(0, 8))
-        ctk.CTkButton(buttons, text="Retry with this link", width=160, height=36, **ctk_button("primary"), command=self._retry).grid(row=0, column=3)
-        self.after(100, self.focus_force)
+        self.add_button("Close", self.close)
+        self.add_button("Copy error", self._copy)
+        self.add_button("Retry", self._retry, default=True)
+        self.show()
 
     def _copy(self) -> None:
         text = f"{self.url_var.get()}\n\n{self._item.get('last_error') or self._item.get('error') or ''}"
         self.clipboard_clear()
         self.clipboard_append(text)
+        self.status.configure(text="Copied to the clipboard.")
 
     def _retry(self) -> None:
         self._on_retry(str(self._item.get("id") or ""), self.url_var.get().strip())
-        self.destroy()
+        self.close()

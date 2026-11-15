@@ -194,7 +194,7 @@ def _lighten(color: str, amount: float) -> str:
 
 # ------------------------------------------------------------------ list / tree icons
 _STATE_BADGES = {
-    "complete": GREEN, "downloading": BLUE, "connecting": BLUE, "failed": RED, "paused": ORANGE,
+    "complete": GREEN, "downloading": BLUE, "connecting": BLUE, "finishing": BLUE, "failed": RED, "paused": ORANGE,
     "stopping": ORANGE, "queued": SLATE, "retrying": AMBER, "cancelled": SLATE, "missing": AMBER,
 }
 
@@ -230,7 +230,7 @@ def _file_painter(category: str, state: str, ring: str) -> Painter:
             _badge(d, u, bx, by, 0.2, badge, ring)
             if state == "complete":
                 _check(d, u, bx, by, 0.22, WHITE, 0.06)
-            elif state in {"downloading", "connecting"}:
+            elif state in {"downloading", "connecting", "finishing"}:
                 _arrow_down(d, u, bx, by, 0.24, WHITE, 0.06)
             elif state in {"failed", "cancelled"}:
                 _cross(d, u, bx, by, 0.2, WHITE, 0.06)

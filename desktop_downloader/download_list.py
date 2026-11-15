@@ -8,6 +8,7 @@ sorting and the toolbar's enabled actions can be tested without a window.
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -54,14 +55,26 @@ def category_for(name: str, mode: str = "") -> str:
 
 
 # ------------------------------------------------------------------ statuses
-UNFINISHED = {"downloading", "connecting", "queued", "retrying", "paused", "stopping", "failed", "cancelled"}
+UNFINISHED = {"downloading", "connecting", "finishing", "queued", "retrying", "paused", "stopping", "failed",
+              "cancelled"}
 FINISHED = {"complete", "missing"}
 _STATUS_RANK = {
-    "downloading": 0, "connecting": 1, "stopping": 2, "retrying": 3, "queued": 4, "paused": 5,
+    "downloading": 0, "finishing": 0, "connecting": 1, "stopping": 2, "retrying": 3, "queued": 4, "paused": 5,
     "failed": 6, "cancelled": 7, "missing": 8, "complete": 9,
 }
 RESUMABLE = {"paused", "failed", "cancelled"}
-STOPPABLE = {"downloading", "connecting", "queued", "retrying"}
+STOPPABLE = {"downloading", "connecting", "finishing", "queued", "retrying"}
+# After the data is in, yt-dlp merges video and audio or converts the file: say so instead of
+# leaving the row on its last percentage.
+_FINISHING = [
+    (re.compile(r"^merging", re.I), "Merging…"),
+    (re.compile(r"^converting", re.I), "Converting…"),
+    (re.compile(r"^(saving|finali[sz]ing|processing|download finished|embedding|writing)", re.I), "Finishing…"),
+]
+_CONNECTING = [
+    (re.compile(r"^analy[sz]", re.I), "Analyzing…"),
+    (re.compile(r"retrying|connection problem", re.I), "Retrying…"),
+]
 _QUEUE_TERMINAL = {"completed", "failed", "cancelled"}
 
 
@@ -143,6 +156,13 @@ def queue_row(item: dict[str, Any], metrics: dict[str, Any] | None = None) -> di
     if status == "running":
         state = "downloading" if progress > 0.0005 else "connecting"
         text = f"{progress * 100:.1f}%" if state == "downloading" else "Connecting…"
+        for pattern, label in _FINISHING:
+            if pattern.search(detail):
+                state, text = "finishing", label
+                break
+        else:
+            if state == "connecting":
+                text = next((label for pattern, label in _CONNECTING if pattern.search(detail)), text)
     elif status == "queued":
         state = "retrying" if attempts else "queued"
         text = f"Retrying (#{attempts})" if attempts else "Queued"
@@ -438,7 +458,7 @@ def totals(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
     speed = 0.0
     for row in rows:
         status = row["status"]
-        if status in {"downloading", "connecting", "stopping"}:
+        if status in {"downloading", "connecting", "finishing", "stopping"}:
             downloading += 1
             speed += row["speed"]
         elif status in {"queued", "retrying"}:

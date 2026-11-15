@@ -20,16 +20,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-EXTENSION_VERSION = "2.4.0"
+EXTENSION_VERSION = "2.6.0"
 
 MANIFEST = {
     "manifest_version": 3,
     "name": "Media Downloader Connector",
     "version": EXTENSION_VERSION,
-    "description": "Download button on every video: sends the playing stream (with all qualities) to the Media Downloader desktop app.",
+    "description": "Downloads with Media Downloader: catches the browser's downloads, adds right-click download options and a Download button on every video.",
     "icons": {"128": "icon.png"},
     "permissions": [
-        "activeTab", "contextMenus", "cookies", "storage", "webRequest", "notifications",
+        "activeTab", "contextMenus", "cookies", "downloads", "storage", "webRequest", "notifications",
         "declarativeNetRequestWithHostAccess", "webNavigation",
     ],
     "host_permissions": ["<all_urls>"],
@@ -63,19 +63,29 @@ const SKIP_URL_RE = /[?&](range|bytestart|byteend)=|\/videoplayback\b|\/seg-\d+|
 const MIN_FILE_BYTES = 300 * 1024;
 const MAX_STREAMS = 12;
 
-let settings = {blocked: "", overlay: true};
+// File types caught from the browser's own downloads when no list is saved in the options.
+const DEFAULT_CAPTURE_TYPES = "zip rar 7z tar gz tgz bz2 xz iso img bin exe msi msix apk dmg deb rpm pdf doc docx " +
+  "xls xlsx ppt pptx epub torrent mp4 mkv webm mov avi wmv flv m4v 3gp mp3 m4a aac flac wav ogg opus wma";
+let settings = {blocked: "", overlay: true, capture: true, captureTypes: DEFAULT_CAPTURE_TYPES, minSizeKb: 0};
 const tabs = new Map();      // tabId -> {gen, navGen, origin, streams: [], children: []}
 const pending = new Map();   // requestId -> captured request headers
 const ownFetches = new Set(); // playlist URLs we are reading ourselves (ignore their traffic)
 
 // ------------------------------------------------------------------ settings / blocked sites
 async function loadSettings() {
-  const data = await api.storage.local.get(["blocked", "overlay"]);
-  settings = {blocked: String(data.blocked || ""), overlay: data.overlay !== false};
+  const data = await api.storage.local.get(["blocked", "overlay", "capture", "captureTypes", "minSizeKb"]);
+  settings = {
+    blocked: String(data.blocked || ""),
+    overlay: data.overlay !== false,
+    capture: data.capture !== false,
+    captureTypes: typeof data.captureTypes === "string" ? data.captureTypes : DEFAULT_CAPTURE_TYPES,
+    minSizeKb: Math.max(0, Number(data.minSizeKb) || 0),
+  };
 }
 loadSettings();
 api.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && (changes.blocked || changes.overlay)) loadSettings();
+  if (area === "local" && (changes.blocked || changes.overlay || changes.capture || changes.captureTypes ||
+      changes.minSizeKb)) loadSettings();
 });
 
 function blockedRules() {
@@ -96,7 +106,23 @@ function isBlocked(url) {
 }
 
 // ------------------------------------------------------------------ desktop app connection
+// The app writes its pairing token into pairing.json when it exports this extension, so it
+// connects by itself: nothing to copy or paste. A token typed in the options still works.
+async function syncBundledPairing() {
+  try {
+    const r = await fetch(api.runtime.getURL("pairing.json"), {cache: "no-store"});
+    if (!r.ok) return;
+    const j = await r.json();
+    const token = String((j && j.token) || "").trim();
+    if (!token) return;
+    const current = String((await api.storage.local.get("token")).token || "").trim();
+    if (current !== token) await api.storage.local.set({token, pairedAutomatically: true});
+  } catch (e) {}
+}
+const pairingReady = syncBundledPairing();
+
 async function getToken() {
+  await pairingReady;
   const data = await api.storage.local.get("token");
   return (data.token || "").trim();
 }
@@ -126,7 +152,7 @@ function cleanTitle(title) {
   return text.replace(/^watch\s+/i, "").replace(/\s+online(\s+free)?$/i, "").replace(/\s+in\s+(full\s+)?hd$/i, "").slice(0, 180);
 }
 
-// payload: {url, referer, headers, title, quality, mode, pageUrl}
+// payload: {url, referer, headers, title, quality, mode, pageUrl, kind, fileName, fileSize, mime}
 async function sendToApp(payload) {
   const token = await getToken();
   if (!token) return {ok: false, error: "Open the extension options and paste the pairing token from Media Downloader → Settings → Browser."};
@@ -147,6 +173,10 @@ async function sendToApp(payload) {
     quality: payload.quality || "",
     mode: payload.mode || "",
     pageUrl: payload.pageUrl || "",
+    kind: payload.kind || "",
+    fileName: payload.fileName || "",
+    fileSize: payload.fileSize || 0,
+    mime: payload.mime || "",
     cookies,
   };
   try {
@@ -664,10 +694,67 @@ api.runtime.onInstalled.addListener(() => {
 api.contextMenus.onClicked.addListener((info, tab) => {
   const pageUrl = (tab && tab.url) || "";
   const title = cleanTitle(tab && tab.title);
-  if (info.menuItemId === "md-link" && info.linkUrl) sendAndNotify({url: info.linkUrl, referer: pageUrl, pageUrl});
-  else if (info.menuItemId === "md-media" && info.srcUrl && !info.srcUrl.startsWith("blob:")) sendAndNotify({url: info.srcUrl, referer: info.frameUrl || pageUrl, pageUrl, title});
+  if (info.menuItemId === "md-link" && info.linkUrl) sendAndNotify({url: info.linkUrl, referer: pageUrl, pageUrl, kind: "link"});
+  else if (info.menuItemId === "md-media" && info.srcUrl && !info.srcUrl.startsWith("blob:")) sendAndNotify({url: info.srcUrl, referer: info.frameUrl || pageUrl, pageUrl, title, kind: "media"});
   else if (pageUrl) sendAndNotify({url: info.pageUrl || pageUrl, pageUrl});
 });
+
+// ------------------------------------------------------------------ catch the browser's downloads
+// Like a desktop download manager: a file the browser starts saving is paused, handed to the
+// app, and removed from the browser only when the app accepted it. If the app is closed or
+// unpaired the browser simply carries on. Alt+click on a link lets the browser keep it.
+let bypassUntil = 0;
+const capturedIds = new Set();
+
+function fileNameOf(item, url) {
+  const fromItem = String(item.filename || "").split(/[\\/]/).pop();
+  if (fromItem) return fromItem;
+  try { return decodeURIComponent(new URL(url).pathname.split("/").pop() || ""); } catch (e) { return ""; }
+}
+
+function extOf(name) {
+  const match = /\.([a-z0-9]{1,9})$/i.exec(String(name || ""));
+  return match ? match[1].toLowerCase() : "";
+}
+
+function captureAllowed(name, mime) {
+  const types = settings.captureTypes.toLowerCase().split(/[\s,;]+/).map(t => t.replace(/^\*?\./, "")).filter(Boolean);
+  const ext = extOf(name);
+  if (!types.length) return !/^(text\/html|application\/xhtml)/i.test(mime || "");
+  if (ext) return types.includes(ext);
+  // No extension yet (Chrome names the file a moment later): judge by the type the server sent.
+  return /^(video|audio)\//i.test(mime || "") || /zip|rar|7z|x-msdownload|octet-stream|pdf|iso9660|android\.package/i.test(mime || "");
+}
+
+async function captureDownload(item) {
+  if (!item || capturedIds.has(item.id)) return;
+  await loadSettings();
+  const url = item.finalUrl || item.url || "";
+  if (!settings.capture || !/^https?:/i.test(url)) return;          // blob:, data:, file: stay in the browser
+  if (item.byExtensionId || (item.state && item.state !== "in_progress")) return;
+  if (Date.now() < bypassUntil) { bypassUntil = 0; return; }
+  const pageUrl = item.referrer || "";
+  if (isBlocked(url) || (pageUrl && isBlocked(pageUrl))) return;
+  const name = fileNameOf(item, url);
+  if (!captureAllowed(name, item.mime)) return;
+  const size = Number(item.totalBytes || item.fileSize || 0);
+  if (settings.minSizeKb && size > 0 && size < settings.minSizeKb * 1024) return;
+  if (!(await getToken())) return;
+  capturedIds.add(item.id);
+  try { await api.downloads.pause(item.id); } catch (e) {}
+  const result = await sendToApp({url, referer: pageUrl, pageUrl, kind: "file", fileName: name, fileSize: size,
+                                  mime: item.mime || "", title: name.replace(/\.[a-z0-9]{1,9}$/i, "")});
+  if (result.ok) {
+    try { await api.downloads.cancel(item.id); } catch (e) {}
+    try { await api.downloads.erase({id: item.id}); } catch (e) {}
+    notify(`Downloading with Media Downloader: ${name || url}`);
+  } else {
+    capturedIds.delete(item.id);
+    try { await api.downloads.resume(item.id); } catch (e) {}
+  }
+}
+
+try { api.downloads.onCreated.addListener(item => { captureDownload(item); }); } catch (e) {}
 
 api.commands.onCommand.addListener(async (command) => {
   if (command !== "send-page") return;
@@ -726,6 +813,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     loadSettings().then(() => sendResponse({blocked: isBlocked(msg.url || ""), host: hostOf(msg.url || "")}));
     return true;
   }
+  if (msg.type === "md-bypass") { bypassUntil = Date.now() + 8000; return; }
   if (msg.type === "ping") { findPort().then(port => sendResponse({port})); return true; }
 });
 """
@@ -736,6 +824,13 @@ CONTENT_JS = r"""
   window.__mediaDownloaderConnector = true;
   const api = typeof browser !== "undefined" ? browser : chrome;
   const MIN_W = 200, MIN_H = 110, HIDE_AFTER = 2600;
+
+  // Alt+click on a link: the browser keeps that download (Media Downloader does not take it).
+  document.addEventListener("click", event => {
+    if (!event.altKey) return;
+    const link = event.target && event.target.closest ? event.target.closest("a[href]") : null;
+    if (link) { try { api.runtime.sendMessage({type: "md-bypass"}); } catch (e) {} }
+  }, true);
 
   // The background may ask this frame to read a playlist that only the player's origin can load.
   // Firefox/Zen: content.fetch() runs as the page (its Origin, Referer and cookies); the plain
@@ -1316,12 +1411,24 @@ OPTIONS_HTML = """<!doctype html>
  label{display:block;margin:8px 0}
 </style></head><body>
 <h1>Media Downloader Connector</h1>
-<h2>1. Pairing</h2>
-<p>In Media Downloader open <b>Settings → Browser</b>, copy the pairing token and paste it here.</p>
-<input type="text" id="token" placeholder="Pairing token" autocomplete="off">
+<h2>1. Connection</h2>
+<p id="pairstate">Checking the connection to Media Downloader…</p>
+<details><summary class="hint">Pairing token (filled in automatically)</summary>
+<p class="hint">The extension exported by Media Downloader pairs itself. Only paste a token here if you installed the
+extension some other way (Media Downloader → Options → Browser).</p>
+<input type="text" id="token" placeholder="Pairing token" autocomplete="off"></details>
 <h2>2. Download button</h2>
 <label><input type="checkbox" id="overlay"> Show a <b>Download</b> button on videos and audio players (like IDM)</label>
-<h2>3. Blocked sites</h2>
+<h2>3. Catch browser downloads</h2>
+<label><input type="checkbox" id="capture"> When the browser starts downloading a file, download it with
+<b>Media Downloader</b> instead</label>
+<p class="hint">File types to catch (separated by spaces). Leave empty to catch every file.
+If Media Downloader is not running, the browser downloads the file as usual.
+Hold <b>Alt</b> while clicking a link to let the browser download it.</p>
+<input type="text" id="types" spellcheck="false">
+<label>Skip files smaller than <input type="number" id="minsize" min="0" style="width:90px"> KB (0 = catch all sizes)</label>
+<p><button id="resettypes" type="button">Restore the default file types</button></p>
+<h2>4. Blocked sites</h2>
 <p class="hint">The extension does nothing on these sites: no Download button and no stream capture.
 One site per line. <code>example.com</code> also covers <code>www.example.com</code> and every other subdomain.
 Lines that start with <code>#</code> are notes.</p>
@@ -1336,13 +1443,32 @@ const api = typeof browser !== "undefined" ? browser : chrome;
 const token = document.getElementById("token");
 const overlay = document.getElementById("overlay");
 const blocked = document.getElementById("blocked");
-api.storage.local.get(["token", "overlay", "blocked"]).then(d => {
+const capture = document.getElementById("capture");
+const types = document.getElementById("types");
+const minsize = document.getElementById("minsize");
+const DEFAULT_TYPES = "zip rar 7z tar gz tgz bz2 xz iso img bin exe msi msix apk dmg deb rpm pdf doc docx " +
+  "xls xlsx ppt pptx epub torrent mp4 mkv webm mov avi wmv flv m4v 3gp mp3 m4a aac flac wav ogg opus wma";
+api.runtime.sendMessage({type: "ping"}).then(r => {
+  const text = document.getElementById("pairstate");
+  api.storage.local.get("token").then(d => {
+    if (r && r.port && d.token) text.textContent = "Connected to Media Downloader. Downloads are handed over automatically.";
+    else if (d.token) text.textContent = "Paired. Start Media Downloader to use it (the browser downloads normally meanwhile).";
+    else text.textContent = "Not paired yet: in Media Downloader choose Help → Install browser extension, then reload this extension.";
+  });
+}).catch(() => {});
+api.storage.local.get(["token", "overlay", "blocked", "capture", "captureTypes", "minSizeKb"]).then(d => {
   token.value = d.token || "";
   overlay.checked = d.overlay !== false;
   blocked.value = d.blocked || "";
+  capture.checked = d.capture !== false;
+  types.value = typeof d.captureTypes === "string" ? d.captureTypes : DEFAULT_TYPES;
+  minsize.value = String(Math.max(0, Number(d.minSizeKb) || 0));
 });
+document.getElementById("resettypes").onclick = () => { types.value = DEFAULT_TYPES; };
 document.getElementById("save").onclick = async () => {
-  await api.storage.local.set({token: token.value.trim(), overlay: overlay.checked, blocked: blocked.value.trim()});
+  await api.storage.local.set({token: token.value.trim(), overlay: overlay.checked, blocked: blocked.value.trim(),
+                               capture: capture.checked, captureTypes: types.value.trim(),
+                               minSizeKb: Math.max(0, Number(minsize.value) || 0)});
   document.getElementById("state").textContent = "Saved.";
 };
 """
@@ -1358,10 +1484,19 @@ FILES = {
 }
 
 
-def export_extension(target: Path) -> Path:
-    """Write the extension files into ``target`` (created if needed) and return the folder."""
+def _files(token: str) -> dict[str, str]:
+    files = dict(FILES)
+    if token:
+        files["pairing.json"] = json.dumps({"token": token, "app": "Media Downloader"}) + "\n"
+    return files
+
+
+def export_extension(target: Path, token: str = "") -> Path:
+    """Write the extension files into ``target`` (created if needed) and return the folder.
+
+    With ``token`` the extension pairs itself with the app (pairing.json)."""
     target.mkdir(parents=True, exist_ok=True)
-    for name, content in FILES.items():
+    for name, content in _files(token).items():
         (target / name).write_text(content, encoding="utf-8")
     try:
         from PIL import Image, ImageDraw
@@ -1375,3 +1510,25 @@ def export_extension(target: Path) -> Path:
     except Exception:
         pass
     return target
+
+
+def refresh_exported_extension(target: Path, token: str = "") -> bool:
+    """Keep an extension folder the user already loaded in sync with this app version.
+
+    The browser reads an unpacked extension from that folder, so after an app update the new
+    extension is used when the browser restarts (or the extension is reloaded). Returns True
+    when files were rewritten."""
+    if not (target / "manifest.json").exists():
+        return False
+    stale = False
+    for name, content in _files(token).items():
+        try:
+            if (target / name).read_text(encoding="utf-8") != content:
+                stale = True
+                break
+        except OSError:
+            stale = True
+            break
+    if stale:
+        export_extension(target, token)
+    return stale

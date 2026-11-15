@@ -10,11 +10,12 @@ from __future__ import annotations
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
+from tkinter import ttk
 from typing import Any, Callable
 
-import customtkinter as ctk
-
-from theme import C, ctk_button
+import native
+from native import PAD
+from theme import C
 
 BG = C["BG"]
 SURFACE = C["SURFACE"]
@@ -133,71 +134,71 @@ def property_rows(item: dict[str, Any]) -> list[tuple[str, str]]:
     return [(label, value) for label, value in rows if value]
 
 
-class PropertiesDialog(ctk.CTkToplevel):
+# Rows shown on the "Media" tab; everything else is on "General".
+_MEDIA_ROWS = {"Quality chosen", "Resolution", "Length", "Video codec", "Audio codec", "Bitrate", "Platform",
+               "Creator / channel", "Referer", "Attempts"}
+
+
+class PropertiesDialog(native.Dialog):
+    """Download properties, laid out like a Windows file Properties sheet."""
+
     def __init__(self, master: tk.Misc, item: dict[str, Any], *, on_action: Callable[[str], None]) -> None:
-        super().__init__(master)
+        super().__init__(master, f"{item.get('file_name') or item.get('title') or 'Download'} Properties")
         self.item = item
-        self.title("Download properties")
-        self.geometry("720x640")
-        self.minsize(560, 420)
-        self.configure(fg_color=BG)
-        self.transient(master.winfo_toplevel())
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
-
-        state = entry_state(item)
-        colour = {"Completed": SUCCESS, "Missing": WARNING}.get(state, DANGER)
-        head = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
-        head.grid(row=0, column=0, sticky="ew")
-        head.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(head, text=str(item.get("title") or "Download"), text_color=TEXT,
-                     font=("Segoe UI Semibold", 16), anchor="w", justify="left", wraplength=560).grid(
-            row=0, column=0, sticky="w", padx=18, pady=(16, 2))
-        ctk.CTkLabel(head, text=state.upper(), text_color=colour, font=("Segoe UI Semibold", 10),
-                     anchor="w").grid(row=1, column=0, sticky="w", padx=18, pady=(0, 14))
-
-        body = ctk.CTkScrollableFrame(self, fg_color=SURFACE, corner_radius=12, border_width=1,
-                                      border_color=BORDER, scrollbar_button_color=SURFACE_3)
-        body.grid(row=1, column=0, sticky="nsew", padx=16, pady=14)
-        body.grid_columnconfigure(1, weight=1)
-        for row, (label, value) in enumerate(property_rows(item)):
-            ctk.CTkLabel(body, text=label, text_color=MUTED, font=("Segoe UI", 10), anchor="nw").grid(
-                row=row, column=0, sticky="nw", padx=(12, 14), pady=5)
-            field = ctk.CTkTextbox(body, height=28 if len(value) < 70 else 56, fg_color=SURFACE_2,
-                                   text_color=TEXT if label != "Error" else DANGER, font=("Segoe UI", 11),
-                                   wrap="char", border_width=0, activate_scrollbars=False)
-            field.insert("1.0", value)
-            field.configure(state="disabled")
-            field.grid(row=row, column=1, sticky="ew", padx=(0, 6), pady=3)
-            ctk.CTkButton(body, text="Copy", width=52, height=26, font=("Segoe UI", 9), **ctk_button(),
-                          command=lambda v=value: self._copy(v)).grid(
-                row=row, column=2, padx=(0, 10), pady=3)
-
-        actions = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
-        actions.grid(row=2, column=0, sticky="ew")
-        buttons: list[tuple[str, str, bool]] = [
-            ("Open", "open", state == "Completed"),
-            ("Show in folder", "reveal", bool(item.get("file_path") or item.get("download_dir"))),
-            ("Open web page", "page", bool(item.get("page_url") or item.get("source_url"))),
-            ("Resume" if state in {"Failed", "Cancelled"} else "Download again",
-             "resume" if state in {"Failed", "Cancelled"} else "redownload", True),
-        ]
-        for column, (text, action, enabled) in enumerate(buttons):
-            ctk.CTkButton(actions, text=text, height=36, **ctk_button("primary" if column == 0 else "secondary"),
-                          state="normal" if enabled else "disabled",
-                          command=lambda a=action: self._act(a)).grid(row=0, column=column, padx=(16 if column == 0 else 4, 4), pady=12)
-        ctk.CTkButton(actions, text="Close", width=80, height=36, **ctk_button("ghost"), command=self.destroy).grid(
-            row=0, column=len(buttons), padx=(4, 16), pady=12, sticky="e")
-        actions.grid_columnconfigure(len(buttons), weight=1)
         self._on_action = on_action
-        self.bind("<Escape>", lambda _e: self.destroy())
-        self.after(50, self.focus_force)
+        state = entry_state(item)
+        colour = {"Completed": C["SUCCESS"], "Missing": C["WARNING"]}.get(
+            state, C["DANGER"] if state in {"Failed", "Cancelled"} else C["ACCENT"])
 
-    def _copy(self, value: str) -> None:
-        self.clipboard_clear()
-        self.clipboard_append(value)
+        head = ttk.Frame(self.body)
+        head.pack(fill="x", pady=(0, PAD))
+        ttk.Label(head, text=str(item.get("title") or item.get("file_name") or "Download"), style="Title.TLabel",
+                  wraplength=520, justify="left").pack(anchor="w")
+        ttk.Label(head, text=state, foreground=colour).pack(anchor="w")
+
+        tabs = ttk.Notebook(self.body)
+        tabs.pack(fill="both", expand=True)
+        rows = property_rows(item)
+        general = [row for row in rows if row[0] not in _MEDIA_ROWS]
+        media = [row for row in rows if row[0] in _MEDIA_ROWS]
+        for title, part in (("General", general), ("Media", media)):
+            if not part:
+                continue
+            page = ttk.Frame(tabs, padding=(PAD, PAD, PAD, PAD))
+            page.grid_columnconfigure(1, weight=1)
+            tabs.add(page, text=f"  {title}  ")
+            for index, (label, value) in enumerate(part):
+                ttk.Label(page, text=f"{label}:").grid(row=index, column=0, sticky="nw", padx=(0, PAD), pady=2)
+                if label == "Error" or len(value) > 90:
+                    box = tk.Text(page, height=3 if label != "Error" else 5, width=58, wrap="word", relief="flat",
+                                  font=native.font(self), bd=0, highlightthickness=1,
+                                  highlightbackground=C["BORDER"], bg=C["SURFACE"],
+                                  fg=C["DANGER"] if label == "Error" else C["TEXT"])
+                    box.insert("1.0", value)
+                    box.configure(state="disabled")
+                    box.grid(row=index, column=1, sticky="ew", pady=2)
+                else:
+                    field = ttk.Entry(page, width=60)
+                    field.insert(0, value)
+                    field.configure(state="readonly")
+                    field.grid(row=index, column=1, sticky="ew", pady=2)
+
+        resumable = state in {"Failed", "Cancelled"}
+        self.add_button("Close", self.close)
+        self.add_button("Resume" if resumable else "Download again",
+                        lambda: self._act("resume" if resumable else "redownload"), width=15)
+        page_button = self.add_button("Open web page", lambda: self._act("page"), width=15)
+        folder_button = self.add_button("Open folder", lambda: self._act("reveal"))
+        open_button = self.add_button("Open", lambda: self._act("open"), default=state == "Completed")
+        if state != "Completed":
+            open_button.configure(state="disabled")
+        if not (item.get("file_path") or item.get("download_dir")):
+            folder_button.configure(state="disabled")
+        if not (item.get("page_url") or item.get("source_url")):
+            page_button.configure(state="disabled")
+        self.show()
 
     def _act(self, action: str) -> None:
         self._on_action(action)
         if action in {"resume", "redownload"}:
-            self.destroy()
+            self.close()
