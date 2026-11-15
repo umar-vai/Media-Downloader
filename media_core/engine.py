@@ -652,7 +652,7 @@ def download_from_analysis(
 
     def make_ydl(params: dict[str, Any]) -> yt_dlp.YoutubeDL:
         ydl = yt_dlp.YoutubeDL(params)
-        ydl.add_postprocessor(plan_pp, when="before_dl")
+        ydl.add_post_processor(plan_pp, when="before_dl")
         if metadata_pp is not None:
             pp = _MetadataPP(
                 ydl,
@@ -664,7 +664,7 @@ def download_from_analysis(
             try:
                 ydl._pps["post_process"].insert(0, pp)
             except Exception:
-                ydl.add_postprocessor(pp)
+                ydl.add_post_processor(pp)
         return ydl
     if mode.lower() == "audio":
         codec = engine_options.AUDIO_CODECS.get(str(audio_format or "mp3").lower(), "mp3")
