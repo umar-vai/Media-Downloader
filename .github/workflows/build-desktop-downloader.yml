@@ -53,7 +53,10 @@ jobs:
           python -m py_compile desktop_downloader/app.py
           python -m py_compile desktop_downloader/app_logging.py
           python -m py_compile desktop_downloader/batch_download.py
-          python -m py_compile desktop_downloader/activity_view.py
+          python -m py_compile desktop_downloader/theme.py
+          python -m py_compile desktop_downloader/icons.py
+          python -m py_compile desktop_downloader/download_list.py
+          python -m py_compile desktop_downloader/main_window.py
           python -m py_compile desktop_downloader/app_ui.py
           python -m py_compile desktop_downloader/batch_page.py
           python -m py_compile desktop_downloader/ui_kit.py

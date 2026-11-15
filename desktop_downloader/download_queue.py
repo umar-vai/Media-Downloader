@@ -32,6 +32,7 @@ class DownloadRequest:
     finished_at: float = 0.0
 
     def snapshot(self, *, position: int = 0) -> dict[str, Any]:
+        settings = self.payload.get("request_settings") or {}
         return {
             "id": self.id,
             "name": str(self.payload.get("name") or "Media download"),
@@ -45,7 +46,11 @@ class DownloadRequest:
             "error": self.error,
             "last_error": str(self.payload.get("last_error") or self.error or ""),
             "auto_attempts": int(self.payload.get("auto_attempts") or 0),
-            "cookiefile": str((self.payload.get("request_settings") or {}).get("cookiefile") or ""),
+            "cookiefile": str(settings.get("cookiefile") or ""),
+            "mode": str(settings.get("mode") or ""),
+            "quality": str(settings.get("history_quality") or ""),
+            "page_url": str(settings.get("page_url") or ""),
+            "download_dir": str(self.payload.get("download_dir") or ""),
             "result_path": self.result_path,
             "position": position,
             "created_at": self.created_at,
@@ -198,6 +203,15 @@ class DownloadQueue:
             before = len(self._items)
             self._items = [item for item in self._items if item.status not in TERMINAL_STATUSES]
             return before - len(self._items)
+
+    def remove(self, request_id: str) -> bool:
+        """Drop one finished (completed/failed/cancelled) download from the list."""
+        with self._lock:
+            request = self._find_locked(request_id)
+            if request is None or request.status not in TERMINAL_STATUSES:
+                return False
+            self._items = [item for item in self._items if item.id != request_id]
+            return True
 
     def fail(self, request_id: str, error: str) -> None:
         with self._lock:

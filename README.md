@@ -10,8 +10,13 @@ The transcriber repository is now focused only on transcription. Downloader-spec
 
 Location: `desktop_downloader/`
 
-- Single-window canvas-drawn UI (sidebar + Download / Batch / Queue / Updates pages) that resizes smoothly
-- Batch download built into the main window, with live per-link and overall progress
+- Classic download-manager main window: menu bar, icon toolbar (Add URL, Resume, Stop, Start/Stop All, Delete,
+  Delete Completed, Options, Browsers, Editor), a category tree (All Downloads by file type, Unfinished, Finished,
+  Queues) and one sortable, multi-select download table with live percent, speed and time left
+- Right-click menu, double-click to open, keyboard shortcuts (Ctrl+N, Ctrl+B, Del, Enter, Alt+Enter, F5, Ctrl+F),
+  details pane and status bar; columns can be shown/hidden and resized
+- Light theme by default, dark theme in View > Theme or Settings; icons drawn at the screen's real DPI
+- Batch download dialog (up to 300 links); each batch shows up under Queues
 - YouTube video download
 - Audio-only download
 - MP3 / M4A output

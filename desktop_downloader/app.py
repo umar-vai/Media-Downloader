@@ -33,10 +33,11 @@ import power
 from tray import TrayController
 import startup as win_startup
 from single_instance import cleanup_stale_updater_copies
+import theme
 import ui_kit as ui
+import download_list
 from download_queue import DownloadQueue, DownloadRequest
 from history_store import HistoryStore, make_history_entry
-from history_window import HistoryPage
 from media_probe import probe_media
 from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
@@ -130,7 +131,7 @@ SUCCESS = ui.SUCCESS
 WARNING = ui.WARNING
 DANGER = ui.DANGER
 
-ctk.set_appearance_mode("dark")
+ctk.set_appearance_mode("dark" if theme.IS_DARK else "light")
 ctk.set_default_color_theme("blue")
 
 LOGGER = get_logger("main")
@@ -199,6 +200,9 @@ def default_settings() -> dict[str, Any]:
         "extension_token": "",
         "snooze_version": "",
         "snooze_until": 0,
+        "theme": "Light",
+        "show_categories": True,
+        "show_details": True,
     }
 
 
@@ -258,6 +262,14 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
     ):
         value = settings.get(key, fallback)
         settings[key] = value if isinstance(value, bool) else fallback
+
+    settings["theme"] = theme.normalize_theme(settings.get("theme"))
+    for key in ("show_categories", "show_details"):
+        settings[key] = settings.get(key) if isinstance(settings.get(key), bool) else True
+    if "list_columns" in settings:
+        settings["list_columns"] = download_list.normalize_columns(settings.get("list_columns"))
+    if not isinstance(settings.get("list_widths"), dict):
+        settings.pop("list_widths", None)
 
     settings["snooze_version"] = str(settings.get("snooze_version") or "")
     try:
@@ -353,7 +365,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
             self.withdraw()  # launched by Windows at sign-in: go straight to the tray
         self.after(400, self._init_tray)
         self.geometry("1180x780")
-        self.minsize(980, 640)
+        self.minsize(900, 560)
         self.configure(fg_color=BG)
         self.protocol("WM_DELETE_WINDOW", self._close_app)
 
@@ -364,7 +376,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.editor_window: MediaEditorWindow | None = None
         self.diagnostics_window: DiagnosticsWindow | None = None
         self.settings_panel: SettingsPanel | None = None
-        self.history_page: HistoryPage | None = None
+        self.settings_window: Any = None
         self.task_state = TaskState.IDLE
 
         self._analysis_counter = 0
@@ -387,6 +399,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.download_cancel_events: dict[str, threading.Event] = {}
         self._download_progress_lock = threading.Lock()
         self._latest_download_progress: dict[str, dict[str, Any]] = {}
+        self._latest_download_metrics: dict[str, dict[str, Any]] = {}
         self._download_activity_after_id: str | None = None
 
         self.settings = load_settings()
@@ -976,13 +989,18 @@ class DownloaderApp(UIMixin, ctk.CTk):
         LOGGER.info("Queued link download request=%s url=%s", request.id, url)
         self._set_status(f"Added to downloads: {name}", "ready")
         self.media_action_hint.configure(text="Added to downloads. Paste another link whenever you want.")
-        self._schedule_download_activity_refresh(20)
         self._start_available_downloads()
+        self._after_link_queued(request.id, name)
 
     def _put_download_event(self, kind: str, request_id: str, data: Any = None) -> None:
         if kind == "download_progress":
             with self._download_progress_lock:
                 self._latest_download_progress[request_id] = dict(data or {})
+            return
+        if kind == "download_metrics":
+            # Speed, size and time left for the list's columns; read on the next refresh.
+            with self._download_progress_lock:
+                self._latest_download_metrics[request_id] = dict(data or {})
             return
         self.events.put((kind, {"request_id": request_id, "data": data}))
 
@@ -1083,6 +1101,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
                             request_id,
                             {"percent": float(value) * 100.0, "detail": str(detail or "")},
                         ),
+                        on_metrics=lambda metrics: self._put_download_event("download_metrics", request_id, metrics),
                     )
                     break
                 except SharedCancelled:
@@ -1306,6 +1325,8 @@ class DownloaderApp(UIMixin, ctk.CTk):
 
                     elif kind == "download_finished":
                         self.download_cancel_events.pop(request_id, None)
+                        with self._download_progress_lock:
+                            self._latest_download_metrics.pop(request_id, None)
                         snapshot = self.download_queue.get(request_id)
                         if not snapshot or snapshot.get("status") != "paused":
                             with self._name_lock:
@@ -1509,7 +1530,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         append_update_log(f"Update available: {release.version}")
 
         if manual or not self._is_update_snoozed(release.version):
-            self.top_update_button.configure(text=f"UPDATE v{release.version}")
+            self.top_update_button.configure(text=f"Update v{release.version} available")
             self.top_update_button.grid()
 
         if self.auto_download_updates_var.get() and not self.downloaded_update:
@@ -1601,7 +1622,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         else:
             self.update_detail_label.configure(text="Portable update downloaded and verified. Restart to install it.")
         self.update_action_button.configure(text="Restart & Update", state="normal")
-        self.top_update_button.configure(text="RESTART & UPDATE")
+        self.top_update_button.configure(text="Restart to update")
         self.top_update_button.grid()
         append_update_log(f"Update {release.version} downloaded and SHA-256 verified.")
 
@@ -1981,10 +2002,12 @@ class DownloaderApp(UIMixin, ctk.CTk):
         except Exception:
             pass
         commands: list[tuple[str, Any]] = [
-            ("Go to Download", lambda: self.show_page("download")),
-            ("Go to Batch", lambda: self.show_page("batch")),
-            ("Go to Queue", lambda: self.show_page("queue")),
-            ("Go to Updates", lambda: self.show_page("updates")),
+            ("Add URL…", lambda: self.show_page("download")),
+            ("Add batch download…", lambda: self.show_page("batch")),
+            ("Show all downloads", lambda: self._show_category("all")),
+            ("Show unfinished downloads", lambda: self._show_category("unfinished")),
+            ("Show finished downloads", lambda: self._show_category("finished")),
+            ("Updates & about", lambda: self.show_page("updates")),
             ("Download link from clipboard (video)", lambda: self._download_clipboard_link("Video")),
             ("Download link from clipboard (audio only)", lambda: self._download_clipboard_link("Audio")),
             ("Pause all downloads", self.pause_all_downloads),
@@ -1994,7 +2017,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
             ("Cancel all downloads", self.cancel_all_downloads),
             ("Open download folder", self.open_download_folder),
             ("Open media editor", self.open_editor),
-            ("Open history", self.open_history),
+            ("Delete completed downloads…", self.delete_completed),
             ("Open settings", self.open_settings),
             ("Export browser extension", self.export_browser_extension),
             ("Check for updates", lambda: self.check_for_updates(manual=True)),
@@ -2140,17 +2163,6 @@ class DownloaderApp(UIMixin, ctk.CTk):
     def open_history(self) -> None:
         self.show_page("history")
 
-    def _build_history_page(self) -> HistoryPage:
-        page = HistoryPage(
-            self.stage,
-            self.history_store,
-            on_edit=lambda path: self.open_editor(path),
-            on_change=self._sync_recent_file,
-            on_redownload=self.redownload_from_history,
-        )
-        self.history_page = page
-        return page
-
     def _record_history(
         self,
         request_id: str,
@@ -2161,6 +2173,8 @@ class DownloaderApp(UIMixin, ctk.CTk):
         error: str = "",
     ) -> None:
         """Save one finished/failed/cancelled download with everything Properties shows."""
+        if request_id in getattr(self, "_discard_ids", ()):
+            return  # deleted from the list while it was still running
         try:
             snapshot = self.download_queue.get(request_id) or {}
             queued = self.download_queue.payload(request_id) or {}
@@ -2203,18 +2217,16 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 audio_codec=str(probe.get("audio_codec") or ""),
                 container=str(probe.get("container") or ""),
                 bitrate_kbps=int(probe.get("bitrate_kbps") or 0),
+                request_id=request_id,
             )
             self.history_store.add(entry)
             LOGGER.info("History recorded status=%s request=%s", status, request_id)
         except Exception:
             LOGGER.exception("Could not save download history request=%s", request_id)
             return
-        page = self.history_page
-        if page is not None:
-            try:
-                page.refresh()
-            except Exception:
-                LOGGER.exception("History page refresh failed")
+        invalidate = getattr(self, "_invalidate_history", None)
+        if invalidate is not None:
+            invalidate()
 
     def redownload_from_history(self, entry: dict[str, Any], *, resume: bool = False) -> None:
         """IDM-style Resume (continue a failed/cancelled download) or Redownload (fresh copy)."""
@@ -2253,12 +2265,15 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.show_page("queue")
 
     # ----------------------------------------------------------- settings page
-    def open_settings(self) -> None:
-        self.show_page("settings")
+    def open_settings(self, tab: str | None = None) -> None:
+        self._open_settings_dialog(tab)
 
-    def _build_settings_panel(self) -> SettingsPanel:
+    def _persist_settings(self) -> None:
+        save_settings(self.settings)
+
+    def _build_settings_panel(self, master: Any, on_close: Any) -> SettingsPanel:
         panel = SettingsPanel(
-            self.stage,
+            master,
             self.settings,
             on_save=self._apply_settings,
             on_check_updates=lambda: self.check_for_updates(manual=True),
@@ -2266,7 +2281,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
             on_open_log=self.open_app_log,
             on_open_release=self.open_release_page,
             on_export_extension=self.export_browser_extension,
-            on_close=lambda: self.show_page("download"),
+            on_close=on_close,
         )
         self.settings_panel = panel
         return panel
@@ -2287,6 +2302,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 raise RuntimeError(f"The selected download folder is not writable: {download_dir}\n\n{exc}") from exc
 
         normalized["download_dir"] = str(download_dir)
+        theme_changed = normalized["theme"] != theme.normalize_theme(self.settings.get("theme"))
         wants_startup = bool(normalized.get("start_with_windows"))
         if win_startup.supported() and wants_startup != win_startup.is_enabled():
             try:
@@ -2316,6 +2332,12 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.batch_page.set_defaults(normalized)
         # Fill newly available slots immediately when the user raises the limit.
         self._start_available_downloads()
+        if hasattr(self, "_theme_var"):
+            self._theme_var.set(normalized["theme"])
+        if theme_changed:
+            self.after(200, lambda: messagebox.showinfo(
+                APP_NAME, f"The {normalized['theme'].lower()} theme will be used the next time {APP_NAME} starts.",
+                parent=self.settings_window or self))
 
         if not self.latest_release:
             self.update_detail_label.configure(

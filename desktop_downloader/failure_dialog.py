@@ -6,15 +6,14 @@ from typing import Any, Callable
 
 import customtkinter as ctk
 
-BG = "#060B14"
-SURFACE = "#0B1323"
-SURFACE_3 = "#14223A"
-BORDER = "#223456"
-TEXT = "#F7FAFF"
-MUTED = "#8798B5"
-PURPLE = "#7657FF"
-PURPLE_HOVER = "#6547E9"
-DANGER = "#FF647C"
+from theme import C, ctk_button, ctk_entry
+
+BG = C["BG"]
+SURFACE = C["SURFACE"]
+BORDER = C["BORDER"]
+TEXT = C["TEXT"]
+MUTED = C["MUTED"]
+DANGER = C["DANGER"]
 
 
 class FailureDialog(ctk.CTkToplevel):
@@ -49,8 +48,7 @@ class FailureDialog(ctk.CTkToplevel):
         link_row.grid(row=2, column=0, sticky="ew", padx=20, pady=(14, 8))
         link_row.grid_columnconfigure(0, weight=1)
         self.url_var = ctk.StringVar(value=str(item.get("url") or ""))
-        ctk.CTkEntry(link_row, textvariable=self.url_var, height=36, fg_color=SURFACE_3,
-                     border_color=BORDER).grid(row=0, column=0, sticky="ew")
+        ctk.CTkEntry(link_row, textvariable=self.url_var, height=36, **ctk_entry()).grid(row=0, column=0, sticky="ew")
         ctk.CTkLabel(link_row, text="You can fix the link here and press “Retry with this link”.",
                      text_color=MUTED, font=("Segoe UI", 9), anchor="w").grid(row=1, column=0, sticky="w", pady=(4, 0))
 
@@ -64,12 +62,9 @@ class FailureDialog(ctk.CTkToplevel):
         buttons = ctk.CTkFrame(self, fg_color="transparent")
         buttons.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 18))
         buttons.grid_columnconfigure(0, weight=1)
-        ctk.CTkButton(buttons, text="Copy error", width=100, height=36, fg_color=SURFACE_3,
-                      hover_color="#1B3153", command=self._copy).grid(row=0, column=1, padx=(0, 8))
-        ctk.CTkButton(buttons, text="Close", width=80, height=36, fg_color=SURFACE_3,
-                      hover_color="#1B3153", command=self.destroy).grid(row=0, column=2, padx=(0, 8))
-        ctk.CTkButton(buttons, text="Retry with this link", width=160, height=36, fg_color=PURPLE,
-                      hover_color=PURPLE_HOVER, command=self._retry).grid(row=0, column=3)
+        ctk.CTkButton(buttons, text="Copy error", width=100, height=36, **ctk_button(), command=self._copy).grid(row=0, column=1, padx=(0, 8))
+        ctk.CTkButton(buttons, text="Close", width=80, height=36, **ctk_button(), command=self.destroy).grid(row=0, column=2, padx=(0, 8))
+        ctk.CTkButton(buttons, text="Retry with this link", width=160, height=36, **ctk_button("primary"), command=self._retry).grid(row=0, column=3)
         self.after(100, self.focus_force)
 
     def _copy(self) -> None:

@@ -11,18 +11,20 @@ from download_rules import QUALITIES, parse_rules
 from install_mode import install_mode_name
 from version import APP_VERSION
 
-BG = "#060B14"
-SURFACE = "#0B1323"
-SURFACE_2 = "#101C31"
-SURFACE_3 = "#14223A"
-BORDER = "#223456"
-TEXT = "#F7FAFF"
-MUTED = "#8798B5"
-CYAN = "#23D5FF"
-PURPLE = "#7657FF"
-PURPLE_HOVER = "#6547E9"
-SUCCESS = "#24D18C"
-DANGER = "#FF647C"
+from theme import C, IS_DARK, THEMES, ctk_button, ctk_entry, ctk_option
+
+BG = C["BG"]
+SURFACE = C["SURFACE"]
+SURFACE_2 = C["SURFACE_2"]
+SURFACE_3 = C["SURFACE_3"]
+BORDER = C["BORDER"]
+TEXT = C["TEXT"]
+MUTED = C["MUTED"]
+CYAN = C["CYAN"]
+PURPLE = C["ACCENT"]
+PURPLE_HOVER = C["ACCENT_HOVER"]
+SUCCESS = C["SUCCESS"]
+DANGER = C["DANGER"]
 SITE_QUALITIES = ["Default", "Best available", "1080p", "720p", "480p", "360p"]
 
 
@@ -88,6 +90,8 @@ class SettingsPanel(ctk.CTkFrame):
         self.start_with_windows_var = ctk.BooleanVar(value=bool(settings.get("start_with_windows", False)))
         self.auto_check_updates_var = ctk.BooleanVar(value=bool(settings.get("auto_check_updates", True)))
         self.auto_download_updates_var = ctk.BooleanVar(value=bool(settings.get("auto_download_updates", False)))
+        theme_name = str(settings.get("theme") or "Light")
+        self.theme_var = ctk.StringVar(value=theme_name if theme_name in THEMES else "Light")
 
         # advanced options: key -> tk variable (saved as-is)
         self._extra_vars: dict[str, Any] = {
@@ -127,6 +131,7 @@ class SettingsPanel(ctk.CTkFrame):
             self.start_with_windows_var,
             self.auto_check_updates_var,
             self.auto_download_updates_var,
+            self.theme_var,
             *self._extra_vars.values(),
         ):
             var.trace_add("write", lambda *_args: self._mark_dirty())
@@ -157,7 +162,7 @@ class SettingsPanel(ctk.CTkFrame):
             width=72,
             height=28,
             corner_radius=8,
-            fg_color="#0E3025",
+            fg_color=C["SUCCESS_SOFT"],
             text_color=SUCCESS,
             font=("Segoe UI Semibold", 9),
         )
@@ -172,7 +177,14 @@ class SettingsPanel(ctk.CTkFrame):
             segmented_button_selected_hover_color=PURPLE_HOVER,
             segmented_button_unselected_color=SURFACE_2,
             segmented_button_unselected_hover_color=SURFACE_3,
+            text_color=TEXT,
+            border_width=1,
+            border_color=C["BORDER_SOFT"],
         )
+        self.tabs._segmented_button.configure(text_color=TEXT, text_color_disabled=MUTED)
+        if not IS_DARK:  # light theme: soft accent behind the selected tab, dark text
+            self.tabs._segmented_button.configure(selected_color=C["ACCENT_SOFT"],
+                                                  selected_hover_color=C["ACCENT_SOFT"])
         self.tabs.grid(row=1, column=0, sticky="nsew", padx=30, pady=12)
         for name in ("General", "Downloads", "Website folders", "Files", "Browser", "Updates", "About"):
             self.tabs.add(name)
@@ -211,8 +223,9 @@ class SettingsPanel(ctk.CTkFrame):
             variable=variable,
             text_color=TEXT,
             progress_color=PURPLE,
-            button_color=TEXT,
-            button_hover_color=CYAN,
+            fg_color=BORDER if IS_DARK else C["FAINT"],
+            button_color=TEXT if IS_DARK else SURFACE,
+            button_hover_color=CYAN if IS_DARK else SURFACE_3,
             font=("Segoe UI", 11),
         ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
         ctk.CTkLabel(
@@ -226,7 +239,7 @@ class SettingsPanel(ctk.CTkFrame):
         ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
 
     def _build_general_tab(self, tab: ctk.CTkFrame) -> None:
-        tab.grid_columnconfigure(0, weight=1)
+        tab = self._scroll_area(tab)
         self._section_label(tab, "APP BEHAVIOR", 0)
         self._switch(
             tab,
@@ -264,6 +277,18 @@ class SettingsPanel(ctk.CTkFrame):
             "Opens quietly in the system tray after you sign in, so the browser extension and hotkeys work right away.",
         )
 
+        self._section_label(tab, "APPEARANCE", 6)
+        look = ctk.CTkFrame(tab, fg_color=SURFACE_2, corner_radius=10)
+        look.grid(row=7, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
+        look.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(look, text="Theme", text_color=TEXT, font=("Segoe UI", 11), anchor="w").grid(
+            row=0, column=0, sticky="w", padx=12, pady=(10, 2))
+        ctk.CTkOptionMenu(look, variable=self.theme_var, values=list(THEMES), width=140, **ctk_option()).grid(
+            row=0, column=1, rowspan=2, sticky="e", padx=12, pady=10)
+        ctk.CTkLabel(look, text="Light is the default. A new theme is used the next time the app starts.",
+                     text_color=MUTED, font=("Segoe UI", 9), anchor="w").grid(
+            row=1, column=0, sticky="w", padx=12, pady=(0, 10))
+
     def _build_downloads_tab(self, tab: ctk.CTkFrame) -> None:
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_columnconfigure(1, weight=1)
@@ -276,8 +301,7 @@ class SettingsPanel(ctk.CTkFrame):
             folder,
             textvariable=self.download_dir_var,
             height=36,
-            fg_color=SURFACE_3,
-            border_color=BORDER,
+            **ctk_entry(),
         )
         self.folder_entry.grid(row=0, column=0, sticky="ew", padx=(12, 8), pady=12)
         ctk.CTkButton(
@@ -285,8 +309,7 @@ class SettingsPanel(ctk.CTkFrame):
             text="Browse",
             width=82,
             height=36,
-            fg_color=PURPLE,
-            hover_color=PURPLE_HOVER,
+            **ctk_button("primary"),
             command=self._browse_download_folder,
         ).grid(row=0, column=1, padx=(0, 12), pady=12)
 
@@ -300,8 +323,7 @@ class SettingsPanel(ctk.CTkFrame):
             left,
             variable=self.default_mode_var,
             values=["Video", "Audio"],
-            fg_color=SURFACE_3,
-            button_color=PURPLE,
+            **ctk_option(),
         ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
 
         right = ctk.CTkFrame(tab, fg_color=SURFACE_2, corner_radius=10)
@@ -312,8 +334,7 @@ class SettingsPanel(ctk.CTkFrame):
             right,
             variable=self.video_quality_var,
             values=["Best available", "1080p", "720p", "480p", "360p"],
-            fg_color=SURFACE_3,
-            button_color=PURPLE,
+            **ctk_option(),
         ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
 
         audio_left = ctk.CTkFrame(tab, fg_color=SURFACE_2, corner_radius=10)
@@ -324,8 +345,7 @@ class SettingsPanel(ctk.CTkFrame):
             audio_left,
             variable=self.audio_format_var,
             values=["MP3", "M4A", "FLAC", "OPUS", "WAV"],
-            fg_color=SURFACE_3,
-            button_color=PURPLE,
+            **ctk_option(),
         ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
 
         audio_right = ctk.CTkFrame(tab, fg_color=SURFACE_2, corner_radius=10)
@@ -336,8 +356,7 @@ class SettingsPanel(ctk.CTkFrame):
             audio_right,
             variable=self.audio_quality_var,
             values=["320", "256", "192", "128"],
-            fg_color=SURFACE_3,
-            button_color=PURPLE,
+            **ctk_option(),
         ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
 
         self._section_label(tab, "BATCH DOWNLOAD PERFORMANCE", 5)
@@ -355,8 +374,7 @@ class SettingsPanel(ctk.CTkFrame):
             variable=self.max_concurrent_var,
             values=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
             width=110,
-            fg_color=SURFACE_3,
-            button_color=PURPLE,
+            **ctk_option(),
         ).grid(row=0, column=1, sticky="e", padx=12, pady=(10, 2))
         ctk.CTkLabel(
             parallel,
@@ -399,10 +417,8 @@ class SettingsPanel(ctk.CTkFrame):
         sub.grid(row=7, column=0, sticky="ew", padx=10, pady=5)
         sub.grid_columnconfigure(1, weight=1)
         ctk.CTkOptionMenu(sub, variable=self._extra_vars["subtitles"],
-                          values=["Off", "Sidecar file", "Embed in video"], fg_color=SURFACE_3,
-                          button_color=PURPLE, width=150).grid(row=0, column=0, padx=12, pady=12)
-        ctk.CTkEntry(sub, textvariable=self._extra_vars["subtitle_langs"], height=34, fg_color=SURFACE_3,
-                     border_color=BORDER, placeholder_text="Languages, e.g. en,bn").grid(
+                          values=["Off", "Sidecar file", "Embed in video"], **ctk_option(), width=150).grid(row=0, column=0, padx=12, pady=12)
+        ctk.CTkEntry(sub, textvariable=self._extra_vars["subtitle_langs"], height=34, **ctk_entry(), placeholder_text="Languages, e.g. en,bn").grid(
             row=0, column=1, sticky="ew", padx=(0, 12), pady=12)
 
         self._section_label(area, "SHORTCUTS", 10)
@@ -435,7 +451,7 @@ class SettingsPanel(ctk.CTkFrame):
 
         buttons = ctk.CTkFrame(area, fg_color="transparent")
         buttons.grid(row=3, column=0, sticky="w", padx=10, pady=(6, 10))
-        ctk.CTkButton(buttons, text="+  Add website", height=36, fg_color=PURPLE, hover_color=PURPLE_HOVER,
+        ctk.CTkButton(buttons, text="+  Add website", height=36, **ctk_button("primary"),
                       command=lambda: self._add_site_row(focus=True)).grid(row=0, column=0, padx=(0, 8))
 
         for rule in parse_rules(self._folder_rules_initial):
@@ -451,16 +467,14 @@ class SettingsPanel(ctk.CTkFrame):
         }
         box = self.sites_box
         row["widgets"] = [
-            ctk.CTkEntry(box, textvariable=row["host"], height=34, fg_color=SURFACE_3, border_color=BORDER,
+            ctk.CTkEntry(box, textvariable=row["host"], height=34, **ctk_entry(),
                          placeholder_text="example.com"),
-            ctk.CTkEntry(box, textvariable=row["folder"], height=34, fg_color=SURFACE_3, border_color=BORDER,
+            ctk.CTkEntry(box, textvariable=row["folder"], height=34, **ctk_entry(),
                          placeholder_text="Folder (empty = default folder)"),
-            ctk.CTkButton(box, text="Browse", width=74, height=34, fg_color=SURFACE_3, hover_color="#1B3153",
-                          border_width=1, border_color=BORDER, command=lambda r=row: self._browse_site_folder(r)),
+            ctk.CTkButton(box, text="Browse", width=74, height=34, **ctk_button(), command=lambda r=row: self._browse_site_folder(r)),
             ctk.CTkOptionMenu(box, variable=row["quality"], values=SITE_QUALITIES, width=132, height=34,
-                              fg_color=SURFACE_3, button_color=PURPLE),
-            ctk.CTkButton(box, text="Remove", width=70, height=34, fg_color="transparent", hover_color="#30131B",
-                          border_width=1, border_color="#512332", text_color=DANGER,
+                              **ctk_option(),),
+            ctk.CTkButton(box, text="Remove", width=70, height=34, **ctk_button("danger"),
                           command=lambda r=row: self._remove_site_row(r)),
         ]
         for var in (row["host"], row["folder"], row["quality"]):
@@ -515,15 +529,13 @@ class SettingsPanel(ctk.CTkFrame):
         box.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(box, text="cookies.txt file (Netscape format)", text_color=MUTED,
                      font=("Segoe UI", 9)).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 4))
-        ctk.CTkEntry(box, textvariable=self._extra_vars["cookies_file"], height=34, fg_color=SURFACE_3,
-                     border_color=BORDER).grid(row=1, column=0, sticky="ew", padx=(12, 8), pady=(0, 10))
-        ctk.CTkButton(box, text="Browse", width=82, height=34, fg_color=PURPLE, hover_color=PURPLE_HOVER,
+        ctk.CTkEntry(box, textvariable=self._extra_vars["cookies_file"], height=34, **ctk_entry(),).grid(row=1, column=0, sticky="ew", padx=(12, 8), pady=(0, 10))
+        ctk.CTkButton(box, text="Browse", width=82, height=34, **ctk_button("primary"),
                       command=self._browse_cookies).grid(row=1, column=1, padx=(0, 12), pady=(0, 10))
         ctk.CTkLabel(box, text="...or read cookies straight from an installed browser", text_color=MUTED,
                      font=("Segoe UI", 9)).grid(row=2, column=0, sticky="w", padx=12, pady=(0, 4))
         ctk.CTkOptionMenu(box, variable=self._extra_vars["cookies_browser"],
-                          values=["None", "Firefox", "Chrome", "Edge", "Brave"], fg_color=SURFACE_3,
-                          button_color=PURPLE, width=150).grid(row=3, column=0, sticky="w", padx=12, pady=(0, 12))
+                          values=["None", "Firefox", "Chrome", "Edge", "Brave"], **ctk_option(), width=150).grid(row=3, column=0, sticky="w", padx=12, pady=(0, 12))
         ctk.CTkLabel(
             area,
             text="Cookies are only sent to the sites you download from. Chrome/Edge may block reading their cookies while open; Firefox or a cookies.txt export is the most reliable.",
@@ -539,14 +551,13 @@ class SettingsPanel(ctk.CTkFrame):
         ext.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(ext, text="Pairing token", text_color=MUTED, font=("Segoe UI", 9)).grid(
             row=0, column=0, sticky="w", padx=12, pady=(10, 4))
-        token_entry = ctk.CTkEntry(ext, height=34, fg_color=SURFACE_3, border_color=BORDER)
+        token_entry = ctk.CTkEntry(ext, height=34, **ctk_entry(),)
         token_entry.insert(0, self._token)
         token_entry.configure(state="readonly")
         token_entry.grid(row=1, column=0, sticky="ew", padx=(12, 8), pady=(0, 10))
-        ctk.CTkButton(ext, text="Copy", width=70, height=34, fg_color=PURPLE, hover_color=PURPLE_HOVER,
+        ctk.CTkButton(ext, text="Copy", width=70, height=34, **ctk_button("primary"),
                       command=self._copy_token).grid(row=1, column=1, padx=(0, 12), pady=(0, 10))
-        ctk.CTkButton(ext, text="Export extension files...", height=36, fg_color=SURFACE_3, hover_color="#1B3153",
-                      border_width=1, border_color=BORDER, command=self._export_extension).grid(
+        ctk.CTkButton(ext, text="Export extension files...", height=36, **ctk_button(), command=self._export_extension).grid(
             row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 10))
         ctk.CTkLabel(
             ext,
@@ -599,18 +610,14 @@ class SettingsPanel(ctk.CTkFrame):
             actions,
             text="Check for updates now",
             height=38,
-            fg_color=PURPLE,
-            hover_color=PURPLE_HOVER,
+            **ctk_button("primary"),
             command=self._check_updates,
         ).grid(row=0, column=0, sticky="ew", padx=(12, 6), pady=12)
         ctk.CTkButton(
             actions,
             text="Open latest release",
             height=38,
-            fg_color=SURFACE_3,
-            hover_color="#1B3153",
-            border_width=1,
-            border_color=BORDER,
+            **ctk_button(),
             command=self._on_open_release,
         ).grid(row=0, column=1, sticky="ew", padx=(6, 12), pady=12)
 
@@ -646,23 +653,20 @@ class SettingsPanel(ctk.CTkFrame):
             actions,
             text="System diagnostics",
             height=40,
-            fg_color=PURPLE,
-            hover_color=PURPLE_HOVER,
+            **ctk_button("primary"),
             command=self._on_open_diagnostics,
         ).grid(row=0, column=0, sticky="ew", padx=(0, 5), pady=5)
         ctk.CTkButton(
             actions,
             text="Open application log",
             height=40,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
+            **ctk_button(),
             command=self._on_open_log,
         ).grid(row=0, column=1, sticky="ew", padx=(5, 0), pady=5)
 
     def _build_footer(self) -> None:
-        footer = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=12)
+        footer = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=12, border_width=1,
+                              border_color=C["BORDER_SOFT"])
         footer.grid(row=2, column=0, sticky="ew", padx=30, pady=(0, 18))
         footer.grid_columnconfigure(0, weight=1)
 
@@ -680,10 +684,7 @@ class SettingsPanel(ctk.CTkFrame):
             text="Close",
             width=92,
             height=38,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
+            **ctk_button("ghost"),
             command=self._close,
         ).grid(row=0, column=1, padx=(6, 6), pady=14)
 
@@ -692,8 +693,7 @@ class SettingsPanel(ctk.CTkFrame):
             text="Save settings",
             width=120,
             height=38,
-            fg_color=PURPLE,
-            hover_color=PURPLE_HOVER,
+            **ctk_button("primary"),
             command=self._save,
             state="disabled",
         )
@@ -703,7 +703,7 @@ class SettingsPanel(ctk.CTkFrame):
         if self._dirty:
             return
         self._dirty = True
-        self.state_label.configure(text="UNSAVED", fg_color="#2D2514", text_color="#FFB84D")
+        self.state_label.configure(text="UNSAVED", fg_color=C["WARNING_SOFT"], text_color=C["WARNING"])
         self.save_button.configure(state="normal")
 
     def _browse_download_folder(self) -> None:
@@ -735,6 +735,7 @@ class SettingsPanel(ctk.CTkFrame):
                 "auto_check_updates": bool(self.auto_check_updates_var.get()),
                 "auto_download_updates": bool(self.auto_download_updates_var.get()),
                 "folder_rules": self._site_rules_text(),
+                "theme": self.theme_var.get(),
             }
         )
         for key, var in self._extra_vars.items():
@@ -753,7 +754,7 @@ class SettingsPanel(ctk.CTkFrame):
         try:
             self._on_save(payload)
         except Exception as exc:
-            self.state_label.configure(text="ERROR", fg_color="#351722", text_color="#FF647C")
+            self.state_label.configure(text="ERROR", fg_color=C["DANGER_SOFT"], text_color=C["DANGER"])
             self.status_label.configure(text="Settings were not saved.")
             messagebox.showerror(
                 "Media Downloader Settings",
@@ -764,7 +765,7 @@ class SettingsPanel(ctk.CTkFrame):
 
         self._original = copy.deepcopy(payload)
         self._dirty = False
-        self.state_label.configure(text="SAVED", fg_color="#0E3025", text_color=SUCCESS)
+        self.state_label.configure(text="SAVED", fg_color=C["SUCCESS_SOFT"], text_color=SUCCESS)
         self.save_button.configure(state="disabled")
         self.status_label.configure(text="Settings saved and applied.")
         self.after(1800, lambda: self.status_label.configure(text="Changes are saved only when you press Save settings.") if self.winfo_exists() else None)

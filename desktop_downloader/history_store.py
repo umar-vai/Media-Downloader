@@ -20,7 +20,7 @@ STATUSES = {"completed", "failed", "cancelled"}
 _TEXT_FIELDS = (
     "title", "source_url", "page_url", "download_url", "referer", "platform", "website", "creator",
     "quality", "video_quality", "audio_format", "audio_quality", "error", "download_dir", "file_name", "extension",
-    "resolution", "video_codec", "audio_codec", "container", "started_at", "finished_at", "batch_id",
+    "resolution", "video_codec", "audio_codec", "container", "started_at", "finished_at", "batch_id", "request_id",
 )
 _INT_FIELDS = ("duration_seconds", "file_size", "elapsed_seconds", "avg_speed_bps", "bitrate_kbps", "attempts")
 
@@ -192,6 +192,19 @@ class HistoryStore:
                 return False
             self._write_unlocked(kept)
             return True
+
+    def remove_many(self, entry_ids: list[str]) -> int:
+        """Remove several entries with one write. Returns how many were removed."""
+        wanted = {str(entry_id or "").strip() for entry_id in entry_ids} - {""}
+        if not wanted:
+            return 0
+        with self._lock:
+            entries = self._read_unlocked()
+            kept = [item for item in entries if item["id"] not in wanted]
+            removed = len(entries) - len(kept)
+            if removed:
+                self._write_unlocked(kept)
+            return removed
 
     def clear(self) -> int:
         with self._lock:

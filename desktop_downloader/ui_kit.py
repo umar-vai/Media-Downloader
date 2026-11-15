@@ -26,27 +26,30 @@ from typing import Any, Callable
 # --------------------------------------------------------------------------- #
 # Theme
 # --------------------------------------------------------------------------- #
-BG = "#080B12"
-SIDEBAR = "#0B0F18"
-SURFACE = "#111623"
-SURFACE_2 = "#171E2E"
-SURFACE_3 = "#1E2740"
-BORDER = "#252F47"
-BORDER_SOFT = "#1B2336"
-TEXT = "#EEF2FF"
-MUTED = "#8A94AE"
-FAINT = "#5A647E"
-ACCENT = "#7C6CFF"
-ACCENT_HOVER = "#6A59F0"
-ACCENT_SOFT = "#241F4D"
-CYAN = "#2DD4FF"
-SUCCESS = "#34D399"
-SUCCESS_SOFT = "#0F2E26"
-WARNING = "#FBBF24"
-WARNING_SOFT = "#33290F"
-DANGER = "#FB7185"
-DANGER_SOFT = "#361721"
-INFO_SOFT = "#13233F"
+from theme import C as _C
+
+BG = _C["BG"]
+SIDEBAR = _C["SIDEBAR"]
+SURFACE = _C["SURFACE"]
+SURFACE_2 = _C["SURFACE_2"]
+SURFACE_3 = _C["SURFACE_3"]
+BORDER = _C["BORDER"]
+BORDER_SOFT = _C["BORDER_SOFT"]
+TEXT = _C["TEXT"]
+MUTED = _C["MUTED"]
+FAINT = _C["FAINT"]
+ACCENT = _C["ACCENT"]
+ACCENT_HOVER = _C["ACCENT_HOVER"]
+ACCENT_SOFT = _C["ACCENT_SOFT"]
+ON_ACCENT = _C["ON_ACCENT"]
+CYAN = _C["CYAN"]
+SUCCESS = _C["SUCCESS"]
+SUCCESS_SOFT = _C["SUCCESS_SOFT"]
+WARNING = _C["WARNING"]
+WARNING_SOFT = _C["WARNING_SOFT"]
+DANGER = _C["DANGER"]
+DANGER_SOFT = _C["DANGER_SOFT"]
+INFO_SOFT = _C["INFO_SOFT"]
 
 FONT_FAMILY = "Segoe UI"
 FONT_BOLD = "Segoe UI Semibold"
@@ -376,11 +379,11 @@ class Chip(El):
 class Btn(El):
     STYLES = {
         # fill, hover, text, outline
-        "primary": (ACCENT, ACCENT_HOVER, "#FFFFFF", ACCENT),
-        "cyan": (CYAN, "#1BB8E0", "#031018", CYAN),
+        "primary": (ACCENT, ACCENT_HOVER, ON_ACCENT, ACCENT),
+        "cyan": (_C["ACTION"], _C["ACTION_HOVER"], _C["ON_ACTION"], _C["ACTION"]),
         "secondary": (SURFACE_2, SURFACE_3, TEXT, BORDER),
         "ghost": (SURFACE, SURFACE_2, MUTED, BORDER_SOFT),
-        "danger": (DANGER_SOFT, "#4A1D2B", DANGER, "#5B2433"),
+        "danger": (DANGER_SOFT, _C["DANGER_HOVER"], DANGER, _C["DANGER_LINE"]),
         "nav": (SIDEBAR, SURFACE_2, MUTED, SIDEBAR),
         "nav_active": (ACCENT_SOFT, ACCENT_SOFT, TEXT, ACCENT_SOFT),
     }
@@ -605,7 +608,7 @@ class Field(El):
             page, textvariable=self._ev, bg=SURFACE_2, fg=fg, insertbackground=TEXT, relief="flat", bd=0,
             highlightthickness=0, font=font(size), readonlybackground=SURFACE_2,
             disabledbackground=SURFACE_2, disabledforeground=FAINT,
-            selectbackground=ACCENT, selectforeground="#FFFFFF",
+            selectbackground=ACCENT, selectforeground=ON_ACCENT,
         )
         self.win = page.create_window(0, 0, window=self.entry, anchor="nw", tags=(self.tag,))
         self._ev.trace_add("write", self._on_entry_write)
@@ -691,7 +694,7 @@ class TextArea(El):
         self.text = tk.Text(
             page, bg=SURFACE_2, fg=TEXT, insertbackground=TEXT, relief="flat", bd=0, highlightthickness=0,
             font=font(size, family="Consolas"), wrap="none", undo=True,
-            selectbackground=ACCENT, selectforeground="#FFFFFF", padx=px(4), pady=px(2),
+            selectbackground=ACCENT, selectforeground=ON_ACCENT, padx=px(4), pady=px(2),
         )
         self.win = page.create_window(0, 0, window=self.text, anchor="nw", tags=(self.tag,))
         self.text.bind("<FocusIn>", lambda _e: page.itemconfigure(self.poly, outline=ACCENT), add="+")
@@ -737,7 +740,7 @@ class Select(El):
             return
         x, y, _w, h = self._box
         menu = tk.Menu(self.page, tearoff=0, bg=SURFACE_2, fg=TEXT, activebackground=ACCENT,
-                       activeforeground="#FFFFFF", bd=0, relief="flat", font=font(12))
+                       activeforeground=ON_ACCENT, bd=0, relief="flat", font=font(12))
         for value in self.values:
             menu.add_command(label=value, command=lambda v=value: self._choose(v))
         try:
@@ -806,7 +809,7 @@ class Segmented(El):
         for value, pill, txt in zip(self.values, self.pills, self.texts):
             active = value == current
             self.page.itemconfigure(pill, fill=ACCENT if active else SURFACE_2)
-            self.page.itemconfigure(txt, fill="#FFFFFF" if active else MUTED)
+            self.page.itemconfigure(txt, fill=ON_ACCENT if active else MUTED)
 
     def place(self, x: float, y: float, w: float, h: float) -> None:
         if self._same(x, y, w, h):
@@ -827,7 +830,7 @@ class Check(El):
         self.var = var
         self.fnt = font(size)
         self.box = self._poly(fill=SURFACE_2, outline=BORDER, width=1)
-        self.mark = page.create_text(0, 0, text="✓", fill="#FFFFFF", font=font(12, True), anchor="center",
+        self.mark = page.create_text(0, 0, text="✓", fill=ON_ACCENT, font=font(12, True), anchor="center",
                                      tags=(self.tag,), state="hidden")
         self.id = page.create_text(0, 0, text=text, fill=TEXT, font=self.fnt, anchor="w", tags=(self.tag,))
         page.tag_bind(self.tag, "<ButtonRelease-1>", lambda _e: self.var.set(not self.var.get()))

@@ -6,14 +6,15 @@ from typing import Any, Callable
 
 import customtkinter as ctk
 
-BG = "#060B14"
-SURFACE_2 = "#101C31"
-SURFACE_3 = "#14223A"
-BORDER = "#223456"
-TEXT = "#F7FAFF"
-MUTED = "#8798B5"
-PURPLE = "#7657FF"
+from theme import C
 
+BG = C["SURFACE"]
+SURFACE_2 = C["SURFACE_2"]
+SURFACE_3 = C["SURFACE_3"]
+BORDER = C["BORDER"]
+TEXT = C["TEXT"]
+MUTED = C["MUTED"]
+PURPLE = C["SELECT"]  # highlighted command row
 
 def filter_commands(commands: list[tuple[str, Callable[[], None]]], query: str) -> list[tuple[str, Callable[[], None]]]:
     words = [w for w in query.lower().split() if w]
