@@ -181,6 +181,8 @@ def queue_row(item: dict[str, Any], metrics: dict[str, Any] | None = None) -> di
     total = int(metrics.get("total_bytes") or 0)
     done = int(metrics.get("downloaded_bytes") or 0)
     size = total or done
+    # An HLS/DASH total is a guess until the download ends: mark it with "~".
+    size_estimated = bool(metrics.get("total_is_estimate")) and status != "completed"
     if status == "completed" and path:
         try:
             size = os.path.getsize(path)
@@ -207,7 +209,7 @@ def queue_row(item: dict[str, Any], metrics: dict[str, Any] | None = None) -> di
         "detail": str(item.get("error") or detail) if status == "failed" else detail,
         "progress": progress,
         "size": size,
-        "size_text": format_size(size),
+        "size_text": ("~" if size_estimated and size else "") + format_size(size),
         "done_bytes": done,
         "speed": speed,
         "speed_text": format_speed(speed),

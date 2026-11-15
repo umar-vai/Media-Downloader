@@ -535,11 +535,19 @@ def download_from_analysis(
         state = stream_state.setdefault(key, {"fraction": 0.0, "done": 1.0, "finished": 0.0})
         if status == "downloading":
             downloaded = int(data.get("downloaded_bytes") or 0)
-            total = int(data.get("total_bytes") or data.get("total_bytes_estimate") or 0)
-            if total:
-                fraction = downloaded / total
-            elif data.get("fragment_count"):
-                fraction = float(data.get("fragment_index") or 0) / float(data["fragment_count"])
+            exact_total = int(data.get("total_bytes") or 0)
+            total = exact_total or int(data.get("total_bytes_estimate") or 0)
+            fragment_count = int(data.get("fragment_count") or 0)
+            # HLS/DASH: yt-dlp's byte total is only a guess from the first fragments and can be
+            # far too small, which pinned the bar at 98.5% after a few MB. The fragment count is
+            # exact, so it drives the percentage whenever it is known.
+            if fragment_count:
+                fraction = float(data.get("fragment_index") or 0) / float(fragment_count)
+            elif exact_total:
+                fraction = downloaded / exact_total
+            elif total:
+                # A bare estimate never claims the stream is (almost) done.
+                fraction = min(downloaded / total, 0.9)
             else:
                 fraction = state["fraction"]
             state["fraction"] = max(state["fraction"], max(0.0, min(1.0, fraction)))
@@ -556,6 +564,7 @@ def download_from_analysis(
                 bits.append(f"{_format_eta(eta)} left")
             state["downloaded"] = float(downloaded)
             state["total"] = float(total)
+            state["estimated"] = 0.0 if exact_total else 1.0
             if on_metrics:
                 # Video and audio arrive as separate streams: report the whole download, so
                 # "downloaded of size" and the time left describe the file the user gets.
@@ -575,6 +584,10 @@ def download_from_analysis(
                         "total_bytes": int(total_all),
                         "speed_bps": float(speed or 0.0),
                         "eta_seconds": eta_all,
+                        # The size is a guess until every unfinished stream reports an exact one.
+                        "total_is_estimate": any(
+                            s.get("estimated") and not s.get("finished") for s in stream_state.values()
+                        ) or (not known_all and bool(weight_all)),
                     }
                 )
             if on_progress:
@@ -588,6 +601,7 @@ def download_from_analysis(
             finished_bytes = float(data.get("total_bytes") or data.get("downloaded_bytes") or 0)
             if finished_bytes:
                 state["total"] = state["downloaded"] = finished_bytes
+            state["estimated"] = 0.0
             if on_progress:
                 on_progress(overall_progress(), "Download finished")
             if on_status and len(stream_state) >= expected_streams:
@@ -651,6 +665,9 @@ def download_from_analysis(
             opts["postprocessor_args"]["merger+ffmpeg_o"] = [*tags, *_NO_FASTSTART]
 
     def make_ydl(params: dict[str, Any]) -> yt_dlp.YoutubeDL:
+        # Each attempt starts clean: streams left half-done (or "finished") by a failed attempt
+        # must not count towards this one. The bar itself never moves backwards.
+        stream_state.clear()
         ydl = yt_dlp.YoutubeDL(params)
         ydl.add_post_processor(plan_pp, when="before_dl")
         if metadata_pp is not None:
