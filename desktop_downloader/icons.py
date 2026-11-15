@@ -250,27 +250,30 @@ def _file_painter(category: str, state: str, ring: str) -> Painter:
     return paint
 
 
+# Classic Windows folder colours (the manila folder of Explorer's navigation pane).
+FOLDER_BACK = "#DDA82E"
+FOLDER_FRONT = "#F4CF6B"
+
+
+def _plain_folder(d: ImageDraw.ImageDraw, u: float) -> None:
+    _rrect(d, u, 0.06, 0.16, 0.46, 0.32, 0.04, FOLDER_BACK)
+    _rrect(d, u, 0.06, 0.24, 0.94, 0.86, 0.05, FOLDER_BACK)
+    _rrect(d, u, 0.06, 0.36, 0.94, 0.86, 0.05, FOLDER_FRONT)
+
+
 def _tree_painter(name: str, ink: str) -> Painter:
-    colors = {"all": BLUE, "unfinished": ORANGE, "finished": GREEN, "queues": VIOLET}
+    """Sidebar icons: the same plain folder for every category, like a classic download
+    manager's tree. The labels tell the categories apart."""
 
     def paint(d: ImageDraw.ImageDraw, u: float) -> None:
-        if name in colors:
-            _folder(d, u, colors[name])
-            if name == "finished":
-                _check(d, u, 0.5, 0.6, 0.3, WHITE, 0.09)
-            elif name == "unfinished":
-                _arrow_down(d, u, 0.5, 0.6, 0.34, WHITE, 0.09)
-        elif name == "queue":
+        if name == "queue":
             _lines(d, u, 0.12, 0.25, 0.76, 0.25, 3, ink, 0.1)
-        elif name in CATEGORY_COLORS:
-            _file_painter(name, "", "#00000000")(d, u)
         else:
-            _folder(d, u, SLATE)
+            _plain_folder(d, u)
 
     return paint
 
 
-# ------------------------------------------------------------------ cache
 class IconSet:
     """Creates PhotoImages on demand and keeps them alive (Tk drops unreferenced images)."""
 
