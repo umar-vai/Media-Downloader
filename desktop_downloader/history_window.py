@@ -147,8 +147,8 @@ class PropertiesDialog(native.Dialog):
         self.item = item
         self._on_action = on_action
         state = entry_state(item)
-        colour = {"Completed": C["SUCCESS"], "Missing": C["WARNING"]}.get(
-            state, C["DANGER"] if state in {"Failed", "Cancelled"} else C["ACCENT"])
+        # Plain text like a Windows Properties sheet; only a problem is shown in red.
+        colour = C["DANGER"] if state in {"Failed", "Missing"} else C["TEXT"]
 
         head = ttk.Frame(self.body)
         head.pack(fill="x", pady=(0, PAD))
@@ -166,10 +166,10 @@ class PropertiesDialog(native.Dialog):
                 continue
             page = ttk.Frame(tabs, padding=(PAD, PAD, PAD, PAD))
             page.grid_columnconfigure(1, weight=1)
-            tabs.add(page, text=f"  {title}  ")
+            tabs.add(page, text=title)
             for index, (label, value) in enumerate(part):
                 ttk.Label(page, text=f"{label}:").grid(row=index, column=0, sticky="nw", padx=(0, PAD), pady=2)
-                if label == "Error" or len(value) > 90:
+                if label == "Error":
                     box = tk.Text(page, height=3 if label != "Error" else 5, width=58, wrap="word", relief="flat",
                                   font=native.font(self), bd=0, highlightthickness=1,
                                   highlightbackground=C["BORDER"], bg=C["SURFACE"],
