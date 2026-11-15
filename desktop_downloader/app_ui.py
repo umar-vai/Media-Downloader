@@ -274,11 +274,11 @@ class UIMixin:
         header.pack(side="top", fill="x")
         self.list_title = tk.Label(header, text="All Downloads", bg=C["BG"], fg=C["TEXT"],
                                    font=sysfont(True), anchor="w")
-        self.list_title.pack(side="left", padx=(px(2), px(6)), pady=px(4))
+        self.list_title.pack(side="left", padx=(px(2), px(6)), pady=px(2))
         self.list_count = tk.Label(header, text="", bg=C["BG"], fg=C["FAINT"], font=sysfont(), anchor="w")
-        self.list_count.pack(side="left", pady=px(4))
+        self.list_count.pack(side="left", pady=px(2))
         self.search = SearchBox(header, self._search_changed)
-        self.search.pack(side="right", padx=(0, px(3)), pady=px(3))
+        self.search.pack(side="right", padx=(0, px(3)), pady=px(2))
 
         self.details = DetailsPane(right, self.icons, {
             "toggle": self._toggle_selected, "cancel": self.cancel_selected, "open": self.open_selected,

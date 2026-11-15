@@ -37,8 +37,10 @@ def setup_style(root: tk.Misc) -> ttk.Style:
     if native.NATIVE:
         # Leave the list views to the "vista" theme: real Windows column headers, scroll bars,
         # sunken borders and the system highlight colour, like Explorer / IDM / NDM.
-        row = px(20)
+        # Compact rows, like a Windows list view in Details mode (IDM / NDM / Explorer).
+        row = px(18)
         style.configure("MD.Treeview", rowheight=row, font=sysfont())
+        row = px(20)
         style.configure("Side.Treeview", rowheight=row, font=sysfont(), indent=px(19))
         return style
     body = ui.font(13)
@@ -112,11 +114,12 @@ class Tooltip:
 class ToolButton(tk.Label):
     def __init__(self, master: tk.Misc, icons: IconSet, *, text: str, icon: str, command: Callable[[], Any],
                  tip: str = "") -> None:
-        size = px(28)
+        # Small toolbar glyphs with the caption underneath: a compact classic Windows toolbar.
+        size = px(20)
         self._on = icons.tool(icon, size)
         self._off = icons.tool(icon, size, disabled=True)
         super().__init__(master, text=text, image=self._on, compound="top", bg=C["BG"], fg=C["TEXT"],
-                         font=sysfont(), padx=px(7), pady=px(3), bd=0, highlightthickness=1,
+                         font=sysfont(), padx=px(5), pady=px(1), bd=0, highlightthickness=1,
                          highlightbackground=C["BG"], highlightcolor=C["BG"])
         self.command = command
         self.enabled = True
@@ -172,9 +175,21 @@ class Toolbar(tk.Frame):
         self.icons = icons
         self.buttons: dict[str, ToolButton] = {}
         self.inner = tk.Frame(self, bg=C["BG"])
-        self.inner.pack(side="left", padx=px(4), pady=px(3))
+        self.inner.pack(side="left", padx=px(2), pady=px(2))
         self.right = tk.Frame(self, bg=C["BG"])
-        self.right.pack(side="right", padx=px(8))
+        self.right.pack(side="right", padx=px(4))
+        self.bind("<Configure>", lambda _e: self._fit(), add="+")
+
+    def _fit(self) -> None:
+        # In a narrow window the buttons win: optional text on the right (the update note) is
+        # hidden instead of being squeezed into a stray letter.
+        # Measure with the note always counted, so showing/hiding it cannot flip the result.
+        wanted = sum(getattr(child, "full_width", child.winfo_reqwidth)() for child in self.right.winfo_children())
+        tight = self.inner.winfo_reqwidth() + wanted + px(16) > self.winfo_width()
+        for child in self.right.winfo_children():
+            compact = getattr(child, "set_compact", None)
+            if compact is not None:
+                compact(tight)
 
     def add(self, key: str, text: str, icon: str, command: Callable[[], Any], tip: str = "") -> ToolButton:
         button = ToolButton(self.inner, self.icons, text=text, icon=icon, command=command, tip=tip)
@@ -183,7 +198,7 @@ class Toolbar(tk.Frame):
         return button
 
     def separator(self) -> None:
-        ttk.Separator(self.inner, orient="vertical").pack(side="left", fill="y", padx=px(4), pady=px(4))
+        ttk.Separator(self.inner, orient="vertical").pack(side="left", fill="y", padx=px(3), pady=px(3))
 
 
 class UpdateBadge(tk.Frame):
@@ -202,12 +217,22 @@ class UpdateBadge(tk.Frame):
         self.available = False
         self.button = ToolButton(self, icons, text="Updates", icon="update", command=self._clicked,
                                  tip="Check for a new version (one click)")
-        self.button.pack(side="top")
-        self.note = tk.Label(self, text="", bg=C["BG"], fg=C["FAINT"], font=ui.font(10))
-        self.note.pack(side="top")
+        self.button.pack(side="right")
+        self.note = tk.Label(self, text="", bg=C["BG"], fg=C["FAINT"], font=sysfont())
+        self.note.pack(side="right", padx=(0, px(4)))
         self.note.bind("<ButtonRelease-1>", lambda _e: self._clicked())
-        self.pack(side="right", pady=(px(2), 0))
+        self.pack(side="right")
         self.set_state("idle")
+
+    def full_width(self) -> int:
+        return self.button.winfo_reqwidth() + self.note.winfo_reqwidth() + px(4)
+
+    def set_compact(self, on: bool) -> None:
+        shown = bool(self.note.winfo_manager())
+        if on and shown and not self.available:
+            self.note.pack_forget()
+        elif (not on or self.available) and not shown:
+            self.note.pack(side="right", padx=(0, px(4)))
 
     def _clicked(self) -> None:
         if self.available:
@@ -229,7 +254,7 @@ class UpdateBadge(tk.Frame):
         }
         colors = {"available": C["SUCCESS"], "ready": C["SUCCESS"], "error": C["DANGER"], "checking": C["MUTED"]}
         self.note.configure(text=texts.get(state, text), fg=colors.get(state, C["FAINT"]),
-                            font=ui.font(10, state in {"available", "ready"}))
+                            font=sysfont(state in {"available", "ready"}))
         self.button.configure(text="Install update" if self.available else "Updates")
         self.button.set_enabled(state != "checking")
 
