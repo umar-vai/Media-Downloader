@@ -96,6 +96,16 @@ class ExternalDownloadTests(unittest.TestCase):
         self.assertEqual(extra["title_hint"], "Horror Collector Episode 4")
         self.assertTrue(extra["cookiefile"].endswith(".txt"))
 
+    def test_eporner_cdn_playlist_downloads_the_page(self) -> None:
+        fake = self._fake_app()
+        stream = "https://dash-s2-c50-fr-cdn.eporner.com/hls/v1/1-,720p-av1,.mp4.urlset/master.m3u8?hash=a&expires=1"
+        page = "https://www.eporner.com/video-KW9DXb6olC7/title/"
+        app_module.DownloaderApp._handle_external_download(fake, {"url": stream, "pageUrl": page, "quality": "720p"})
+        text, options, extra = fake.calls[0]
+        self.assertEqual(text, page)
+        self.assertEqual(extra["fallback_url"], stream)
+        self.assertEqual(options["video_quality"], "720p")
+
     def test_bad_quality_falls_back_to_default(self) -> None:
         fake = self._fake_app()
         app_module.DownloaderApp._handle_external_download(fake, {"url": "https://e.com/v.mp4", "quality": "huge"})

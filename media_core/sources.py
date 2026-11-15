@@ -335,6 +335,77 @@ def eporner_embed_url(url: str) -> str | None:
     return f"https://www.eporner.com/embed/{match.group(1)}/"
 
 
+_DIRECT_STREAM_RE = re.compile(
+    r"\.(m3u8|mpd|mp4|webm|mkv|mov|m4v|m4a|mp3|ogg|opus|flac|wav)$", re.IGNORECASE
+)
+
+
+def is_direct_stream_url(url: str) -> bool:
+    """True for a link to the media itself (an HLS/DASH playlist or a media file), not a page."""
+    try:
+        path = urlparse((url or "").strip()).path
+    except ValueError:
+        return False
+    return bool(_hostname(url)) and bool(_DIRECT_STREAM_RE.search(path))
+
+
+def _base_domain(host: str) -> str:
+    parts = [part for part in host.split(".") if part]
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in {"co", "com", "net", "org", "ac", "gov", "edu"}:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+_DEDICATED_CACHE: dict[str, bool] = {}
+
+
+def has_dedicated_extractor(url: str) -> bool:
+    """True when yt-dlp has a site extractor (not just Generic) for this page."""
+    host = _hostname(url)
+    if not host:
+        return False
+    key = url.split("#", 1)[0]
+    if key in _DEDICATED_CACHE:
+        return _DEDICATED_CACHE[key]
+    found = False
+    try:
+        from yt_dlp.extractor import gen_extractor_classes
+
+        for extractor in gen_extractor_classes():
+            name = getattr(extractor, "ie_key", lambda: "")()
+            if name == "Generic":
+                continue
+            try:
+                if extractor.suitable(key):
+                    found = True
+                    break
+            except Exception:
+                continue
+    except Exception:
+        found = False
+    if len(_DEDICATED_CACHE) > 500:
+        _DEDICATED_CACHE.clear()
+    _DEDICATED_CACHE[key] = found
+    return found
+
+
+def preferred_page_url(stream_url: str, page_url: str) -> str | None:
+    """The page link to download instead of a stream the browser captured, or None.
+
+    Sites such as Eporner hand the player short-lived, IP-signed CDN playlists
+    (``.../master.m3u8?hash=...&expires=...``). Downloading that captured link fails often:
+    the CDN throttles a second client, then redirects it to a 404. yt-dlp's own extractor for
+    the page asks the site for fresh links (Eporner: plain MP4 files), which is reliable.
+    Only used when the stream lives on the same site as the page, so a page that merely
+    embeds someone else's player keeps the stream the user picked."""
+    if not is_direct_stream_url(stream_url) or is_direct_stream_url(page_url):
+        return None
+    stream_host, page_host = _hostname(stream_url), _hostname(page_url)
+    if not stream_host or not page_host or _base_domain(stream_host) != _base_domain(page_host):
+        return None
+    return page_url if has_dedicated_extractor(page_url) else None
+
+
 def extraction_attempts(url: str) -> list[tuple[str, dict]]:
     """Return ordered extraction/network fallbacks for any HTTP(S) media page."""
     platform = detect_platform(url)
@@ -342,6 +413,15 @@ def extraction_attempts(url: str) -> list[tuple[str, dict]]:
         return []
 
     host = _hostname(url)
+    if platform == "web" and is_direct_stream_url(url):
+        # A playlist or media file: there is no page to try in other ways. Two transports are
+        # enough; six attempts on a dead or expired link only kept the user waiting minutes.
+        base = _base_request_options()
+        legacy = {**base, "compat_opts": {"prefer-legacy-http-handler"}, "source_address": "0.0.0.0"}
+        return [
+            (url, {**legacy, "_force_generic_extractor": True}),
+            (url, {**base, "_force_generic_extractor": True}),
+        ]
     if host in PORNHUB_HOSTS:
         base = _base_request_options()
         legacy = {

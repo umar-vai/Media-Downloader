@@ -40,7 +40,7 @@ from history_window import HistoryPage
 from media_probe import probe_media
 from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
-from media_sources import detect_platform, platform_name
+from media_sources import detect_platform, platform_name, preferred_page_url
 from shared_engine import Cancelled as SharedCancelled, analyze_url as shared_analyze_url, download_from_analysis as shared_download_from_analysis, engine_options
 from batch_download import parse_batch_urls_detailed
 from command_palette import CommandPalette
@@ -69,6 +69,31 @@ _TRANSIENT_ERRORS = re.compile(
     r"read error|broken pipe|remote end closed|chunk|retrying",
     re.IGNORECASE,
 )
+
+
+# What the browser extension's "Find qualities" read, kept for a few minutes: when the user
+# then picks a quality the download starts at once instead of reading the video again.
+_EXT_ANALYSIS_TTL = 8 * 60
+_ext_analysis: dict[str, tuple[float, dict[str, Any], dict[str, Any]]] = {}
+_ext_analysis_lock = threading.Lock()
+
+
+def _remember_ext_analysis(url: str, summary: dict[str, Any], info: dict[str, Any]) -> None:
+    now = time.monotonic()
+    with _ext_analysis_lock:
+        for key in [k for k, v in _ext_analysis.items() if now - v[0] > _EXT_ANALYSIS_TTL]:
+            _ext_analysis.pop(key, None)
+        while len(_ext_analysis) >= 40:
+            _ext_analysis.pop(next(iter(_ext_analysis)))
+        _ext_analysis[url] = (now, summary, info)
+
+
+def _recent_ext_analysis(url: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    with _ext_analysis_lock:
+        hit = _ext_analysis.get(url)
+    if not hit or time.monotonic() - hit[0] > _EXT_ANALYSIS_TTL:
+        return None
+    return copy.deepcopy(hit[1]), copy.deepcopy(hit[2])
 
 
 def _looks_transient(message: str) -> bool:
@@ -984,13 +1009,31 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 self._put_download_event(
                     "download_status", request_id, "Analyzing batch link…"
                 )
-                summary, extracted_info = shared_analyze_url(
-                    url,
-                    cancel_event=cancel_event,
-                    on_status=lambda text: self._put_download_event(
-                        "download_status", request_id, f"Analyze: {text}"
-                    ),
-                )
+                def analyze(link: str) -> tuple[dict[str, Any], dict[str, Any]]:
+                    recent = _recent_ext_analysis(link)
+                    if recent is not None:
+                        return recent
+                    return shared_analyze_url(
+                        link,
+                        cancel_event=cancel_event,
+                        on_status=lambda text: self._put_download_event(
+                            "download_status", request_id, f"Analyze: {text}"
+                        ),
+                    )
+
+                fallback_url = str(request_settings.get("fallback_url") or "")
+                try:
+                    summary, extracted_info = analyze(url)
+                except SharedCancelled:
+                    raise
+                except Exception as exc:
+                    # The page could not be read: use the stream the browser captured instead.
+                    if not fallback_url or fallback_url == url or cancel_event.is_set():
+                        raise
+                    LOGGER.info("Page analysis failed request=%s, using captured stream: %s", request_id, exc)
+                    url = fallback_url
+                    request_settings.pop("fallback_url", None)
+                    summary, extracted_info = analyze(url)
                 if cancel_event.is_set():
                     raise SharedCancelled("Batch item cancelled after analysis.")
                 cached_info = extracted_info
@@ -1837,9 +1880,11 @@ class DownloaderApp(UIMixin, ctk.CTk):
             cookiefile=str(cookie_path or ""),
             referer=page_url if page_url.startswith(("http://", "https://")) else "",
             allow_browser_bridge=False,
+            quick=True,
         )
         try:
-            summary, _info = shared_analyze_url(url, cancel_event=threading.Event())
+            summary, info = shared_analyze_url(url, cancel_event=threading.Event())
+            _remember_ext_analysis(url, summary, info)
         except Exception as exc:
             LOGGER.info("Extension analysis failed url=%s: %s", url, exc)
             message = " ".join(str(exc).split())
@@ -1878,6 +1923,15 @@ class DownloaderApp(UIMixin, ctk.CTk):
         page_url = str(data.get("pageUrl") or "").strip()
         if page_url.startswith(("http://", "https://")):
             extra["page_url"] = page_url
+            # A short-lived CDN playlist of a site yt-dlp knows (e.g. Eporner): download the
+            # page instead, which gets fresh links; the captured stream stays as a fallback.
+            try:
+                better = preferred_page_url(url, page_url)
+            except Exception:
+                better = None
+            if better:
+                extra["fallback_url"] = url
+                url = better
         options = self._default_batch_options()
         quality = str(data.get("quality") or "")
         if is_valid_quality(quality):

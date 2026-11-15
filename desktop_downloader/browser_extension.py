@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-EXTENSION_VERSION = "2.3.0"
+EXTENSION_VERSION = "2.4.0"
 
 MANIFEST = {
     "manifest_version": 3,
@@ -40,7 +40,7 @@ MANIFEST = {
             "js": ["content.js"],
             "all_frames": True,
             "match_about_blank": True,
-            "run_at": "document_idle",
+            "run_at": "document_start",
         }
     ],
     "action": {"default_title": "Media Downloader", "default_popup": "popup.html"},
@@ -183,9 +183,14 @@ async function postToApp(path, body) {
 // "Which qualities does this video have?" - the app reads the video's own link (a reel, post,
 // watch page...) with yt-dlp, using this browser's cookies for logged-in sites.
 const analyzeCache = new Map(); // url -> {time, promise}
-function analyzeVideo(url, pageUrl) {
+let prefetching = 0;
+// prefetch: the page started a video or the pointer rests on one, so the qualities are read
+// in the background and the menu shows them at once (like IDM/NDM). At most two at a time.
+function analyzeVideo(url, pageUrl, prefetch) {
   const hit = analyzeCache.get(url);
-  if (hit && Date.now() - hit.time < 10 * 60 * 1000) return hit.promise;
+  if (hit && Date.now() - hit.time < 8 * 60 * 1000) return hit.promise;
+  if (prefetch && prefetching >= 2) return Promise.resolve({ok: false, skipped: true});
+  if (prefetch) prefetching++;
   const promise = (async () => {
     if (!(await getToken())) return {ok: false, error: "Pair the extension first: paste the token from Media Downloader → Settings → Browser into the extension options."};
     let cookies = [];
@@ -194,6 +199,7 @@ function analyzeVideo(url, pageUrl) {
     if (!result.ok) analyzeCache.delete(url);
     return result;
   })();
+  if (prefetch) promise.finally(() => { prefetching--; });
   analyzeCache.set(url, {time: Date.now(), promise});
   if (analyzeCache.size > 60) analyzeCache.delete(analyzeCache.keys().next().value);
   return promise;
@@ -514,6 +520,19 @@ async function register(details, info, captured) {
   if (info.kind === "hls") inspectHls(tabId, stream);
 }
 
+function foundInPage(tab, sender, url) {
+  if (!/^https?:/i.test(url) || SKIP_URL_RE.test(url) || SEGMENT_RE.test(url)) return;
+  const ext = ((url.match(URL_MEDIA_RE) || [])[1] || "").toLowerCase();
+  if (!ext) return;
+  const info = ext === "m3u8" ? {kind: "hls", ext} : ext === "mpd" ? {kind: "dash", ext}
+    : {kind: "file", ext, size: 0, audio: /^(m4a|mp3|ogg|oga|opus|flac|wav)$/.test(ext)};
+  const frameUrl = sender.url || tab.url || "";
+  let origin = "";
+  try { origin = new URL(frameUrl).origin; } catch (e) {}
+  register({tabId: tab.id, url, frameId: sender.frameId || 0, documentUrl: frameUrl},
+    info, {referer: frameUrl, origin});
+}
+
 const FILTER = {urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other", "object"]};
 
 function onSendHeaders(details) {
@@ -677,8 +696,16 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "md-menu") { menuFor(tabId).then(sendResponse); return true; }
   if (msg.type === "md-analyze") {
     if (!/^https?:/i.test(msg.url || "")) { sendResponse({ok: false, error: "No link for this video."}); return; }
-    analyzeVideo(msg.url, msg.pageUrl || (tab && tab.url) || "").then(sendResponse);
+    analyzeVideo(msg.url, msg.pageUrl || (tab && tab.url) || "", !!msg.prefetch).then(sendResponse);
     return true;
+  }
+  if (msg.type === "md-found") {
+    // Media links written in the page itself (<video src>, <source>, og:video, playlists in
+    // the player's config): listed at once, before the player requests anything.
+    if (tab && tab.id >= 0 && Array.isArray(msg.urls)) {
+      for (const url of msg.urls.slice(0, 20)) foundInPage(tab, sender, String(url || ""));
+    }
+    return;
   }
   if (msg.type === "md-send") {
     const item = msg.item || {};
@@ -754,6 +781,11 @@ CONTENT_JS = r"""
     {re: /(^|\.)tiktok\.com$/, link: /\/video\/\d+|\/photo\/\d+/, page: /\/video\/\d+/},
     {re: /(^|\.)threads\.(net|com)$/, link: /\/post\/[\w-]+/, page: /\/post\/[\w-]+/},
     {re: /(^|\.)reddit\.com$/, link: /\/comments\/\w+/, page: /\/comments\/\w+/},
+    {re: /(^|\.)eporner\.com$/, link: /\/(video-|hd-porn\/)\w+/, page: /^\/(video-|hd-porn\/|embed\/)\w+/},
+    {re: /(^|\.)xvideos\d*\.com$|(^|\.)xnxx\.com$/, link: /\/video[.\d]\w*/, page: /^\/video[.\d]\w*/},
+    {re: /(^|\.)xhamster\d*\.(com|desi)$/, link: /\/videos\/[\w-]+/, page: /^\/videos\/[\w-]+/},
+    {re: /(^|\.)pornhub\.(com|org)$/, link: /\/view_video\.php\?viewkey=/, page: /^\/view_video\.php\?viewkey=/},
+    {re: /(^|\.)spankbang\.com$/, link: /\/\w+\/video\//, page: /^\/\w+\/video\//},
     {re: /(^|\.)(vimeo|dailymotion|twitch|bilibili|pinterest|linkedin|rumble|streamable|vk|ok|soundcloud|bitchute|9gag|imgur|tumblr|snapchat|likee|kick)\.(com|tv|ru|be|tw)$/, link: null, page: null},
   ];
 
@@ -797,6 +829,63 @@ CONTENT_JS = r"""
   function collect() {
     const found = Array.from(document.querySelectorAll("video, audio"));
     medias = found;
+  }
+
+  // ---------------------------------------------------------------- links written in the page
+  // Like IDM/NDM: many players have their file or playlist in the HTML, so it is listed as
+  // soon as the page loads instead of waiting for the player to request it.
+  const MEDIA_LINK_RE = /\.(m3u8|mpd|mp4|webm|mkv|mov|m4v|m4a|mp3|ogg|opus|flac|wav)(\?|#|$)/i;
+  const SCRIPT_PLAYLIST_RE = /https?:\\?\/\\?\/[^"'\s<>()]+?\.(?:m3u8|mpd)(?:\?[^"'\s<>()]*)?/gi;
+  const reported = new Set();
+  function absolute(url) {
+    try { return new URL(String(url).replace(/\\\//g, "/").replace(/&amp;/g, "&"), location.href).href; } catch (e) { return ""; }
+  }
+  function scanPage() {
+    if (!enabled) return;
+    const urls = [];
+    const add = url => {
+      const href = absolute(url || "");
+      if (href && /^https?:/i.test(href) && MEDIA_LINK_RE.test(href) && !reported.has(href)) { reported.add(href); urls.push(href); }
+    };
+    for (const el of document.querySelectorAll("video[src], audio[src], video source[src], audio source[src]")) {
+      const player = el.closest("video, audio");
+      if (player && player.tagName === "VIDEO") {
+        // Thumbnail hover previews are small videos too: only real players count.
+        const r = player.getBoundingClientRect();
+        if (r.width < MIN_W || r.height < MIN_H) continue;
+      }
+      add(el.getAttribute("src"));
+    }
+    for (const el of document.querySelectorAll('meta[property="og:video"], meta[property="og:video:url"], meta[property="og:video:secure_url"], meta[name="twitter:player:stream"], meta[itemprop="contentUrl"]')) {
+      add(el.getAttribute("content"));
+    }
+    for (const el of document.querySelectorAll('script[type="application/ld+json"]')) {
+      const found = (el.textContent || "").match(/"contentUrl"\s*:\s*"[^"]+"/g) || [];
+      for (const item of found) add(item.replace(/^"contentUrl"\s*:\s*"/, "").replace(/"$/, ""));
+    }
+    for (const el of document.querySelectorAll("script:not([src])")) {
+      const text = el.textContent || "";
+      if (text.length > 400000 || !/m3u8|mpd/i.test(text)) continue;
+      for (const m of text.match(SCRIPT_PLAYLIST_RE) || []) add(m);
+    }
+    if (urls.length) ask({type: "md-found", urls});
+  }
+
+  // ---------------------------------------------------------------- read qualities early
+  const prefetched = new Set();
+  let dwellTimer = 0;
+  function prefetch(el) {
+    if (!enabled) return;
+    const video = videoLink(el);
+    if (!video.known || prefetched.has(video.url)) return;
+    const site = siteFor(location.hostname.toLowerCase());
+    // A feed page where this video has no link of its own: nothing to read yet.
+    if (site && site.link && video.url === location.href.split("#")[0]
+        && !(site.page && site.page.test(location.pathname + location.search))) return;
+    prefetched.add(video.url);
+    ask({type: "md-analyze", url: video.url, pageUrl: location.href, prefetch: true}).then(r => {
+      if (!r || !r.ok) prefetched.delete(video.url);
+    });
   }
 
   function qualifies(el) {
@@ -1091,7 +1180,11 @@ CONTENT_JS = r"""
     if (now - lastMove < 80) return;
     lastMove = now;
     const el = mediaAt(e.clientX, e.clientY);
-    if (el) show(el);
+    if (el) {
+      show(el);
+      clearTimeout(dwellTimer);
+      dwellTimer = setTimeout(() => { if (target === el) prefetch(el); }, 450);
+    }
   }
 
   async function start() {
@@ -1101,13 +1194,20 @@ CONTENT_JS = r"""
     collect();
     if (start.done) return;
     start.done = true;
-    let pendingScan = 0;
+    let pendingScan = 0, pendingPageScan = 0;
     new MutationObserver(() => {
-      if (pendingScan) return;
-      pendingScan = setTimeout(() => { pendingScan = 0; collect(); }, 400);
+      if (!pendingScan) pendingScan = setTimeout(() => { pendingScan = 0; collect(); }, 400);
+      if (!pendingPageScan) pendingPageScan = setTimeout(() => { pendingPageScan = 0; scanPage(); }, 1200);
     }).observe(document.documentElement, {childList: true, subtree: true});
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => { collect(); scanPage(); }, {once: true});
+    else scanPage();
     document.addEventListener("mousemove", onMove, {capture: true, passive: true});
-    document.addEventListener("playing", e => { if (e.target instanceof HTMLMediaElement) { collect(); if (qualifies(e.target)) show(e.target, 4000); } }, true);
+    document.addEventListener("playing", e => {
+      if (!(e.target instanceof HTMLMediaElement)) return;
+      collect();
+      if (qualifies(e.target)) { show(e.target, 4000); prefetch(e.target); }
+      scanPage();
+    }, true);
     document.addEventListener("pointerdown", e => { if (menuOpen && !e.composedPath().includes(host)) closeMenu(); }, true);
     document.addEventListener("keydown", e => { if (e.key === "Escape" && menuOpen) closeMenu(); }, true);
     document.addEventListener("fullscreenchange", mount);

@@ -67,3 +67,32 @@ class SourceFallbackTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CapturedStreamTests(unittest.TestCase):
+    EPORNER_HLS = (
+        "https://dash-s2-c50-fr-cdn.eporner.com/hls/v1/17435191-,240p-av1,720p-av1,.mp4.urlset/"
+        "master.m3u8?hash=abc&expires=1794817459&ip=1.2.3.4"
+    )
+    EPORNER_PAGE = "https://www.eporner.com/video-KW9DXb6olC7/some-title/"
+
+    def test_site_cdn_playlist_prefers_the_page(self):
+        from media_core.sources import preferred_page_url
+
+        self.assertEqual(preferred_page_url(self.EPORNER_HLS, self.EPORNER_PAGE), self.EPORNER_PAGE)
+
+    def test_other_sites_player_keeps_the_stream(self):
+        from media_core.sources import preferred_page_url
+
+        # A page that embeds another site's player, or a site yt-dlp has no extractor for.
+        self.assertIsNone(preferred_page_url("https://cdn.player.net/v/master.m3u8", self.EPORNER_PAGE))
+        self.assertIsNone(
+            preferred_page_url("https://cdn.unknown-site.example/a/master.m3u8", "https://unknown-site.example/watch/1")
+        )
+        self.assertIsNone(preferred_page_url(self.EPORNER_PAGE, self.EPORNER_PAGE))
+
+    def test_direct_stream_has_few_attempts(self):
+        attempts = extraction_attempts(self.EPORNER_HLS)
+        self.assertEqual(len(attempts), 2)
+        self.assertTrue(all(options.get("_force_generic_extractor") for _url, options in attempts))
+        self.assertTrue(all("impersonate" not in options for _url, options in attempts))

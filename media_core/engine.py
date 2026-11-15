@@ -192,6 +192,10 @@ def analyze_url(
         raise ValueError("Please provide a valid http:// or https:// media URL.")
 
     attempts = extraction_attempts(url)
+    quick = engine_options.quick_analysis()
+    if quick:
+        # The extension is waiting on a menu: the first transports are the ones that work.
+        attempts = attempts[:3]
     errors: list[str] = []
     info: dict[str, Any] = {}
 
@@ -226,7 +230,7 @@ def analyze_url(
         except Exception as exc:
             errors.append(f"Attempt {index}: {str(exc).strip()}")
 
-    if not info:
+    if not info and not quick:
         session_attempts = browser_session_attempts(url)
         for index, (attempt_url, session_options) in enumerate(session_attempts, start=1):
             _check_cancel(cancel_event)
@@ -276,7 +280,7 @@ def analyze_url(
             except Exception as exc:
                 errors.append(f"Your browser: {str(exc).strip()}")
 
-    if not info:
+    if not info and not quick:
         _check_cancel(cancel_event)
         if on_status:
             on_status("Trying installed-browser fallback")
