@@ -39,10 +39,22 @@ def reset() -> None:
         _OPTIONS.clear()
 
 
-def set_request_context(*, cookiefile: str = "", referer: str = "") -> None:
-    """Per-thread overrides (cookies/referer sent by the browser extension for one download)."""
+_FORWARDED_HEADERS = {"origin": "Origin", "user-agent": "User-Agent", "accept-language": "Accept-Language"}
+
+
+def set_request_context(
+    *, cookiefile: str = "", referer: str = "", headers: dict[str, Any] | None = None
+) -> None:
+    """Per-thread overrides (cookies/referer/headers sent by the browser extension for one download)."""
     _LOCAL.cookiefile = str(cookiefile or "")
     _LOCAL.referer = str(referer or "")
+    clean: dict[str, str] = {}
+    for key, value in (headers or {}).items():
+        name = _FORWARDED_HEADERS.get(str(key).strip().lower())
+        text = str(value or "").strip()
+        if name and text and not any(ch in text for ch in "\r\n") and len(text) <= 1024:
+            clean[name] = text
+    _LOCAL.headers = clean
 
 
 def clear_request_context() -> None:
@@ -57,6 +69,11 @@ def apply_request_options(opts: dict[str, Any]) -> dict[str, Any]:
     if referer:
         headers = dict(opts.get("http_headers") or {})
         headers.setdefault("Referer", referer)
+        opts["http_headers"] = headers
+    extra_headers = getattr(_LOCAL, "headers", None) or {}
+    if extra_headers:
+        headers = dict(opts.get("http_headers") or {})
+        headers.update(extra_headers)  # the browser's real values win: CDNs often pin them
         opts["http_headers"] = headers
     return opts
 

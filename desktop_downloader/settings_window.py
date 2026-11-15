@@ -62,6 +62,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.open_editor_after_var = ctk.BooleanVar(value=bool(settings.get("open_editor_after_download", False)))
         self.confirm_exit_var = ctk.BooleanVar(value=bool(settings.get("confirm_before_exit", True)))
         self.close_to_tray_var = ctk.BooleanVar(value=bool(settings.get("close_to_tray", True)))
+        self.start_with_windows_var = ctk.BooleanVar(value=bool(settings.get("start_with_windows", False)))
         self.auto_check_updates_var = ctk.BooleanVar(value=bool(settings.get("auto_check_updates", True)))
         self.auto_download_updates_var = ctk.BooleanVar(value=bool(settings.get("auto_download_updates", False)))
 
@@ -101,6 +102,7 @@ class SettingsWindow(ctk.CTkToplevel):
             self.open_editor_after_var,
             self.confirm_exit_var,
             self.close_to_tray_var,
+            self.start_with_windows_var,
             self.auto_check_updates_var,
             self.auto_download_updates_var,
             *self._extra_vars.values(),
@@ -230,6 +232,13 @@ class SettingsWindow(ctk.CTkToplevel):
             "Keep running in the system tray when closed",
             self.close_to_tray_var,
             "The X button hides the window to the tray so downloads continue. Use the tray icon's Quit to exit.",
+        )
+        self._switch(
+            tab,
+            5,
+            "Start Media Downloader when Windows starts",
+            self.start_with_windows_var,
+            "Opens quietly in the system tray after you sign in, so the browser extension and hotkeys work right away.",
         )
 
     def _build_downloads_tab(self, tab: ctk.CTkFrame) -> None:
@@ -436,7 +445,9 @@ class SettingsWindow(ctk.CTkToplevel):
             row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 10))
         ctk.CTkLabel(
             ext,
-            text="1) Export the files.  2) Chrome/Edge/Brave: open the extensions page, enable Developer mode, choose Load unpacked and pick the folder. Firefox: about:debugging, Load Temporary Add-on, pick manifest.json.  3) Open the extension options and paste the token.",
+            text="1) Export the files.  2) Chrome/Edge/Brave: open the extensions page, enable Developer mode, choose Load unpacked and pick the folder. Firefox: about:debugging, Load Temporary Add-on, pick manifest.json.  3) Open the extension options and paste the token.  "
+                 "A Download button then appears on every video; it lists the stream that is playing now (switch Sub/Dub or server first) with all its qualities. "
+                 "Sites where it must never run go under Blocked sites in the extension options. After an app update, export again and press Reload on the extensions page.",
             text_color=MUTED, font=("Segoe UI", 9), wraplength=560, justify="left", anchor="w",
         ).grid(row=3, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 12))
 
@@ -615,6 +626,7 @@ class SettingsWindow(ctk.CTkToplevel):
                 "open_editor_after_download": bool(self.open_editor_after_var.get()),
                 "confirm_before_exit": bool(self.confirm_exit_var.get()),
                 "close_to_tray": bool(self.close_to_tray_var.get()),
+                "start_with_windows": bool(self.start_with_windows_var.get()),
                 "auto_check_updates": bool(self.auto_check_updates_var.get()),
                 "auto_download_updates": bool(self.auto_download_updates_var.get()),
                 "folder_rules": self.rules_box.get("1.0", "end-1c").strip(),

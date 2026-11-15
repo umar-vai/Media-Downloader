@@ -31,6 +31,7 @@ from batch_download import batch_filename, parse_batch_urls
 from app_ui import UIMixin
 import power
 from tray import TrayController
+import startup as win_startup
 from single_instance import cleanup_stale_updater_copies
 import ui_kit as ui
 from download_queue import DownloadQueue, DownloadRequest
@@ -137,6 +138,11 @@ def format_duration(seconds: Any) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
+def is_valid_quality(value: str) -> bool:
+    """'Best available' or a height such as 720p (the browser extension may send 540p, 1440p...)."""
+    return value == "Best available" or bool(re.fullmatch(r"[1-9]\d{2,3}p", value or ""))
+
+
 def default_settings() -> dict[str, Any]:
     return {
         "download_dir": str(DEFAULT_DOWNLOAD_DIR),
@@ -146,6 +152,7 @@ def default_settings() -> dict[str, Any]:
         "open_editor_after_download": False,
         "confirm_before_exit": True,
         "close_to_tray": True,
+        "start_with_windows": False,
         "default_mode": "Video",
         "video_quality": "720p",
         "audio_format": "MP3",
@@ -214,6 +221,7 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         ("open_editor_after_download", False),
         ("confirm_before_exit", True),
         ("close_to_tray", True),
+        ("start_with_windows", False),
         ("skip_existing", True),
         ("organize_by_site", False),
         ("fast_mode", True),
@@ -314,6 +322,9 @@ class DownloaderApp(UIMixin, ctk.CTk):
         super().__init__()
         self.title(APP_NAME)
         self._apply_window_icon()
+        self._start_minimized = win_startup.started_minimized()
+        if self._start_minimized:
+            self.withdraw()  # launched by Windows at sign-in: go straight to the tray
         self.after(400, self._init_tray)
         self.geometry("1180x780")
         self.minsize(980, 640)
@@ -353,6 +364,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self._download_activity_after_id: str | None = None
 
         self.settings = load_settings()
+        self._sync_start_with_windows()
         self._hotkeys: list[GlobalHotkey] = []
         self.extension_server: ExtensionServer | None = None
         if not self.settings.get("extension_token"):
@@ -426,6 +438,8 @@ class DownloaderApp(UIMixin, ctk.CTk):
             run_on_ui=lambda fn: self._run_on_ui(fn),
         )
         self.tray = controller if controller.start() else None
+        if self.tray is None and getattr(self, "_start_minimized", False):
+            self.show_from_tray()  # no tray icon available: never leave the app invisible
 
     def _run_on_ui(self, fn: Any) -> None:
         try:
@@ -809,7 +823,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         bitrate = str(options.get("audio_quality") or "192")
         if mode not in {"Video", "Audio"}:
             raise ValueError("Select Video or Audio.")
-        if quality not in {"Best available", "1080p", "720p", "480p", "360p"}:
+        if not is_valid_quality(quality):
             raise ValueError("Invalid video quality.")
         if audio_format not in AUDIO_FORMATS or bitrate not in {"128", "192", "256", "320"}:
             raise ValueError("Invalid audio output settings.")
@@ -951,6 +965,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         engine_options.set_request_context(
             cookiefile=str(request_settings.get("cookiefile") or ""),
             referer=str(request_settings.get("referer") or ""),
+            headers=dict(request_settings.get("http_headers") or {}),
         )
         try:
             if request_settings.get("batch_id"):
@@ -969,6 +984,11 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 if cancel_event.is_set():
                     raise SharedCancelled("Batch item cancelled after analysis.")
                 cached_info = extracted_info
+                # Streams captured by the browser extension carry the page title; a bare
+                # .m3u8 would otherwise be saved as "master" or "index".
+                title_hint = str(request_settings.get("title_hint") or "").strip()
+                if title_hint:
+                    summary = {**summary, "title": title_hint}
                 name = self._reserve_name(
                     request_id,
                     batch_filename(
@@ -1703,6 +1723,17 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.top_update_button.grid_remove()
         self.update_detail_label.configure(text="Update reminder snoozed for 24 hours.")
 
+    # ---- start with Windows --------------------------------------------------------
+    def _sync_start_with_windows(self) -> None:
+        """The Run key is the source of truth; refresh its command so it follows app updates/moves."""
+        enabled = win_startup.is_enabled()
+        self.settings["start_with_windows"] = enabled
+        if enabled:
+            try:
+                win_startup.set_enabled(True)
+            except OSError as exc:
+                LOGGER.warning("Could not refresh the start-with-Windows entry: %s", exc)
+
     # ---- integrations: engine options, hotkeys, browser extension, palette ----------
     def _configure_engine(self) -> None:
         s = self.settings
@@ -1791,6 +1822,18 @@ class DownloaderApp(UIMixin, ctk.CTk):
         referer = str(data.get("referer") or "").strip()
         if referer.startswith(("http://", "https://")):
             extra["referer"] = referer
+        headers = data.get("headers")
+        if isinstance(headers, dict) and headers:
+            extra["http_headers"] = {str(k): str(v) for k, v in list(headers.items())[:10]}
+        title = " ".join(str(data.get("title") or "").split())[:180]
+        if title:
+            extra["title_hint"] = title
+        options = self._default_batch_options()
+        quality = str(data.get("quality") or "")
+        if is_valid_quality(quality):
+            options["video_quality"] = quality
+        if str(data.get("mode") or "") in {"Video", "Audio"}:
+            options["mode"] = str(data["mode"])
         cookies = data.get("cookies")
         if isinstance(cookies, list) and cookies:
             try:
@@ -1800,7 +1843,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
             if path is not None:
                 extra["cookiefile"] = str(path)
         try:
-            self._enqueue_batch_downloads(url, self._default_batch_options(), extra=extra)
+            self._enqueue_batch_downloads(url, options, extra=extra)
         except (ValueError, OSError) as exc:
             LOGGER.warning("Extension link rejected: %s", exc)
             return
@@ -2084,6 +2127,13 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 raise RuntimeError(f"The selected download folder is not writable: {download_dir}\n\n{exc}") from exc
 
         normalized["download_dir"] = str(download_dir)
+        wants_startup = bool(normalized.get("start_with_windows"))
+        if win_startup.supported() and wants_startup != win_startup.is_enabled():
+            try:
+                win_startup.set_enabled(wants_startup)
+            except (OSError, RuntimeError) as exc:
+                raise RuntimeError(f"Could not change the start-with-Windows setting.\n\n{exc}") from exc
+            LOGGER.info("Start with Windows %s", "enabled" if wants_startup else "disabled")
         if not save_settings(normalized):
             raise RuntimeError(f"Could not save settings to {CONFIG_FILE}.")
         self.settings = normalized

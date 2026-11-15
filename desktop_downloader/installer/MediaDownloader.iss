@@ -53,6 +53,10 @@ Name: "{autodesktop}\Media Downloader"; Filename: "{app}\MediaDownloader.exe"; W
 [Run]
 Filename: "{app}\MediaDownloader.exe"; Description: "Launch Media Downloader"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
 
+[Registry]
+; Removes the optional "Start with Windows" entry (created from the app's Settings) on uninstall.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "MediaDownloader"; Flags: uninsdeletevalue dontcreatekey
+
 [UninstallDelete]
 Type: files; Name: "{app}\.media_downloader_installed"
 

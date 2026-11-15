@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,6 +49,18 @@ def cookies_to_netscape(cookies: list[dict[str, Any]]) -> str:
         prefix = "#HttpOnly_" if item.get("httpOnly") else ""
         lines.append("\t".join([prefix + domain, flag, path, secure, str(expires), name, value]))
     return "\n".join(lines) + "\n"
+
+
+class _ExclusiveServer(ThreadingHTTPServer):
+    """Never share a port: on Windows SO_REUSEADDR lets a second process bind the same port."""
+
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if exclusive is not None:
+            self.socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+        super().server_bind()
 
 
 class ExtensionServer:
@@ -143,7 +156,7 @@ class ExtensionServer:
 
         for port in PORTS:
             try:
-                self._server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+                self._server = _ExclusiveServer(("127.0.0.1", port), Handler)
                 self.port = port
                 break
             except OSError:
