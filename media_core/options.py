@@ -79,6 +79,20 @@ def skip_existing() -> bool:
     return bool(get("skip_existing", True))
 
 
+def cache_dir() -> str | bool:
+    """Where yt-dlp keeps YouTube's decoded player code between lookups (saves about a second
+    on every YouTube link). ``False`` when no writable folder is available."""
+    import os
+
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".cache")
+    path = Path(str(get("cache_dir", "") or "") or Path(base) / "MediaDownloader" / "yt-dlp-cache")
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+    except OSError:
+        return False
+
+
 def quick_analysis() -> bool:
     return bool(getattr(_LOCAL, "quick", False))
 

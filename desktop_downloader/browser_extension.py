@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-EXTENSION_VERSION = "2.6.0"
+EXTENSION_VERSION = "2.7.0"
 
 MANIFEST = {
     "manifest_version": 3,
@@ -675,7 +675,10 @@ async function menuFor(tabId) {
     if (!nowGiven) { label = "Now playing"; nowGiven = true; }
     const kind = stream.kind === "file" ? (stream.ext || "file").toUpperCase() : stream.kind.toUpperCase();
     const meta = [kind, fmtDuration(stream.duration), hostOf(stream.url)].filter(Boolean).join(" · ");
-    return {id: stream.id, label, meta, current: label === "Now playing", items: itemsFor(stream)};
+    const top = (stream.variants || [])[0];
+    return {id: stream.id, label, meta, current: label === "Now playing", items: itemsFor(stream),
+      duration: stream.duration || 0, title: stream.title || "", drm: !!stream.drm,
+      height: (top && top.height) || 0, master: !!stream.master, kind: stream.kind};
   });
   return {groups};
 }
@@ -1145,72 +1148,34 @@ CONTENT_JS = r"""
     return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
   }
 
-  // "This video": the qualities the app finds for the video's own link (works on Facebook,
-  // Instagram, YouTube, X, TikTok and the other sites yt-dlp supports).
-  function fillVideoBox(box, video, seq, auto) {
-    box.textContent = "";
-    let host = "";
-    try { host = new URL(video.url).hostname.replace(/^www\./, ""); } catch (e) {}
-    box.appendChild(groupHead("This video", host, video.known));
-    const body = document.createElement("div");
-    box.appendChild(body);
-    const sendVideo = (quality, mode, title) => send({type: "md-send", item: {
-      url: video.url, referer: location.href, pageUrl: video.url, quality, mode: mode || "", title: title || "",
-    }});
-
-    async function load() {
-      body.textContent = "";
-      const wait = document.createElement("div");
-      wait.className = "muted";
-      wait.textContent = "Finding qualities…";
-      body.appendChild(wait);
-      place();
-      const r = await ask({type: "md-analyze", url: video.url, pageUrl: location.href});
-      if (!menuOpen || seq !== renderSeq) return;
-      body.textContent = "";
-      if (r && r.ok) {
-        const title = String(r.title || "");
-        if (title) {
-          const t = document.createElement("div");
-          t.className = "title";
-          t.textContent = title + (r.duration ? "  ·  " + fmtLength(r.duration) : "");
-          t.title = title;
-          body.appendChild(t);
-        }
-        const qualities = Array.isArray(r.qualities) ? r.qualities : [];
-        const best = row("best", "Best quality" + (qualities[0] ? " · " + qualities[0] : ""), "video + audio");
-        best.addEventListener("click", () => sendVideo("Best available", "", title));
-        body.appendChild(best);
-        for (const q of qualities) {
-          const el = row("", q, "");
-          el.addEventListener("click", () => sendVideo(q, "", title));
-          body.appendChild(el);
-        }
-        const audio = row("", "Audio only", "MP3");
-        audio.addEventListener("click", () => sendVideo("Best available", "Audio", title));
-        body.appendChild(audio);
-      } else {
-        const fail = row("disabled", "Could not read this video", (r && r.error) || "");
-        fail.title = (r && r.error) || "";
-        body.appendChild(fail);
-        const retry = row("", "Try again", "");
-        retry.addEventListener("click", load);
-        body.appendChild(retry);
-        const anyway = row("", "Send the link to the app anyway", "");
-        anyway.addEventListener("click", () => sendVideo("Best available", "", ""));
-        body.appendChild(anyway);
-      }
-      place();
-    }
-
-    if (auto) load();
-    else {
-      const find = row("best", "Find qualities of this page", "the app reads the link");
-      find.addEventListener("click", load);
-      body.appendChild(find);
-    }
+  // Titles: a site that hides its title makes the app answer "Untitled"; the tab title is
+  // better, and a file named "Untitled" would clash with every other such video.
+  const PLACEHOLDER_RE = /^(untitled( video)?|no title|video|media|browser media|media[ _]download|download|watch|player|embed|index|master|playlist|stream|videoplayback)$/i;
+  function goodTitle(text) {
+    text = String(text || "").replace(/\s+/g, " ").trim();
+    return text && !PLACEHOLDER_RE.test(text) ? text.slice(0, 180) : "";
   }
+  function pageTitle() {
+    const meta = document.querySelector('meta[property="og:title"], meta[name="twitter:title"]');
+    for (const raw of [document.title, meta && meta.getAttribute("content")]) {
+      let text = String(raw || "").replace(/\s+/g, " ").trim();
+      const parts = text.split(/\s+[-|–—]\s+/);
+      if (parts.length > 1 && parts[parts.length - 1].length <= 30) text = parts.slice(0, -1).join(" - ");
+      text = goodTitle(text.replace(/^\(\d+\)\s*/, "").replace(/^watch\s+/i, ""));
+      if (text) return text;
+    }
+    return "";
+  }
+  function heightOf(label) {
+    const m = /(\d{3,4})p\b/.exec(String(label || ""));
+    return m ? Number(m[1]) : 0;
+  }
+  function sep() { return Object.assign(document.createElement("div"), {className: "sep"}); }
 
+  // One list for the video: the stream the player already loaded is shown at once (like
+  // IDM/NDM); on video sites the app also reads the video's own link and its list replaces
+  // the captured one only when it offers a higher quality. A failed lookup is shown only
+  // when nothing was captured.
   async function renderMenu() {
     const seq = ++renderSeq;
     const data = await ask({type: "md-menu"});
@@ -1218,32 +1183,88 @@ CONTENT_JS = r"""
     menu.textContent = "";
     const groups = (data && data.groups) || [];
     const video = videoLink(target);
-    const videoBox = document.createElement("div");
-    // Known video sites: their own link is the reliable way, so it comes first.
-    if (video.known) menu.appendChild(videoBox);
-    for (const group of groups) {
-      if (menu.childNodes.length) menu.appendChild(Object.assign(document.createElement("div"), {className: "sep"}));
-      menu.appendChild(groupHead(group.label, group.meta, group.current && !video.known));
-      for (const item of group.items) {
-        const el = row((item.best ? "best " : "") + (item.disabled ? "disabled" : ""), item.label, item.detail);
-        if (!item.disabled) el.addEventListener("click", () => send({type: "md-send", item}));
-        menu.appendChild(el);
-      }
-    }
+    // In a feed the captured streams may belong to another post: use them on the video's own page.
+    const ownPage = !video.known || video.url === location.href.split("#")[0];
+    const stream = ownPage ? (groups.find(g => !g.drm && g.master) || groups.find(g => !g.drm) || groups[0] || null) : null;
+    let items = stream ? stream.items.slice() : [];
     const src = target && (target.currentSrc || target.src);
-    if (src && /^https?:/i.test(src) && !groups.some(g => g.items.some(i => i.url === src))) {
-      if (menu.childNodes.length) menu.appendChild(Object.assign(document.createElement("div"), {className: "sep"}));
-      const el = row("best", "This " + (target.tagName === "AUDIO" ? "audio" : "video") + " file", "");
-      el.addEventListener("click", () => send({type: "md-send", item: {url: src, referer: location.href, quality: "Best available", mode: target.tagName === "AUDIO" ? "Audio" : ""}}));
-      menu.appendChild(el);
+    if (!items.length && src && /^https?:/i.test(src)) {
+      const audio = target.tagName === "AUDIO";
+      items = [{url: src, referer: location.href, quality: "Best available", best: true, mode: audio ? "Audio" : "",
+        label: (audio ? "Audio" : "Video") + " file", detail: ""}];
     }
-    if (!video.known) {
-      if (menu.childNodes.length) menu.appendChild(Object.assign(document.createElement("div"), {className: "sep"}));
-      menu.appendChild(videoBox);
+    let host = "";
+    try { host = new URL(video.url).hostname.replace(/^www\./, ""); } catch (e) {}
+    menu.appendChild(groupHead("Download", host, true));
+    const titleRow = document.createElement("div");
+    titleRow.className = "title";
+    menu.appendChild(titleRow);
+    const body = document.createElement("div");
+    menu.appendChild(body);
+    let shownTitle = pageTitle() || goodTitle(stream && stream.title);
+    const setTitle = (title, duration) => {
+      if (title) shownTitle = title;
+      titleRow.textContent = (shownTitle || location.hostname) + (duration ? "  ·  " + fmtLength(duration) : "");
+      titleRow.title = shownTitle;
+    };
+    setTitle("", stream && stream.duration);
+
+    const showItems = list => {
+      body.textContent = "";
+      for (const item of list) {
+        const el = row((item.best ? "best " : "") + (item.disabled ? "disabled" : ""), item.label, item.detail);
+        if (!item.disabled) el.addEventListener("click", () => send({type: "md-send", item: {...item, title: goodTitle(item.title) || shownTitle}}));
+        body.appendChild(el);
+      }
+      place();
+    };
+    const capturedBest = Math.max(0, ...items.map(i => heightOf(i.label)));
+
+    async function lookUp(waiting) {
+      if (waiting) {
+        body.textContent = "";
+        const wait = document.createElement("div");
+        wait.className = "muted";
+        wait.textContent = "Finding qualities…";
+        body.appendChild(wait);
+        place();
+      }
+      const r = await ask({type: "md-analyze", url: video.url, pageUrl: location.href});
+      if (!menuOpen || seq !== renderSeq) return;
+      if (r && r.ok) {
+        const title = goodTitle(r.title) || shownTitle;
+        const base = {url: video.url, referer: location.href, pageUrl: video.url, title};
+        const qualities = Array.isArray(r.qualities) ? r.qualities : [];
+        const list = [{...base, quality: "Best available", best: true,
+          label: "Best quality" + (qualities[0] ? " · " + qualities[0] : ""), detail: "video + audio"}];
+        for (const q of qualities) list.push({...base, quality: q, label: q, detail: ""});
+        list.push({...base, quality: "Best available", mode: "Audio", label: "Audio only", detail: "MP3"});
+        if (!items.length || heightOf(list[0].label) > capturedBest) {
+          setTitle(title, r.duration);
+          showItems(list);
+        } else {
+          setTitle(title, (stream && stream.duration) || r.duration);
+        }
+        return;
+      }
+      if (items.length) return;  // the captured stream is enough: no error
+      body.textContent = "";
+      const fail = row("disabled", "Could not read this video", (r && r.error) || "");
+      fail.title = (r && r.error) || "";
+      body.appendChild(fail);
+      const retry = row("", "Try again", "");
+      retry.addEventListener("click", () => lookUp(true));
+      body.appendChild(retry);
+      const anyway = row("", "Send the link to the app anyway", "");
+      anyway.addEventListener("click", () => send({type: "md-send", item: {url: video.url, referer: location.href,
+        pageUrl: video.url, quality: "Best available", title: shownTitle}}));
+      body.appendChild(anyway);
+      place();
     }
-    // Look the qualities up straight away on video sites, or when nothing else was captured.
-    fillVideoBox(videoBox, video, seq, video.known || (!groups.length && !src));
-    menu.appendChild(Object.assign(document.createElement("div"), {className: "sep"}));
+
+    if (items.length) showItems(items);
+    if (video.known || !items.length) lookUp(!items.length);
+    menu.appendChild(sep());
     const page = row("foot", "Send page link instead", "app finds the best quality");
     page.addEventListener("click", () => send({type: "md-send-page"}));
     menu.appendChild(page);
@@ -1297,6 +1318,21 @@ CONTENT_JS = r"""
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => { collect(); scanPage(); }, {once: true});
     else scanPage();
     document.addEventListener("mousemove", onMove, {capture: true, passive: true});
+    if (window === window.top) {
+      // On a video's own page (a YouTube watch page, a reel...) read the qualities as soon as
+      // the page opens, so the menu is ready on the first click instead of after 3-4 seconds.
+      // Single-page sites change the address without a reload: check it every second.
+      let lastPage = "";
+      const early = () => {
+        const here = location.href.split("#")[0];
+        if (here === lastPage || !enabled) return;
+        lastPage = here;
+        const site = siteFor(location.hostname.toLowerCase());
+        if (site && site.page && site.page.test(location.pathname + location.search)) prefetch(null);
+      };
+      early();
+      setInterval(early, 1000);
+    }
     document.addEventListener("playing", e => {
       if (!(e.target instanceof HTMLMediaElement)) return;
       collect();
@@ -1347,7 +1383,7 @@ POPUP_HTML = """<!doctype html>
 </style></head><body>
 <h1>Media Downloader</h1>
 <button id="page">Send this page</button>
-<h2>STREAMS ON THIS TAB</h2>
+<h2>THIS TAB</h2>
 <div id="list"><span id="empty">Nothing captured yet - play the video, or switch server/Sub/Dub.</span></div>
 <button id="site" class="ghost">Never use on this site</button>
 <div id="msg"></div>
@@ -1378,10 +1414,13 @@ async function send(message) {
   const list = document.getElementById("list");
   if (!data || !data.groups || !data.groups.length) return;
   list.textContent = "";
-  for (const group of data.groups) {
+  // One list: the stream the page is playing (the master playlist with every quality first).
+  const groups = data.groups;
+  const best = groups.find(g => !g.drm && g.master) || groups.find(g => !g.drm) || groups[0];
+  for (const group of [best]) {
     const head = document.createElement("div");
-    head.className = "group" + (group.current ? " now" : "");
-    const a = document.createElement("span"); a.textContent = group.label;
+    head.className = "group now";
+    const a = document.createElement("span"); a.textContent = "Download";
     const b = document.createElement("span"); b.textContent = group.meta;
     head.append(a, b);
     list.appendChild(head);

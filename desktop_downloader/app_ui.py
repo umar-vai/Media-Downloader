@@ -253,7 +253,9 @@ class UIMixin:
         bar.add("browsers", "Browsers", "browser", self._browser_menu, "Browser extension")
         bar.add("editor", "Editor", "editor", lambda: self.open_editor(), "Cut, convert and export media files")
         self.toolbar = bar
-        self.top_update_button = UpdateBadge(bar.right, self.icons, lambda: self.show_page("updates"))
+        self.top_update_button = UpdateBadge(bar.right, self.icons, lambda: self.show_page("updates"),
+                                              check=lambda: self.check_for_updates(manual=False, inline=True),
+                                              version=APP_VERSION)
 
     # ----------------------------------------------------------------- body
     def _build_body(self) -> None:

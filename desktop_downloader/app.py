@@ -44,6 +44,7 @@ from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
 from media_sources import detect_platform, platform_name, preferred_page_url
 from shared_engine import Cancelled as SharedCancelled, analyze_url as shared_analyze_url, download_from_analysis as shared_download_from_analysis, engine_options
+from media_core.engine import is_placeholder_title
 from batch_download import parse_batch_urls_detailed
 from command_palette import CommandPalette
 from download_rules import parse_rules, resolve_target
@@ -456,8 +457,18 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.bind_all("<Control-k>", lambda _e: self.open_command_palette())
         self.bind_all("<Control-K>", lambda _e: self.open_command_palette())
         self.after(700, lambda: self._show_update_result(attempt=0))
-        if self.auto_check_updates_var.get():
-            self.after(1500, lambda: self.check_for_updates(manual=False))
+        # Nobody has to look for updates: check shortly after start and then every few hours;
+        # a new version shows on the toolbar's Updates button (and once in the tray).
+        self.after(1500, self._auto_update_check)
+
+    UPDATE_RECHECK_MS = 3 * 60 * 60 * 1000
+
+    def _auto_update_check(self) -> None:
+        try:
+            if self.auto_check_updates_var.get() and not self.downloaded_update:
+                self.check_for_updates(manual=False, inline=True, automatic=True)
+        finally:
+            self.after(self.UPDATE_RECHECK_MS, self._auto_update_check)
 
     def _apply_window_icon(self) -> None:
         icon = _icon_path()
@@ -1125,7 +1136,8 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 # Streams captured by the browser extension carry the page title; a bare
                 # .m3u8 would otherwise be saved as "master" or "index".
                 title_hint = str(request_settings.get("title_hint") or "").strip()
-                if title_hint:
+                # "Untitled" (a site that hides its title) never replaces a real title.
+                if title_hint and not is_placeholder_title(title_hint):
                     summary = {**summary, "title": title_hint}
                 name = self._reserve_name(
                     request_id,
@@ -1580,10 +1592,15 @@ class DownloaderApp(UIMixin, ctk.CTk):
             )
             self.update_detail_label.configure(text=text)
 
-    def check_for_updates(self, manual: bool = True) -> None:
+    def check_for_updates(self, manual: bool = True, inline: bool = False, automatic: bool = False) -> None:
+        """``inline``: the toolbar's Updates button - the answer is shown under the button,
+        without a message box, and a found update is shown even if it was postponed."""
         if self.update_checking:
             return
         self.update_checking = True
+        self._inline_update_check = inline
+        if not automatic or not getattr(self, "latest_release", None):
+            self._set_update_badge("checking")
         self.update_check_button.configure(text="Checking…", state="disabled")
         self.update_detail_label.configure(text="Checking GitHub Releases for a newer version…")
         append_update_log(f"Checking for updates. Current version={APP_VERSION}")
@@ -1598,6 +1615,14 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 self.events.put(("update_current", {"release": release, "manual": manual}))
         except Exception as exc:
             self.events.put(("update_error", {"error": str(exc), "manual": manual}))
+
+    def _set_update_badge(self, state: str, text: str = "") -> None:
+        badge = getattr(self, "top_update_button", None)
+        if badge is not None and hasattr(badge, "set_state"):
+            try:
+                badge.set_state(state, text)
+            except Exception:
+                pass
 
     def _is_update_snoozed(self, version: str) -> bool:
         snooze_version = str(self.settings.get("snooze_version") or "")
@@ -1628,9 +1653,20 @@ class DownloaderApp(UIMixin, ctk.CTk):
         )
         append_update_log(f"Update available: {release.version}")
 
-        if manual or not self._is_update_snoozed(release.version):
-            self.top_update_button.configure(text=f"Update v{release.version} available")
+        inline = bool(getattr(self, "_inline_update_check", False))
+        self._inline_update_check = False
+        if manual or inline or not self._is_update_snoozed(release.version):
+            self.top_update_button.configure(text=f"v{release.version} available — please update")
             self.top_update_button.grid()
+            if getattr(self, "_announced_update", "") != release.version and self.tray is not None:
+                self._announced_update = release.version
+                try:
+                    self.tray.notify(f"Version {release.version} is available. Click Install update on the toolbar.",
+                                     APP_NAME)
+                except Exception:
+                    pass
+        else:
+            self._set_update_badge("idle")
 
         if self.auto_download_updates_var.get() and not self.downloaded_update:
             self._start_update_download(manual=False)
@@ -1642,7 +1678,8 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.update_detail_label.configure(text="You’re up to date.")
         self.update_notes_label.configure(text="")
         self.update_progress.set(0)
-        self.top_update_button.grid_remove()
+        self._set_update_badge("current")
+        self._inline_update_check = False
         append_update_log("No update available.")
         if payload.get("manual"):
             messagebox.showinfo(APP_NAME, f"You’re up to date.\n\nCurrent version: v{APP_VERSION}")
@@ -1655,6 +1692,11 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.update_cancel_button.configure(state="disabled", text="Cancel download")
         self.update_cancel_event = None
 
+        if self.latest_release:
+            self._set_update_badge("available", f"v{self.latest_release.version} available")
+        else:
+            self._set_update_badge("error")
+        self._inline_update_check = False
         error = str(payload.get("error") or "Unknown update error").strip()
         display_error = error if len(error) <= 360 else error[:357].rstrip() + "…"
         append_update_log(f"Update error: {error}")

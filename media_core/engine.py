@@ -36,6 +36,77 @@ def _check_cancel(cancel_event: threading.Event) -> None:
         raise Cancelled("Operation cancelled.")
 
 
+_PLACEHOLDER_TITLES = {
+    "untitled", "untitled video", "no title", "video", "media", "browser media", "media download",
+    "download", "watch", "player", "embed", "index", "master", "playlist", "stream", "videoplayback",
+}
+
+
+def is_placeholder_title(value: Any) -> bool:
+    """A name that says nothing about the video ("Untitled", "Video", "master"...).
+
+    Different videos get the same placeholder when a site hides its title, so such a name
+    must never be taken as proof that the video is already downloaded."""
+    text = re.sub(r"[\s._-]+", " ", str(value or "")).strip().lower()
+    text = re.sub(r"\s*\(\d+\)$", "", text)
+    return not text or text in _PLACEHOLDER_TITLES
+
+
+# yt-dlp adds "-movflags +faststart" to every ffmpeg output. That moves the index to the front
+# by rewriting the whole file a second time, which doubles the time a large video spends in
+# "Merging" (players on this PC do not need it). A later -movflags wins, so turn it off.
+_NO_FASTSTART = ["-movflags", "-faststart"]
+
+
+class _StreamPlanPP(yt_dlp.postprocessor.PostProcessor):
+    """Runs right before the download starts, once yt-dlp has chosen the formats, and tells
+    the progress code how many streams (video + audio) will arrive and how big each is."""
+
+    def __init__(self, on_plan: Callable[[dict[str, Any]], None]) -> None:
+        super().__init__(None)
+        self._on_plan = on_plan
+
+    def run(self, info: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+        try:
+            self._on_plan(info)
+        except Cancelled:
+            raise
+        except Exception:
+            pass
+        return [], info
+
+
+class _MetadataPP(yt_dlp.postprocessor.FFmpegMetadataPP):
+    """Embeds metadata, but skips the extra full-file rewrite for a merged video: the merge
+    step already wrote the same tags (see ``_merge_metadata_args``)."""
+
+    merge_tagged = False
+
+    def run(self, info: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+        if self.merge_tagged and info.get("requested_formats") and not info.get("chapters"):
+            return [], info
+        return super().run(info)
+
+
+def _merge_metadata_args(info: dict[str, Any], fallback_title: str) -> list[str]:
+    title = str(info.get("title") or "")
+    if is_placeholder_title(title):
+        title = fallback_title
+    values = {
+        "title": title,
+        "artist": info.get("artist") or info.get("creator") or info.get("uploader") or info.get("channel"),
+        "date": info.get("upload_date"),
+        "comment": info.get("webpage_url"),
+        "purl": info.get("webpage_url"),
+    }
+    args: list[str] = []
+    for key, value in values.items():
+        text = str(value or "").replace("\0", "").strip()
+        if text:
+            args += ["-metadata", f"{key}={text[:500]}"]
+    return args
+
+
 def safe_filename(value: str, fallback: str = "media_download") -> str:
     text = str(value or "").strip()
     text = re.sub(r"\.(mp3|m4a|mp4|webm|mkv|mov|wav|flac|opus|ogg)$", "", text, flags=re.I)
@@ -164,7 +235,7 @@ def expand_browser_capture(
                     "no_warnings": True,
                     "skip_download": True,
                     "noplaylist": True,
-                    "cachedir": False,
+                    "cachedir": engine_options.cache_dir(),
                     "socket_timeout": 15,
                     "retries": 1,
                     "http_headers": headers,
@@ -213,7 +284,7 @@ def analyze_url(
                     "no_warnings": True,
                     "skip_download": True,
                     "noplaylist": True,
-                    "cachedir": False,
+                    "cachedir": engine_options.cache_dir(),
                     "socket_timeout": 12,
                     "retries": 0,
                     "fragment_retries": 0,
@@ -245,7 +316,7 @@ def analyze_url(
                         "no_warnings": True,
                         "skip_download": True,
                         "noplaylist": True,
-                        "cachedir": False,
+                        "cachedir": engine_options.cache_dir(),
                         "socket_timeout": 18,
                         "retries": 1,
                         "fragment_retries": 1,
@@ -378,8 +449,13 @@ def download_from_analysis(
 ) -> Path:
     download_dir = Path(download_dir).expanduser()
     download_dir.mkdir(parents=True, exist_ok=True)
-    if engine_options.skip_existing():
+    # "Skip files that already exist" compares names only, so it is safe only for a real
+    # title: many different videos come back as "Untitled" and must each be downloaded.
+    if engine_options.skip_existing() and not is_placeholder_title(filename):
         wanted_audio = mode.lower() == "audio"
+        expected_size = 0
+        if isinstance(cached_info, dict):
+            expected_size = int(cached_info.get("filesize") or cached_info.get("filesize_approx") or 0)
         audio_suffixes = {".mp3", ".m4a", ".aac", ".flac", ".opus", ".ogg", ".wav"}
         for existing in _files_with_stem(download_dir, safe_filename(filename)):
             try:
@@ -388,6 +464,10 @@ def download_from_analysis(
                     and existing.stat().st_size > 0
                     and (existing.suffix.lower() in audio_suffixes) == wanted_audio
                 )
+                if usable and expected_size and not wanted_audio:
+                    # Same title, clearly a different video (sizes far apart): download it too.
+                    ratio = existing.stat().st_size / expected_size
+                    usable = 0.8 <= ratio <= 1.25
             except OSError:
                 usable = False
             if usable:
@@ -415,6 +495,22 @@ def download_from_analysis(
                         item.get("filesize") or item.get("filesize_approx") or 0
                     )
     best_progress = 0.0
+
+    def on_plan(info: dict[str, Any]) -> None:
+        # yt-dlp chose the formats: a video+audio download has two streams. Without this the
+        # first finished stream looked like the whole file and the bar sat at 98.5%.
+        nonlocal expected_streams
+        requested = info.get("requested_formats") or []
+        if isinstance(requested, list) and len(requested) > 1:
+            expected_streams = len(requested)
+            weights.clear()
+            for item in requested:
+                if isinstance(item, dict):
+                    weights[str(item.get("format_id") or "")] = float(
+                        item.get("filesize") or item.get("filesize_approx") or 0
+                    )
+
+    plan_pp = _StreamPlanPP(on_plan)
 
     def overall_progress() -> float:
         nonlocal best_progress
@@ -515,7 +611,7 @@ def download_from_analysis(
         "quiet": True,
         "noprogress": True,
         "no_warnings": True,
-        "cachedir": False,
+        "cachedir": engine_options.cache_dir(),
         "socket_timeout": 30,
         # Reliability: patient retries with exponential back-off, resilient to flaky Wi-Fi and
         # antivirus briefly locking the .part file on Windows.
@@ -537,10 +633,39 @@ def download_from_analysis(
         "overwrites": False,
         "continuedl": True,
         "ffmpeg_location": get_ffmpeg_exe(),
+        "postprocessor_args": {"ffmpeg": list(_NO_FASTSTART)},
     }
 
     extra_opts, extra_processors = engine_options.download_extras(mode)
     opts.update(extra_opts)
+    # Metadata: for a merged video the tags are written by the merge itself, which saves a
+    # whole extra copy of the file. _MetadataPP still tags single files and chapter lists.
+    metadata_pp: dict[str, Any] | None = None
+    for processor in list(extra_processors):
+        if processor.get("key") == "FFmpegMetadata":
+            metadata_pp = processor
+            extra_processors.remove(processor)
+    if metadata_pp is not None and mode.lower() != "audio" and isinstance(cached_info, dict):
+        tags = _merge_metadata_args(cached_info, str(filename or ""))
+        if tags:
+            opts["postprocessor_args"]["merger+ffmpeg_o"] = [*tags, *_NO_FASTSTART]
+
+    def make_ydl(params: dict[str, Any]) -> yt_dlp.YoutubeDL:
+        ydl = yt_dlp.YoutubeDL(params)
+        ydl.add_postprocessor(plan_pp, when="before_dl")
+        if metadata_pp is not None:
+            pp = _MetadataPP(
+                ydl,
+                add_metadata=bool(metadata_pp.get("add_metadata", True)),
+                add_chapters=bool(metadata_pp.get("add_chapters", True)),
+            )
+            pp.merge_tagged = "merger+ffmpeg_o" in opts["postprocessor_args"]
+            # First, as before: metadata is written before thumbnails/subtitles are embedded.
+            try:
+                ydl._pps["post_process"].insert(0, pp)
+            except Exception:
+                ydl.add_postprocessor(pp)
+        return ydl
     if mode.lower() == "audio":
         codec = engine_options.AUDIO_CODECS.get(str(audio_format or "mp3").lower(), "mp3")
         opts.update(
@@ -585,7 +710,7 @@ def download_from_analysis(
             if attempts:
                 cached_network_options = dict(attempts[0][1] or {})
                 cached_network_options.pop("_force_generic_extractor", None)
-            with yt_dlp.YoutubeDL(engine_options.apply_request_options({**opts, **cached_network_options})) as ydl:
+            with make_ydl(engine_options.apply_request_options({**opts, **cached_network_options})) as ydl:
                 ydl.process_ie_result(copy.deepcopy(cached_info), download=True)
             downloaded_ok = True
         except Cancelled:
@@ -614,7 +739,7 @@ def download_from_analysis(
             if attempts:
                 refreshed_network_options = dict(attempts[0][1] or {})
                 refreshed_network_options.pop("_force_generic_extractor", None)
-            with yt_dlp.YoutubeDL(engine_options.apply_request_options({**opts, **refreshed_network_options})) as ydl:
+            with make_ydl(engine_options.apply_request_options({**opts, **refreshed_network_options})) as ydl:
                 ydl.process_ie_result(copy.deepcopy(refreshed_info), download=True)
             downloaded_ok = True
         except Cancelled:
@@ -631,7 +756,7 @@ def download_from_analysis(
             attempt_options = dict(network_options or {})
             force_generic = bool(attempt_options.pop("_force_generic_extractor", False))
             try:
-                with yt_dlp.YoutubeDL(engine_options.apply_request_options({**opts, **attempt_options})) as ydl:
+                with make_ydl(engine_options.apply_request_options({**opts, **attempt_options})) as ydl:
                     ydl.extract_info(
                         attempt_url,
                         download=True,
