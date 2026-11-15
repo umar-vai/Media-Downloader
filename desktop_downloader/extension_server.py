@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
+import secrets
 import socket
 import threading
 import time
+import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -19,6 +22,14 @@ from urllib.parse import urlsplit
 PORTS = range(47720, 47730)
 MAX_BODY = 512 * 1024
 OnDownload = Callable[[dict[str, Any]], bool]
+RESOLVE_MARKER = "md-resolve"
+_JOB_ID_RE = re.compile(r"^[0-9a-f]{16,40}$")
+
+
+def resolve_page_url(url: str, job_id: str) -> str:
+    """The page URL with a fragment marker the extension recognises (it never reaches the site)."""
+    separator = "&" if "#" in url else "#"
+    return f"{url}{separator}{RESOLVE_MARKER}={job_id}"
 
 
 def cookies_to_netscape(cookies: list[dict[str, Any]]) -> str:
@@ -71,6 +82,55 @@ class ExtensionServer:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.port = 0
+        self.extension_seen_at = 0.0
+        self._jobs: dict[str, dict[str, Any]] = {}
+        self._jobs_lock = threading.Lock()
+
+    # ------------------------------------------------------------------ browser bridge
+    @property
+    def extension_connected(self) -> bool:
+        return bool(self.extension_seen_at)
+
+    def resolve_in_browser(
+        self,
+        url: str,
+        *,
+        cancel_event: threading.Event | None = None,
+        timeout: float = 45.0,
+        opener: Callable[[str], Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Open ``url`` in the user's own browser and wait for the extension to report the
+        streams the player loads there. Returns the extension's report, or None."""
+        if not self.extension_connected or self._server is None:
+            return None
+        job_id = secrets.token_hex(12)
+        job: dict[str, Any] = {"url": url, "event": threading.Event(), "result": None}
+        with self._jobs_lock:
+            self._jobs[job_id] = job
+        try:
+            (opener or webbrowser.open)(resolve_page_url(url, job_id))
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
+                if job["event"].wait(0.25):
+                    return job["result"]
+            return None
+        finally:
+            with self._jobs_lock:
+                self._jobs.pop(job_id, None)
+
+    def _finish_job(self, data: dict[str, Any]) -> bool:
+        job_id = str(data.get("id") or "")
+        if not _JOB_ID_RE.match(job_id):
+            return False
+        with self._jobs_lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        job["result"] = data
+        job["event"].set()
+        return True
 
     def start(self) -> bool:
         owner = self
@@ -123,7 +183,8 @@ class ExtensionServer:
                 if not self._origin_ok():
                     self._send(403, {"ok": False, "error": "forbidden"})
                     return
-                if urlsplit(self.path).path != "/download":
+                route = urlsplit(self.path).path
+                if route not in {"/download", "/hello", "/resolved"}:
                     self._send(404, {"ok": False, "error": "not found"})
                     return
                 supplied = self.headers.get("X-MD-Token") or ""
@@ -143,6 +204,14 @@ class ExtensionServer:
                         raise ValueError
                 except Exception:
                     self._send(400, {"ok": False, "error": "bad json"})
+                    return
+                owner.extension_seen_at = time.time()
+                if route == "/hello":
+                    self._send(200, {"ok": True, "version": owner._version})
+                    return
+                if route == "/resolved":
+                    accepted = owner._finish_job(data)
+                    self._send(200 if accepted else 404, {"ok": accepted})
                     return
                 url = str(data.get("url") or "").strip()
                 if urlsplit(url).scheme.lower() not in {"http", "https"}:

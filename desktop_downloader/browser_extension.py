@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-EXTENSION_VERSION = "2.0.0"
+EXTENSION_VERSION = "2.1.0"
 
 MANIFEST = {
     "manifest_version": 3,
@@ -28,7 +28,10 @@ MANIFEST = {
     "version": EXTENSION_VERSION,
     "description": "Download button on every video: sends the playing stream (with all qualities) to the Media Downloader desktop app.",
     "icons": {"128": "icon.png"},
-    "permissions": ["activeTab", "contextMenus", "cookies", "storage", "webRequest", "notifications"],
+    "permissions": [
+        "activeTab", "contextMenus", "cookies", "storage", "webRequest", "notifications",
+        "declarativeNetRequestWithHostAccess", "webNavigation",
+    ],
     "host_permissions": ["<all_urls>"],
     "background": {"service_worker": "background.js", "scripts": ["background.js"]},
     "content_scripts": [
@@ -158,6 +161,34 @@ async function sendToApp(payload) {
   }
 }
 
+async function postToApp(path, body) {
+  const token = await getToken();
+  if (!token) return {ok: false};
+  const port = await findPort();
+  if (!port) return {ok: false};
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-MD-Token": token},
+      body: JSON.stringify(body || {}),
+    });
+    const j = await r.json().catch(() => ({}));
+    return {ok: r.ok && !!j.ok, status: r.status};
+  } catch (e) {
+    return {ok: false};
+  }
+}
+
+// Tell the app this browser has the extension, so a link pasted into the app can be opened
+// here when only a real browser can play it.
+let lastHello = 0;
+function sayHello() {
+  if (Date.now() - lastHello < 120000) return;
+  lastHello = Date.now();
+  postToApp("/hello", {browser: navigator.userAgent}).then(r => { if (!r.ok) lastHello = Date.now() - 90000; });
+}
+sayHello();
+
 function notify(message) {
   try { api.notifications.create({type: "basic", iconUrl: "icon.png", title: "Media Downloader", message}); } catch (e) {}
 }
@@ -185,6 +216,68 @@ function persist(tabId) {
 function forget(tabId) {
   tabs.delete(tabId);
   try { api.storage.session.remove("t" + tabId); } catch (e) {}
+  if (resolving.has(tabId)) finishResolve(tabId, [], false);
+}
+
+// ------------------------------------------------------------------ links analyzed by the app
+// When a link pasted into the app only plays in a real browser, the app opens it here with
+// "#md-resolve=<job>" appended. This tab then starts the player, waits for its stream and
+// reports it (best: the master playlist with every quality + audio) back, then closes.
+const RESOLVE_RE = /[#&]md-resolve=([0-9a-f]{16,40})/;
+const resolving = new Map(); // tabId -> {job, started, firstStream, plays, timer, done}
+
+function startResolve(tabId, job) {
+  const current = resolving.get(tabId);
+  if (current && current.job === job) return;
+  if (current) clearInterval(current.timer);
+  const entry = {job, started: Date.now(), firstStream: 0, plays: 0, done: false, timer: 0};
+  entry.timer = setInterval(() => resolveTick(tabId), 1500);
+  resolving.set(tabId, entry);
+}
+
+function resolveTick(tabId) {
+  const entry = resolving.get(tabId);
+  if (!entry || entry.done) return;
+  const now = Date.now();
+  if (entry.plays < 14) {
+    entry.plays++;
+    try { Promise.resolve(api.tabs.sendMessage(tabId, {type: "md-autoplay"})).catch(() => {}); } catch (e) {}
+  }
+  const state = tabs.get(tabId);
+  const streams = state ? state.streams.filter(s => !s.drm) : [];
+  if (streams.length && !entry.firstStream) entry.firstStream = now;
+  const hasMaster = streams.some(s => s.master);
+  const ready = streams.length && ((hasMaster && now - entry.firstStream > 2500) || now - entry.firstStream > 9000);
+  if (ready) finishResolve(tabId, streams, true);
+  else if (now - entry.started > 45000) finishResolve(tabId, streams, true);
+}
+
+async function finishResolve(tabId, streams, closeTab) {
+  const entry = resolving.get(tabId);
+  if (!entry || entry.done) return;
+  entry.done = true;
+  clearInterval(entry.timer);
+  resolving.delete(tabId);
+  let tab = null;
+  try { tab = await api.tabs.get(tabId); } catch (e) {}
+  const sorted = [...streams].sort((a, b) => (Number(!!b.master) - Number(!!a.master)) || (b.gen - a.gen));
+  const out = [];
+  for (const s of sorted.slice(0, 6)) {
+    const headers = {...(s.headers || {})};
+    const cookies = await cookiesFor(s.url);
+    if (cookies.length) headers.Cookie = cookies.map(c => c.name + "=" + c.value).join("; ");
+    out.push({
+      url: s.url, kind: s.kind, master: !!s.master, referer: s.referer, headers,
+      heights: (s.variants || []).map(v => v.height).filter(Boolean),
+    });
+  }
+  await postToApp("/resolved", {
+    id: entry.job,
+    title: cleanTitle(tab && tab.title),
+    pageUrl: tab && tab.url ? tab.url.replace(RESOLVE_RE, "") : "",
+    streams: out,
+  });
+  if (closeTab && tab) { try { await api.tabs.remove(tabId); } catch (e) {} }
 }
 
 function announce(tabId) {
@@ -261,18 +354,67 @@ function parsePlaylist(text, base) {
   return result;
 }
 
-async function readPlaylist(url, tabId, frameId) {
+// Player CDNs usually refuse requests without the player's Referer/Origin, and an extension's
+// own fetch() sends neither (Firefox/Zen) or its own. A short-lived session rule adds the
+// values the player itself sent, for requests made by the extension only (tabId -1).
+let ruleSeq = 4000;
+async function withPlayerHeaders(url, ctx, fn) {
+  const dnr = api.declarativeNetRequest;
+  const requestHeaders = [];
+  if (ctx && ctx.referer) requestHeaders.push({header: "referer", operation: "set", value: ctx.referer});
+  const origin = ctx && ctx.headers && ctx.headers.Origin;
+  if (origin) requestHeaders.push({header: "origin", operation: "set", value: origin});
+  if (!dnr || !dnr.updateSessionRules || !requestHeaders.length) return fn();
+  ruleSeq = ruleSeq >= 4900 ? 4000 : ruleSeq + 1;
+  const id = ruleSeq;
+  let added = false;
+  try {
+    await dnr.updateSessionRules({removeRuleIds: [id], addRules: [{
+      id, priority: 1,
+      action: {type: "modifyHeaders", requestHeaders},
+      condition: {urlFilter: "|" + url.split("#")[0], tabIds: [-1], resourceTypes: ["xmlhttprequest", "other"]},
+    }]});
+    added = true;
+  } catch (e) {}
+  try { return await fn(); }
+  finally { if (added) { try { await dnr.updateSessionRules({removeRuleIds: [id]}); } catch (e) {} } }
+}
+
+async function playerFrames(tabId, ctx) {
+  // Frames to ask, best first: the frame that requested the stream, then frames on the
+  // player's origin, then the rest.
+  const order = [];
+  if (ctx && ctx.frameId >= 0) order.push(ctx.frameId);
+  let frames = [];
+  try { frames = (await api.webNavigation.getAllFrames({tabId})) || []; } catch (e) {}
+  const want = (() => { try { return new URL((ctx && (ctx.headers && ctx.headers.Origin)) || (ctx && ctx.referer) || "").origin; } catch (e) { return ""; } })();
+  const scored = frames.map(f => {
+    let origin = "";
+    try { origin = new URL(f.url).origin; } catch (e) {}
+    return {id: f.frameId, score: (want && origin === want ? 2 : 0) + (f.frameId === 0 ? 0 : 1)};
+  }).sort((a, b) => b.score - a.score);
+  for (const f of scored) if (!order.includes(f.id)) order.push(f.id);
+  if (!order.length) order.push(0);
+  return order.slice(0, 6);
+}
+
+async function readPlaylist(url, tabId, ctx) {
   ownFetches.add(url);
   try {
     try {
-      const r = await fetch(url, {credentials: "include", cache: "force-cache"});
-      if (r.ok) { const text = await r.text(); if (text.includes("#EXTM3U")) return text; }
+      const text = await withPlayerHeaders(url, ctx, async () => {
+        const r = await fetch(url, {credentials: "include", cache: "no-store"});
+        return r.ok ? await r.text() : "";
+      });
+      if (text && text.includes("#EXTM3U")) return text;
     } catch (e) {}
-    // Some CDNs only answer the player's own origin/referer: let the page frame read it.
-    try {
-      const r = await api.tabs.sendMessage(tabId, {type: "md-fetch", url}, {frameId: frameId || 0});
-      if (r && typeof r.text === "string" && r.text.includes("#EXTM3U")) return r.text;
-    } catch (e) {}
+    // Fallback: let the player's own frame read it (same origin, cookies and referer).
+    for (const frameId of await playerFrames(tabId, ctx)) {
+      try {
+        const r = await api.tabs.sendMessage(tabId, {type: "md-fetch", url}, {frameId});
+        if (r && typeof r.text === "string" && r.text.includes("#EXTM3U")) return r.text;
+      } catch (e) {}
+    }
     return "";
   } finally {
     setTimeout(() => ownFetches.delete(url), 4000);
@@ -280,7 +422,7 @@ async function readPlaylist(url, tabId, frameId) {
 }
 
 async function inspectHls(tabId, stream) {
-  const text = await readPlaylist(stream.url, tabId, stream.frameId);
+  const text = await readPlaylist(stream.url, tabId, stream);
   const state = tabs.get(tabId);
   if (!text || !state) return;
   const parsed = parsePlaylist(text, stream.url);
@@ -299,7 +441,7 @@ async function inspectHls(tabId, stream) {
     state.streams = state.streams.filter(s => s === stream || !children.includes(s.url));
     const top = stream.variants[0];
     if (top) {
-      const media = await readPlaylist(top.url, tabId, stream.frameId);
+      const media = await readPlaylist(top.url, tabId, stream);
       if (media) {
         const info = parsePlaylist(media, top.url);
         stream.duration = Math.round(info.duration);
@@ -387,6 +529,9 @@ api.webRequest.onErrorOccurred.addListener(details => pending.delete(details.req
 api.tabs.onRemoved.addListener(forget);
 api.tabs.onUpdated.addListener(async (tabId, change) => {
   if (!change.url) return;
+  sayHello();
+  const marker = RESOLVE_RE.exec(change.url);
+  if (marker) startResolve(tabId, marker[1]);
   const state = await tabState(tabId);
   const origin = (() => { try { return new URL(change.url).origin; } catch (e) { return ""; } })();
   if (state.origin && origin !== state.origin) {
@@ -453,7 +598,11 @@ async function menuFor(tabId) {
 }
 
 // ------------------------------------------------------------------ browser UI hooks
+try { api.runtime.onStartup.addListener(() => { lastHello = 0; sayHello(); }); } catch (e) {}
+
 api.runtime.onInstalled.addListener(() => {
+  lastHello = 0;
+  sayHello();
   api.contextMenus.create({id: "md-page", title: "Download page with Media Downloader", contexts: ["page"]});
   api.contextMenus.create({id: "md-link", title: "Download link with Media Downloader", contexts: ["link"]});
   api.contextMenus.create({id: "md-media", title: "Download media with Media Downloader", contexts: ["video", "audio"]});
@@ -523,10 +672,29 @@ CONTENT_JS = r"""
   const MIN_W = 200, MIN_H = 110, HIDE_AFTER = 2600;
 
   // The background may ask this frame to read a playlist that only the player's origin can load.
+  // Firefox/Zen: content.fetch() runs as the page (its Origin, Referer and cookies); the plain
+  // fetch() of a content script runs as the extension and many player CDNs refuse that.
+  const pageFetch = (typeof content !== "undefined" && content && typeof content.fetch === "function")
+    ? content.fetch.bind(content) : fetch;
   api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg && msg.type === "md-fetch") {
-      fetch(msg.url, {credentials: "include"}).then(r => r.ok ? r.text() : "").then(text => sendResponse({text}), () => sendResponse({text: ""}));
+      pageFetch(msg.url, {credentials: "include"}).then(r => r.ok ? r.text() : "").then(text => sendResponse({text}), () => sendResponse({text: ""}));
       return true;
+    }
+    if (msg && msg.type === "md-autoplay") {
+      // The app asked this tab to find the stream: start the player muted.
+      const videos = Array.from(document.querySelectorAll("video"));
+      for (const v of videos) {
+        try { v.muted = true; if (v.paused) Promise.resolve(v.play()).catch(() => {}); } catch (e) {}
+      }
+      if (!videos.length || videos.every(v => v.paused)) {
+        const selectors = [".jw-icon-display", ".jw-display-icon-container", ".vjs-big-play-button",
+          ".plyr__control--overlaid", ".art-control-play", ".play-button", ".play-btn", "[aria-label*=play i]"];
+        for (const s of selectors) {
+          const el = document.querySelector(s);
+          if (el) { try { el.click(); } catch (e) {} break; }
+        }
+      }
     }
   });
 

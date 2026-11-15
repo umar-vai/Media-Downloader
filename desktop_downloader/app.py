@@ -682,7 +682,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.media_badge.configure(text="ANALYSIS TIMEOUT", fg_color=ui.DANGER_SOFT, text_color=DANGER)
         self.media_action_hint.configure(text="Press Analyze to retry, or paste another link.")
         self.task_state = TaskState.ERROR
-        self._set_status("Analysis timed out after 60 seconds", "error")
+        self._set_status("Analysis timed out after 150 seconds", "error")
         self._finish_analysis(job_id)
         LOGGER.warning("Analysis %s timed out url=%s", job_id, url)
 
@@ -727,7 +727,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
             daemon=True,
             name=f"media-analysis-{job_id}",
         ).start()
-        self.after(60_000, lambda jid=job_id, source=url: self._analysis_watchdog(jid, source))
+        self.after(150_000, lambda jid=job_id, source=url: self._analysis_watchdog(jid, source))
 
     def _analyze_media_worker(self, job_id: int, cancel_event: threading.Event, url: str) -> None:
         try:
@@ -1758,6 +1758,13 @@ class DownloaderApp(UIMixin, ctk.CTk):
             )
             if server.start():
                 self.extension_server = server
+                # Pages whose player only works in a real browser (embedded anime/movie players)
+                # are opened in the user's own browser; the extension reports the stream back.
+                engine_options.configure(
+                    browser_bridge=lambda url, cancel_event, srv=server: srv.resolve_in_browser(
+                        url, cancel_event=cancel_event
+                    )
+                )
                 LOGGER.info("Browser extension server listening on 127.0.0.1:%s", server.port)
             else:
                 LOGGER.warning("Browser extension server could not bind a port")
@@ -1786,6 +1793,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
         if self.extension_server is not None:
             self.extension_server.stop()
             self.extension_server = None
+            engine_options.configure(browser_bridge=None)
 
     def _default_batch_options(self, mode: str | None = None) -> dict[str, str]:
         return {

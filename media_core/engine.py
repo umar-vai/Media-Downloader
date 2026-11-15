@@ -88,6 +88,100 @@ def extraction_failure_hint(errors: list[str]) -> str:
     return "No supported media stream was detected. The page may require an interactive player."
 
 
+_REPORT_HEADERS = {"referer": "Referer", "origin": "Origin", "user-agent": "User-Agent", "cookie": "Cookie"}
+
+
+def info_from_browser_report(page_url: str, report: dict[str, Any]) -> dict[str, Any]:
+    """Build an info dict from the streams the browser extension saw the page's player load."""
+    streams: list[dict[str, Any]] = []
+    formats: list[dict[str, Any]] = []
+    for raw in list(report.get("streams") or [])[:12]:
+        if not isinstance(raw, dict):
+            continue
+        stream_url = str(raw.get("url") or "")
+        if not stream_url.startswith(("http://", "https://")) or raw.get("drm"):
+            continue
+        headers: dict[str, str] = {}
+        for key, value in dict(raw.get("headers") or {}).items():
+            name = _REPORT_HEADERS.get(str(key).strip().lower())
+            text = str(value or "").strip()
+            if name and text and len(text) <= 8192 and not any(ch in text for ch in "\r\n"):
+                headers[name] = text
+        referer = str(raw.get("referer") or "")
+        if referer.startswith(("http://", "https://")):
+            headers.setdefault("Referer", referer)
+        kind = str(raw.get("kind") or "file")
+        streams.append({"url": stream_url, "kind": kind, "master": bool(raw.get("master")), "http_headers": headers})
+        lower = stream_url.lower().split("?", 1)[0]
+        ext = lower.rsplit(".", 1)[-1] if "." in lower.rsplit("/", 1)[-1] else "mp4"
+        formats.append(
+            {
+                "format_id": f"browser-{len(formats) + 1}",
+                "url": stream_url,
+                "ext": "mp4" if kind in {"hls", "dash"} else (ext if 1 <= len(ext) <= 5 else "mp4"),
+                "protocol": {"hls": "m3u8_native", "dash": "http_dash_segments"}.get(kind, "https"),
+                "http_headers": headers,
+            }
+        )
+    title = " ".join(str(report.get("title") or "").split())[:180] or "Browser media"
+    return {
+        "id": f"browser-{abs(hash(page_url))}",
+        "display_id": f"browser-{abs(hash(page_url))}",
+        "title": title,
+        "webpage_url": page_url,
+        "original_url": page_url,
+        "extractor": "BrowserExtension",
+        "extractor_key": "BrowserExtension",
+        "formats": formats,
+        "_browser_streams": streams,
+    }
+
+
+def expand_browser_capture(
+    page_url: str,
+    info: dict[str, Any],
+    *,
+    cancel_event: threading.Event,
+    on_status: StatusCallback | None = None,
+) -> dict[str, Any]:
+    """Turn a stream captured by the hidden browser into real formats.
+
+    A captured HLS master playlist is read with yt-dlp (using the exact Referer/Origin/cookies
+    the player used), which lists every quality (1080p, 720p, ...) and the separate audio
+    track, so the chosen quality is downloaded with its sound."""
+    streams = [item for item in (info.get("_browser_streams") or []) if isinstance(item, dict)]
+    for stream in streams:
+        if stream.get("kind") not in {"hls", "dash"} or stream.get("drm"):
+            continue
+        _check_cancel(cancel_event)
+        if on_status:
+            on_status("Reading stream qualities")
+        headers = {str(k): str(v) for k, v in dict(stream.get("http_headers") or {}).items() if v}
+        try:
+            with yt_dlp.YoutubeDL(
+                engine_options.apply_request_options({
+                    "quiet": True,
+                    "no_warnings": True,
+                    "skip_download": True,
+                    "noplaylist": True,
+                    "cachedir": False,
+                    "socket_timeout": 15,
+                    "retries": 1,
+                    "http_headers": headers,
+                })
+            ) as ydl:
+                expanded = ydl.extract_info(str(stream.get("url")), download=False, force_generic_extractor=True) or {}
+        except Exception:
+            continue
+        if not expanded.get("formats"):
+            continue
+        expanded["title"] = str(info.get("title") or expanded.get("title") or "Browser media")
+        expanded["webpage_url"] = page_url
+        expanded["original_url"] = page_url
+        return expanded
+    return info
+
+
 def analyze_url(
     url: str,
     *,
@@ -165,6 +259,24 @@ def analyze_url(
                 errors.append(f"Browser session {index}: {str(exc).strip()}")
 
     if not info:
+        bridge = engine_options.get("browser_bridge")
+        if callable(bridge):
+            _check_cancel(cancel_event)
+            if on_status:
+                on_status("Opening the page in your browser to find the stream")
+            try:
+                report = bridge(url, cancel_event)
+                if report and report.get("streams"):
+                    info = info_from_browser_report(url, report)
+                    info = expand_browser_capture(url, info, cancel_event=cancel_event, on_status=on_status)
+                elif report is not None:
+                    errors.append("Your browser: the player did not load a playable stream.")
+            except Cancelled:
+                raise
+            except Exception as exc:
+                errors.append(f"Your browser: {str(exc).strip()}")
+
+    if not info:
         _check_cancel(cancel_event)
         if on_status:
             on_status("Trying installed-browser fallback")
@@ -172,8 +284,11 @@ def analyze_url(
             info = resolve_with_installed_browser(
                 url,
                 cancel_event=cancel_event,
-                capture_seconds=18.0,
+                capture_seconds=25.0,
             )
+            info = expand_browser_capture(url, info, cancel_event=cancel_event, on_status=on_status)
+        except Cancelled:
+            raise
         except Exception as exc:
             errors.append(f"Installed browser: {str(exc).strip()}")
 
@@ -421,7 +536,7 @@ def download_from_analysis(
             }
         )
     else:
-        opts["format"] = video_format_selector(url, video_quality or "Best available")
+        opts["format"] = video_format_selector(url, video_quality or "Best available", cached_info)
         opts["merge_output_format"] = "mp4"
         if extra_processors:
             opts["postprocessors"] = list(extra_processors)
@@ -472,6 +587,8 @@ def download_from_analysis(
                     else None
                 ),
             )
+            if mode.lower() != "audio":
+                opts["format"] = video_format_selector(url, video_quality or "Best available", refreshed_info)
             refreshed_network_options: dict[str, Any] = {}
             if attempts:
                 refreshed_network_options = dict(attempts[0][1] or {})

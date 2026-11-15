@@ -419,10 +419,39 @@ def extraction_attempts(url: str) -> list[tuple[str, dict]]:
     return _generic_transport_attempts(url, allow_impersonation=True)
 
 
-def video_format_selector(url: str, quality: str) -> str:
+def has_separate_audio(info: Any) -> bool:
+    """True when the analyzed media keeps audio in its own stream (HLS/DASH with an audio
+    rendition). Picking a single "best" format there gives a silent video."""
+    if not isinstance(info, dict):
+        return False
+    for item in info.get("formats") or []:
+        if not isinstance(item, dict):
+            continue
+        vcodec = str(item.get("vcodec") or "")
+        acodec = str(item.get("acodec") or "")
+        if vcodec == "none" and acodec != "none":
+            return True
+        if not vcodec and str(item.get("format_id") or "").lower().startswith(("hls-audio", "audio", "aud")):
+            return True
+    return False
+
+
+def video_format_selector(url: str, quality: str, info: Any = None) -> str:
     """Return a resilient format selector for known and generic websites."""
     platform = detect_platform(url)
     flexible = platform != "youtube"
+
+    if flexible and has_separate_audio(info):
+        # Video variants may not declare their (missing) audio codec, so "best single file"
+        # would pick a silent variant: always merge the chosen video with the best audio.
+        if quality == "Best available":
+            return "bv*+ba/b/bv*"
+        height = int(quality.rstrip("p"))
+        return (
+            f"bv*[height<=?{height}]+ba/"
+            f"b[height<=?{height}]/"
+            "bv*+ba/b/bv*"
+        )
 
     if quality == "Best available":
         if flexible:
