@@ -1847,10 +1847,18 @@ class DownloaderApp(UIMixin, ctk.CTk):
         if not self.latest_release or not self.downloaded_update:
             return
         if not is_frozen_windows_app():
-            messagebox.showinfo(
+            # Started from Python source (python app.py / launcher.py): there is no EXE to
+            # replace. Do not leave the user at a dead end: offer the installer instead.
+            where = Path(__file__).resolve().parent
+            url = self.latest_release.installer_url or self.latest_release.asset_url
+            append_update_log(f"Source run at {where}: offering the installer for {self.latest_release.version}.")
+            if messagebox.askyesno(
                 APP_NAME,
-                "The update was downloaded and verified, but automatic replacement only runs in the packaged Windows EXE build.",
-            )
+                f"This copy of Media Downloader runs from Python source:\n{where}\n\n"
+                "It cannot replace itself. Download and run the installer for "
+                f"v{self.latest_release.version} instead?",
+            ):
+                webbrowser.open(url or LATEST_RELEASE_WEB)
             return
 
         active_downloads = self.download_queue.queued_count() + self.download_queue.running_count()
