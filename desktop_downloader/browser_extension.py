@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-EXTENSION_VERSION = "2.7.0"
+EXTENSION_VERSION = "2.8.0"
 
 MANIFEST = {
     "manifest_version": 3,
@@ -127,6 +127,7 @@ async function getToken() {
   return (data.token || "").trim();
 }
 
+let appCapture = true; // the app's "catch browser downloads" option, read from /ping
 async function findPort() {
   const cached = (await api.storage.local.get("port")).port;
   const order = cached ? [cached, ...PORTS.filter(p => p !== cached)] : PORTS;
@@ -134,10 +135,54 @@ async function findPort() {
     try {
       const r = await fetch(`http://127.0.0.1:${port}/ping`, {cache: "no-store"});
       const j = await r.json();
-      if (j && j.app === "Media Downloader") { await api.storage.local.set({port}); return port; }
+      if (j && j.app === "Media Downloader") {
+        appCapture = j.capture !== false;
+        if (port !== cached) await api.storage.local.set({port});
+        return port;
+      }
     } catch (e) {}
   }
   return 0;
+}
+
+// Self-pairing: the app hands its token to browser extensions only (web pages cannot fake
+// the Origin header). So a reinstalled app, a new token or an extension loaded from another
+// folder never ends up as "wrong token": it simply pairs again.
+async function pairWithApp(port) {
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/pair`, {cache: "no-store"});
+    const j = await r.json();
+    const token = String((j && j.token) || "").trim();
+    if (r.ok && token) { await api.storage.local.set({token, pairedAutomatically: true}); return token; }
+  } catch (e) {}
+  return "";
+}
+
+// POST to the app, finding it and (re)pairing as needed. Returns {...reply, ok, status}.
+async function appRequest(path, body) {
+  const port = await findPort();
+  if (!port) return {ok: false, status: 0, error: "Media Downloader is not running."};
+  let token = await getToken();
+  if (!token) token = await pairWithApp(port);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json", "X-MD-Token": token},
+        body: JSON.stringify(body || {}),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 401 && attempt === 0) {
+        const fresh = await pairWithApp(port);
+        if (fresh) { token = fresh; continue; }
+      }
+      return {...j, ok: r.ok && !!j.ok, status: r.status};
+    } catch (e) {
+      try { await api.storage.local.remove("port"); } catch (err) {}
+      return {ok: false, status: 0, error: "Could not reach Media Downloader."};
+    }
+  }
+  return {ok: false, status: 401, error: "Media Downloader refused the pairing."};
 }
 
 async function cookiesFor(url) {
@@ -154,10 +199,6 @@ function cleanTitle(title) {
 
 // payload: {url, referer, headers, title, quality, mode, pageUrl, kind, fileName, fileSize, mime}
 async function sendToApp(payload) {
-  const token = await getToken();
-  if (!token) return {ok: false, error: "Open the extension options and paste the pairing token from Media Downloader → Settings → Browser."};
-  const port = await findPort();
-  if (!port) return {ok: false, error: "Media Downloader is not running."};
   const seen = new Set();
   let cookies = [];
   for (const source of [payload.url, payload.referer, payload.pageUrl]) {
@@ -179,35 +220,13 @@ async function sendToApp(payload) {
     mime: payload.mime || "",
     cookies,
   };
-  try {
-    const r = await fetch(`http://127.0.0.1:${port}/download`, {
-      method: "POST",
-      headers: {"Content-Type": "application/json", "X-MD-Token": token},
-      body: JSON.stringify(body),
-    });
-    const j = await r.json().catch(() => ({}));
-    return r.ok && j.ok ? {ok: true} : {ok: false, error: r.status === 401 ? "Wrong pairing token." : "The app refused the link."};
-  } catch (e) {
-    return {ok: false, error: "Could not reach Media Downloader."};
-  }
+  const result = await appRequest("/download", body);
+  if (result.ok) return {ok: true};
+  return {ok: false, error: result.error || "The app refused the link."};
 }
 
-async function postToApp(path, body) {
-  const token = await getToken();
-  if (!token) return {ok: false};
-  const port = await findPort();
-  if (!port) return {ok: false};
-  try {
-    const r = await fetch(`http://127.0.0.1:${port}${path}`, {
-      method: "POST",
-      headers: {"Content-Type": "application/json", "X-MD-Token": token},
-      body: JSON.stringify(body || {}),
-    });
-    const j = await r.json().catch(() => ({}));
-    return {...j, ok: r.ok && !!j.ok, status: r.status};
-  } catch (e) {
-    return {ok: false, error: "Could not reach Media Downloader."};
-  }
+function postToApp(path, body) {
+  return appRequest(path, body);
 }
 
 // "Which qualities does this video have?" - the app reads the video's own link (a reel, post,
@@ -222,7 +241,6 @@ function analyzeVideo(url, pageUrl, prefetch) {
   if (prefetch && prefetching >= 2) return Promise.resolve({ok: false, skipped: true});
   if (prefetch) prefetching++;
   const promise = (async () => {
-    if (!(await getToken())) return {ok: false, error: "Pair the extension first: paste the token from Media Downloader → Settings → Browser into the extension options."};
     let cookies = [];
     for (const source of [...new Set([url, pageUrl].filter(Boolean))]) cookies = cookies.concat(await cookiesFor(source));
     const result = await postToApp("/analyze", {url, pageUrl: pageUrl || "", cookies});
@@ -742,7 +760,8 @@ async function captureDownload(item) {
   if (!captureAllowed(name, item.mime)) return;
   const size = Number(item.totalBytes || item.fileSize || 0);
   if (settings.minSizeKb && size > 0 && size < settings.minSizeKb * 1024) return;
-  if (!(await getToken())) return;
+  // Leave the download to the browser when the app is closed or its option is off.
+  if (!(await findPort()) || !appCapture) return;
   capturedIds.add(item.id);
   try { await api.downloads.pause(item.id); } catch (e) {}
   const result = await sendToApp({url, referer: pageUrl, pageUrl, kind: "file", fileName: name, fileSize: size,

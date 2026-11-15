@@ -20,6 +20,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 PORTS = range(47720, 47730)
+EXTENSION_ORIGINS = ("chrome-extension://", "moz-extension://", "edge-extension://", "extension://")
 MAX_BODY = 512 * 1024
 OnDownload = Callable[[dict[str, Any]], bool]
 RESOLVE_MARKER = "md-resolve"
@@ -82,8 +83,12 @@ class ExtensionServer:
         on_download: OnDownload,
         app_version: str,
         on_analyze: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        capture: bool = True,
     ) -> None:
         self.token = token
+        # Whether the extension should take over the browser's own downloads. The listener
+        # itself always runs, so the right-click menu and the video button keep working.
+        self.capture = capture
         self._on_download = on_download
         self._on_analyze = on_analyze
         self._version = app_version
@@ -98,6 +103,14 @@ class ExtensionServer:
     @property
     def extension_connected(self) -> bool:
         return bool(self.extension_seen_at)
+
+    def extension_active(self, within: float = 300.0) -> bool:
+        """True when the extension talked to the app in the last ``within`` seconds."""
+        return bool(self.extension_seen_at) and time.time() - self.extension_seen_at < within
+
+    @property
+    def running(self) -> bool:
+        return self._server is not None
 
     def resolve_in_browser(
         self,
@@ -152,7 +165,10 @@ class ExtensionServer:
 
             def _origin_ok(self) -> bool:
                 origin = self.headers.get("Origin") or ""
-                return not origin or origin.startswith(("chrome-extension://", "moz-extension://", "edge-extension://"))
+                return not origin or origin.startswith(EXTENSION_ORIGINS)
+
+            def _from_extension(self) -> bool:
+                return (self.headers.get("Origin") or "").startswith(EXTENSION_ORIGINS)
 
             def _send(self, status: int, payload: dict[str, Any]) -> None:
                 body = json.dumps(payload).encode("utf-8")
@@ -182,8 +198,20 @@ class ExtensionServer:
                 if not self._origin_ok():
                     self._send(403, {"ok": False, "error": "forbidden"})
                     return
-                if urlsplit(self.path).path == "/ping":
-                    self._send(200, {"ok": True, "app": "Media Downloader", "version": owner._version})
+                route = urlsplit(self.path).path
+                if route == "/ping":
+                    if self._from_extension():
+                        owner.extension_seen_at = time.time()
+                    self._send(200, {"ok": True, "app": "Media Downloader", "version": owner._version,
+                                     "capture": bool(owner.capture)})
+                elif route == "/pair":
+                    # Self-pairing: only a browser extension can read the token. Web pages
+                    # cannot fake the Origin header, so they never see it.
+                    if not self._from_extension():
+                        self._send(403, {"ok": False, "error": "forbidden"})
+                        return
+                    owner.extension_seen_at = time.time()
+                    self._send(200, {"ok": True, "token": owner.token})
                 else:
                     self._send(404, {"ok": False, "error": "not found"})
 

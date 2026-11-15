@@ -34,7 +34,7 @@ from batch_page import BatchSection
 from history_window import PropertiesDialog
 from icons import IconSet
 from main_window import (CategoryTree, ConfirmDelete, DetailsPane, DownloadTable, SearchBox, StatusBar,
-                         Toolbar, UpdateBadge, setup_style)
+                         Toolbar, UpdateBadge, setup_style, sysfont)
 from theme import C
 from ui_kit import px
 from version import APP_VERSION
@@ -105,11 +105,12 @@ class UIMixin:
         self.grid_rowconfigure(2, weight=1)
         self._build_menubar()
         self._build_toolbar()
-        tk.Frame(self, bg=C["BORDER_SOFT"], height=1).grid(row=1, column=0, sticky="ew")
+        ttk.Separator(self, orient="horizontal").grid(row=1, column=0, sticky="ew")
         self._build_body()
         self.statusbar = StatusBar(self)
         self.statusbar.grid(row=3, column=0, sticky="ew")
         self.statusbar.version.configure(text=f"v{APP_VERSION}")
+        self.after(1500, self._refresh_extension_status)
 
         self._build_add_dialog()
         self._build_batch_dialog()
@@ -259,25 +260,25 @@ class UIMixin:
 
     # ----------------------------------------------------------------- body
     def _build_body(self) -> None:
-        self.body = tk.PanedWindow(self, orient="horizontal", sashwidth=px(5), bg=C["BORDER_SOFT"], bd=0,
+        self.body = tk.PanedWindow(self, orient="horizontal", sashwidth=px(4), bg=C["BG"], bd=0,
                                    sashrelief="flat", showhandle=False, opaqueresize=True)
         self.body.grid(row=2, column=0, sticky="nsew")
         self.category_tree = CategoryTree(self.body, self.icons, self._select_category)
-        right = tk.Frame(self.body, bg=C["SURFACE"])
+        right = tk.Frame(self.body, bg=C["BG"])
         self._right = right
         self.body.add(self.category_tree, minsize=px(160), width=px(214), stretch="never")
         self.body.add(right, minsize=px(460), stretch="always")
 
-        header = tk.Frame(right, bg=C["SURFACE"])
+        # A plain one-line header (category name, item count, search), like a Windows list pane.
+        header = tk.Frame(right, bg=C["BG"])
         header.pack(side="top", fill="x")
-        self.list_title = tk.Label(header, text="All Downloads", bg=C["SURFACE"], fg=C["TEXT"],
-                                   font=ui.font(16, True), anchor="w")
-        self.list_title.pack(side="left", padx=(px(14), px(8)), pady=(px(9), px(8)))
-        self.list_count = tk.Label(header, text="", bg=C["SURFACE"], fg=C["MUTED"], font=ui.font(13), anchor="w")
-        self.list_count.pack(side="left", pady=(px(11), px(8)))
+        self.list_title = tk.Label(header, text="All Downloads", bg=C["BG"], fg=C["TEXT"],
+                                   font=sysfont(True), anchor="w")
+        self.list_title.pack(side="left", padx=(px(2), px(6)), pady=px(4))
+        self.list_count = tk.Label(header, text="", bg=C["BG"], fg=C["FAINT"], font=sysfont(), anchor="w")
+        self.list_count.pack(side="left", pady=px(4))
         self.search = SearchBox(header, self._search_changed)
-        self.search.pack(side="right", padx=px(12), pady=px(7))
-        tk.Frame(right, bg=C["BORDER_SOFT"], height=1).pack(side="top", fill="x")
+        self.search.pack(side="right", padx=(0, px(3)), pady=px(3))
 
         self.details = DetailsPane(right, self.icons, {
             "toggle": self._toggle_selected, "cancel": self.cancel_selected, "open": self.open_selected,
@@ -737,11 +738,25 @@ class UIMixin:
         if totals["failed"]:
             parts.append(f"{totals['failed']} failed")
         self.statusbar.set_totals("  •  ".join(parts) or "No active downloads", totals["speed_text"])
-        server = getattr(self, "extension_server", None)
-        ext = "Browser extension: on" if server is not None else "Browser extension: off"
-        if self.statusbar.extension.cget("text") != ext:
-            self.statusbar.extension.configure(text=ext)
+        self._refresh_extension_status(reschedule=False)
         self._update_selection_ui(totals)
+
+    def _refresh_extension_status(self, reschedule: bool = True) -> None:
+        """Status-bar pane for the browser link; also polled, since it changes with no download."""
+        server = getattr(self, "extension_server", None)
+        if server is None:
+            ext = "Browser extension: starting…"
+        elif server.extension_active():
+            ext = "Browser extension: connected"
+        else:
+            ext = "Browser extension: waiting for browser"
+        try:
+            if self.statusbar.extension.cget("text") != ext:
+                self.statusbar.extension.configure(text=ext)
+        except tk.TclError:
+            return
+        if reschedule:
+            self.after(3000, self._refresh_extension_status)
 
     def _selected_rows(self) -> list[dict[str, Any]]:
         return [self._rows_by_key[key] for key in self.table.selected() if key in self._rows_by_key]
@@ -1013,8 +1028,12 @@ class UIMixin:
         button = self.toolbar.buttons["browsers"]
         menu = tk.Menu(self, tearoff=0)
         server = getattr(self, "extension_server", None)
-        status = (f"Connected: listening on port {server.port}" if server is not None
-                  else "Browser extension link is off")
+        if server is None:
+            status = "Browser link is starting…"
+        elif server.extension_active():
+            status = f"Extension connected (port {server.port})"
+        else:
+            status = f"Listening on port {server.port}; waiting for the extension"
         menu.add_command(label=status, state="disabled")
         menu.add_separator()
         menu.add_command(label="Install browser extension…", command=self.export_browser_extension)

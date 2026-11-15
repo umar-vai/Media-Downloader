@@ -56,8 +56,14 @@ async function fakeFetch(url, opts) {
     return {ok: true, json: async () => ({token: scenario.bundled})};
   }
   if (scenario.appDown) throw new Error("connection refused");
-  if (url.endsWith("/ping")) return {ok: true, json: async () => ({app: "Media Downloader"})};
-  if (url.endsWith("/download")) { sent.push(JSON.parse(opts.body)); return {ok: true, json: async () => ({ok: true})}; }
+  if (url.endsWith("/ping")) return {ok: true, json: async () => ({app: "Media Downloader", capture: scenario.appCapture !== false})};
+  if (url.endsWith("/pair")) return {ok: !!scenario.appToken, json: async () => ({token: scenario.appToken || ""})};
+  if (url.endsWith("/download")) {
+    const token = opts.headers["X-MD-Token"];
+    if (scenario.appToken && token !== scenario.appToken) return {ok: false, status: 401, json: async () => ({ok: false})};
+    if (!token) return {ok: false, status: 401, json: async () => ({ok: false})};
+    sent.push(JSON.parse(opts.body)); return {ok: true, status: 200, json: async () => ({ok: true})};
+  }
   return {ok: true, json: async () => ({ok: true})};
 }
 const context = {chrome: deep(""), fetch: fakeFetch, console, URL, setTimeout, clearTimeout, setInterval,
@@ -112,8 +118,9 @@ class ExtensionCaptureTests(unittest.TestCase):
         self.assertEqual(body["fileSize"], 5_000_000)
 
     def test_browser_keeps_the_download_when_the_app_is_closed(self) -> None:
+        # The download is not even paused: the browser carries on as if nothing happened.
         result = self.run_scenario(appDown=True)
-        self.assertEqual(result["log"], ["pause", "resume"])
+        self.assertEqual(result["log"], [])
         self.assertEqual(result["sent"], [])
 
     def test_alt_click_lets_the_browser_download(self) -> None:
@@ -127,6 +134,19 @@ class ExtensionCaptureTests(unittest.TestCase):
         self.assertEqual(result["sent"][0]["kind"], "file")
         # A stale token from an older install is replaced too.
         self.assertEqual(self.run_scenario(storage={"token": "old"}, bundled="new")["token"], "new")
+
+    def test_pairs_itself_with_the_running_app(self) -> None:
+        # No token at all, or a stale one: the app hands the extension its token.
+        for storage in ({"token": ""}, {"token": "stale"}):
+            with self.subTest(storage=storage):
+                result = self.run_scenario(storage=storage, appToken="live-token")
+                self.assertEqual(result["token"], "live-token")
+                self.assertEqual(len(result["sent"]), 1)
+                self.assertEqual(result["log"][:3], ["pause", "cancel", "erase"])
+
+    def test_app_option_off_leaves_downloads_in_the_browser(self) -> None:
+        result = self.run_scenario(appCapture=False)
+        self.assertEqual((result["log"], result["sent"]), ([], []))
 
     def test_export_writes_the_pairing_file_and_refreshes_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

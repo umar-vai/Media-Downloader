@@ -14,40 +14,43 @@ from typing import Any
 
 THEMES = ("Light", "Dark")
 
+# Light = the Windows system colours (ButtonFace, Window, Highlight, GrayText...), so the main
+# window looks like any classic Windows program (IDM / NDM style), with no custom polish.
 LIGHT: dict[str, str] = {
-    "BG": "#F3F5F9",            # window / dialog background
-    "SIDEBAR": "#F7F8FB",       # category tree
-    "SURFACE": "#FFFFFF",       # cards, table, toolbar
-    "SURFACE_2": "#F6F8FB",     # inputs, alternate rows
-    "SURFACE_3": "#E8EDF4",     # hover, progress track
-    "BORDER": "#D3DAE5",
-    "BORDER_SOFT": "#E3E8EF",
-    "TEXT": "#161C27",
-    "MUTED": "#5A6578",
-    "FAINT": "#8D97A8",
-    "ACCENT": "#2563EB",
-    "ACCENT_HOVER": "#1D4ED8",
-    "ACCENT_SOFT": "#DCE9FF",
+    "BG": "#F0F0F0",            # COLOR_BTNFACE: window / dialog / toolbar background
+    "SIDEBAR": "#FFFFFF",       # COLOR_WINDOW: category tree
+    "SURFACE": "#FFFFFF",       # COLOR_WINDOW: lists, entries
+    "SURFACE_2": "#FFFFFF",
+    "SURFACE_3": "#E5E5E5",     # progress track, placeholders
+    "BORDER": "#ABADB3",        # entry / list border
+    "BORDER_SOFT": "#D5D5D5",   # etched separators
+    "TEXT": "#000000",          # COLOR_WINDOWTEXT
+    "MUTED": "#444444",
+    "FAINT": "#6D6D6D",         # COLOR_GRAYTEXT
+    "ACCENT": "#0066CC",        # COLOR_HOTLIGHT (links)
+    "ACCENT_HOVER": "#004C99",
+    "ACCENT_SOFT": "#CCE8FF",
     "ON_ACCENT": "#FFFFFF",
-    "SELECT": "#CFE3FF",        # selected table row
-    "SELECT_TEXT": "#0B1A33",
-    "CYAN": "#0B6E99",          # captions / informational text
-    "ACTION": "#2563EB",        # the main "Download" call to action
-    "ACTION_HOVER": "#1D4ED8",
+    "SELECT": "#0078D7",        # COLOR_HIGHLIGHT
+    "SELECT_TEXT": "#FFFFFF",   # COLOR_HIGHLIGHTTEXT
+    "CYAN": "#0066CC",
+    "ACTION": "#0078D7",
+    "ACTION_HOVER": "#005A9E",
     "ON_ACTION": "#FFFFFF",
-    "SUCCESS": "#15803D",
-    "SUCCESS_SOFT": "#DCFCE7",
-    "WARNING": "#B45309",
-    "WARNING_SOFT": "#FEF3C7",
-    "DANGER": "#DC2626",
-    "DANGER_SOFT": "#FEE2E2",
-    "DANGER_HOVER": "#FECACA",
-    "DANGER_LINE": "#FCA5A5",
-    "INFO_SOFT": "#E0F2FE",
-    "STRIPE": "#FAFBFD",
-    "HEADING": "#F1F4F8",
-    "TOOL_HOVER": "#E6EEFB",
-    "TOOL_PRESS": "#D4E2F8",
+    "SUCCESS": "#008000",
+    "SUCCESS_SOFT": "#DFF6DD",
+    "WARNING": "#9D5D00",
+    "WARNING_SOFT": "#FFF4CE",
+    "DANGER": "#C00000",
+    "DANGER_SOFT": "#FDE7E9",
+    "DANGER_HOVER": "#F9D3D7",
+    "DANGER_LINE": "#E8A0A8",
+    "INFO_SOFT": "#E5F3FF",
+    "STRIPE": "#FFFFFF",
+    "HEADING": "#F0F0F0",
+    "TOOL_HOVER": "#E5F3FF",    # Windows toolbar hot-tracking
+    "TOOL_PRESS": "#CCE8FF",
+    "TOOL_EDGE": "#99D1FF",
 }
 
 DARK: dict[str, str] = {
@@ -84,6 +87,7 @@ DARK: dict[str, str] = {
     "HEADING": "#171E2E",
     "TOOL_HOVER": "#1D2538",
     "TOOL_PRESS": "#252F48",
+    "TOOL_EDGE": "#29344D",
 }
 
 

@@ -1959,25 +1959,34 @@ class DownloaderApp(UIMixin, ctk.CTk):
     def _start_integrations(self) -> None:
         self._sync_hotkeys()
         self._refresh_browser_extension()
-        if self.extension_server is None and self.settings.get("extension_enabled", True):
-            server = ExtensionServer(
-                token=str(self.settings.get("extension_token") or ""),
-                on_download=lambda data: bool(self.events.put(("external_download", dict(data))) or True),
-                app_version=APP_VERSION,
-                on_analyze=self._analyze_for_extension,
-            )
-            if server.start():
-                self.extension_server = server
-                # Pages whose player only works in a real browser (embedded anime/movie players)
-                # are opened in the user's own browser; the extension reports the stream back.
-                engine_options.configure(
-                    browser_bridge=lambda url, cancel_event, srv=server: srv.resolve_in_browser(
-                        url, cancel_event=cancel_event
-                    )
+        self._ensure_extension_server()
+
+    def _ensure_extension_server(self) -> None:
+        """Keep the browser link listening, like IDM/NDM: it is never switched off. The
+        "take over browser downloads" option only decides whether the extension catches the
+        browser's own downloads. If no port is free yet, try again a little later."""
+        if self.extension_server is not None:
+            return
+        server = ExtensionServer(
+            token=str(self.settings.get("extension_token") or ""),
+            on_download=lambda data: bool(self.events.put(("external_download", dict(data))) or True),
+            app_version=APP_VERSION,
+            on_analyze=self._analyze_for_extension,
+            capture=bool(self.settings.get("extension_enabled", True)),
+        )
+        if server.start():
+            self.extension_server = server
+            # Pages whose player only works in a real browser (embedded anime/movie players)
+            # are opened in the user's own browser; the extension reports the stream back.
+            engine_options.configure(
+                browser_bridge=lambda url, cancel_event, srv=server: srv.resolve_in_browser(
+                    url, cancel_event=cancel_event
                 )
-                LOGGER.info("Browser extension server listening on 127.0.0.1:%s", server.port)
-            else:
-                LOGGER.warning("Browser extension server could not bind a port")
+            )
+            LOGGER.info("Browser extension server listening on 127.0.0.1:%s", server.port)
+        else:
+            LOGGER.warning("Browser extension server could not bind a port; retrying in 5 s")
+            self.after(5000, self._ensure_extension_server)
 
     def _sync_hotkeys(self) -> None:
         wanted = bool(self.settings.get("clipboard_hotkey", True))
@@ -2454,8 +2463,8 @@ class DownloaderApp(UIMixin, ctk.CTk):
     def _build_options_dialog(self, on_close: Any) -> OptionsDialog:
         server = self.extension_server
         if server is None:
-            status = "The browser link is off (turn it on below, then restart the app)."
-        elif server.extension_connected:
+            status = "Starting the browser link…"
+        elif server.extension_active():
             status = "Connected: the browser extension is talking to Media Downloader."
         else:
             status = "Ready: install the extension and it connects by itself."
@@ -2503,6 +2512,10 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.download_queue.max_concurrent = normalized["max_concurrent_downloads"]
         self._configure_engine()
         self._sync_hotkeys()
+        if self.extension_server is not None:
+            self.extension_server.capture = bool(normalized.get("extension_enabled", True))
+        else:
+            self._ensure_extension_server()
 
         self.download_dir = download_dir
         self.download_dir_var.set(str(download_dir))

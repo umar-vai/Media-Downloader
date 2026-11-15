@@ -266,7 +266,7 @@ class OptionsDialog(native.Dialog):
         v = self.vars
         box = group(tab, "Browser extension", row=0, column=0, sticky="ew")
         box.grid_columnconfigure(0, weight=1)
-        check(box, "Take over downloads from the browser (Chrome, Edge, Brave, Firefox)", v["extension_enabled"], 0)
+        check(box, "Catch downloads started in the browser (Chrome, Edge, Brave, Firefox)", v["extension_enabled"], 0)
         ttk.Label(box, text=status or "", style="Ok.TLabel" if "Connected" in status else "Hint.TLabel").grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(2, GAP))
         ttk.Label(box, wraplength=470, justify="left", text=(

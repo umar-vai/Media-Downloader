@@ -16,10 +16,31 @@ from theme import C
 from ui_kit import px
 
 
+_root: tk.Misc | None = None
+
+
+def sysfont(bold: bool = False) -> Any:
+    """The Windows message font (Segoe UI 9 pt), the one every native control uses."""
+    import native
+
+    if _root is None:
+        return ("Segoe UI", 9, "bold" if bold else "normal")
+    return native.font(_root, 0, bold)
+
+
 def setup_style(root: tk.Misc) -> ttk.Style:
     import native
 
+    global _root
+    _root = root
     style = native.setup(root)  # native Windows controls in the light theme
+    if native.NATIVE:
+        # Leave the list views to the "vista" theme: real Windows column headers, scroll bars,
+        # sunken borders and the system highlight colour, like Explorer / IDM / NDM.
+        row = px(20)
+        style.configure("MD.Treeview", rowheight=row, font=sysfont())
+        style.configure("Side.Treeview", rowheight=row, font=sysfont(), indent=px(19))
+        return style
     body = ui.font(13)
     heading = ui.font(12, True)
     style.configure("MD.Treeview", background=C["SURFACE"], fieldbackground=C["SURFACE"], foreground=C["TEXT"],
@@ -73,7 +94,7 @@ class Tooltip:
         tip = tk.Toplevel(self.widget)
         tip.wm_overrideredirect(True)
         tip.configure(bg=C["BORDER"])
-        tk.Label(tip, text=self.text, bg=C["SURFACE"], fg=C["TEXT"], font=ui.font(12), padx=px(8), pady=px(4),
+        tk.Label(tip, text=self.text, bg=C["SURFACE"], fg=C["TEXT"], font=sysfont(), padx=px(5), pady=px(2),
                  justify="left").pack(padx=1, pady=1)
         x = self.widget.winfo_rootx() + px(6)
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + px(4)
@@ -94,8 +115,9 @@ class ToolButton(tk.Label):
         size = px(28)
         self._on = icons.tool(icon, size)
         self._off = icons.tool(icon, size, disabled=True)
-        super().__init__(master, text=text, image=self._on, compound="top", bg=C["SURFACE"], fg=C["TEXT"],
-                         font=ui.font(12), padx=px(9), pady=px(5), bd=0, highlightthickness=0)
+        super().__init__(master, text=text, image=self._on, compound="top", bg=C["BG"], fg=C["TEXT"],
+                         font=sysfont(), padx=px(7), pady=px(3), bd=0, highlightthickness=1,
+                         highlightbackground=C["BG"], highlightcolor=C["BG"])
         self.command = command
         self.enabled = True
         self._inside = False
@@ -109,20 +131,26 @@ class ToolButton(tk.Label):
     def _enter(self, _e: Any = None) -> None:
         self._inside = True
         if self.enabled:
-            self.configure(bg=C["TOOL_HOVER"], cursor="hand2")
+            self._paint(C["TOOL_HOVER"], C["TOOL_EDGE"])
+
+    def _paint(self, fill: str, edge: str) -> None:
+        self.configure(bg=fill, highlightbackground=edge, highlightcolor=edge)
 
     def _leave(self, _e: Any = None) -> None:
         self._inside = False
-        self.configure(bg=C["SURFACE"], cursor="")
+        self._paint(C["BG"], C["BG"])
 
     def _press(self, _e: Any = None) -> None:
         if self.enabled:
-            self.configure(bg=C["TOOL_PRESS"])
+            self._paint(C["TOOL_PRESS"], C["TOOL_EDGE"])
 
     def _release(self, _e: Any = None) -> None:
         if not self.enabled:
             return
-        self.configure(bg=C["TOOL_HOVER"] if self._inside else C["SURFACE"])
+        if self._inside:
+            self._paint(C["TOOL_HOVER"], C["TOOL_EDGE"])
+        else:
+            self._paint(C["BG"], C["BG"])
         if self._inside:
             self.command()
 
@@ -131,20 +159,22 @@ class ToolButton(tk.Label):
         if on == self.enabled:
             return
         self.enabled = on
-        self.configure(image=self._on if on else self._off, fg=C["TEXT"] if on else C["FAINT"],
-                       bg=(C["TOOL_HOVER"] if on and self._inside else C["SURFACE"]),
-                       cursor="hand2" if on and self._inside else "")
+        self.configure(image=self._on if on else self._off, fg=C["TEXT"] if on else C["FAINT"])
+        if on and self._inside:
+            self._paint(C["TOOL_HOVER"], C["TOOL_EDGE"])
+        else:
+            self._paint(C["BG"], C["BG"])
 
 
 class Toolbar(tk.Frame):
     def __init__(self, master: tk.Misc, icons: IconSet) -> None:
-        super().__init__(master, bg=C["SURFACE"], highlightthickness=0, bd=0)
+        super().__init__(master, bg=C["BG"], highlightthickness=0, bd=0)
         self.icons = icons
         self.buttons: dict[str, ToolButton] = {}
-        self.inner = tk.Frame(self, bg=C["SURFACE"])
-        self.inner.pack(side="left", padx=px(6), pady=px(4))
-        self.right = tk.Frame(self, bg=C["SURFACE"])
-        self.right.pack(side="right", padx=px(12))
+        self.inner = tk.Frame(self, bg=C["BG"])
+        self.inner.pack(side="left", padx=px(4), pady=px(3))
+        self.right = tk.Frame(self, bg=C["BG"])
+        self.right.pack(side="right", padx=px(8))
 
     def add(self, key: str, text: str, icon: str, command: Callable[[], Any], tip: str = "") -> ToolButton:
         button = ToolButton(self.inner, self.icons, text=text, icon=icon, command=command, tip=tip)
@@ -153,7 +183,7 @@ class Toolbar(tk.Frame):
         return button
 
     def separator(self) -> None:
-        tk.Frame(self.inner, bg=C["BORDER_SOFT"], width=1).pack(side="left", fill="y", padx=px(6), pady=px(8))
+        ttk.Separator(self.inner, orient="vertical").pack(side="left", fill="y", padx=px(4), pady=px(4))
 
 
 class UpdateBadge(tk.Frame):
@@ -165,7 +195,7 @@ class UpdateBadge(tk.Frame):
 
     def __init__(self, master: tk.Misc, icons: IconSet, command: Callable[[], Any],
                  check: Callable[[], Any] | None = None, version: str = "") -> None:
-        super().__init__(master, bg=C["SURFACE"], highlightthickness=0, bd=0)
+        super().__init__(master, bg=C["BG"], highlightthickness=0, bd=0)
         self._open_updates = command
         self._check = check or command
         self.version = version
@@ -173,7 +203,7 @@ class UpdateBadge(tk.Frame):
         self.button = ToolButton(self, icons, text="Updates", icon="update", command=self._clicked,
                                  tip="Check for a new version (one click)")
         self.button.pack(side="top")
-        self.note = tk.Label(self, text="", bg=C["SURFACE"], fg=C["FAINT"], font=ui.font(10), cursor="hand2")
+        self.note = tk.Label(self, text="", bg=C["BG"], fg=C["FAINT"], font=ui.font(10))
         self.note.pack(side="top")
         self.note.bind("<ButtonRelease-1>", lambda _e: self._clicked())
         self.pack(side="right", pady=(px(2), 0))
@@ -239,13 +269,11 @@ TREE_LAYOUT: list[tuple[str, str, str, str]] = [
 
 class CategoryTree(tk.Frame):
     def __init__(self, master: tk.Misc, icons: IconSet, on_select: Callable[[str], None]) -> None:
-        super().__init__(master, bg=C["SIDEBAR"], highlightthickness=0, bd=0)
+        super().__init__(master, bg=C["BG"], highlightthickness=0, bd=0)
         self._on_select = on_select
         self.icons = icons
-        head = tk.Label(self, text="CATEGORIES", bg=C["SIDEBAR"], fg=C["FAINT"], font=ui.font(11, True), anchor="w")
-        head.pack(fill="x", padx=px(14), pady=(px(10), px(4)))
         self.tree = ttk.Treeview(self, show="tree", style="Side.Treeview", selectmode="browse")
-        self.tree.pack(fill="both", expand=True, padx=(px(4), 0))
+        self.tree.pack(fill="both", expand=True, padx=(px(3), 0), pady=(0, px(3)))
         self.tree.column("#0", width=px(200))
         self._labels: dict[str, str] = {}
         size = px(16)
@@ -308,47 +336,17 @@ class CategoryTree(tk.Frame):
 
 
 # --------------------------------------------------------------------------- list header + search
-class SearchBox(tk.Frame):
+class SearchBox(ttk.Frame):
+    """"Search: [__________]" with a standard Windows edit box. Esc clears it."""
+
     def __init__(self, master: tk.Misc, on_change: Callable[[str], None]) -> None:
-        super().__init__(master, bg=C["BORDER"], highlightthickness=0, bd=0)
-        inner = tk.Frame(self, bg=C["SURFACE"])
-        inner.pack(fill="both", expand=True, padx=1, pady=1)
-        tk.Label(inner, text="⌕", bg=C["SURFACE"], fg=C["FAINT"], font=ui.font(15)).pack(side="left",
-                                                                                          padx=(px(8), 0))
+        super().__init__(master)
+        ttk.Label(self, text="Search:").pack(side="left", padx=(0, px(5)))
         self.var = tk.StringVar()
-        self.entry = tk.Entry(inner, textvariable=self.var, bg=C["SURFACE"], fg=C["TEXT"], relief="flat", bd=0,
-                              insertbackground=C["TEXT"], font=ui.font(13), highlightthickness=0,
-                              selectbackground=C["ACCENT"], selectforeground=C["ON_ACCENT"], width=26)
-        self.entry.pack(side="left", fill="x", expand=True, padx=px(6), pady=px(5))
-        self.clear = tk.Label(inner, text="✕", bg=C["SURFACE"], fg=C["FAINT"], font=ui.font(11), cursor="hand2")
-        self.clear.bind("<ButtonRelease-1>", lambda _e: self.var.set(""))
-        self._placeholder = "Search downloads"
-        self._ph = False
-        self.var.trace_add("write", lambda *_a: self._changed(on_change))
-        self.entry.bind("<FocusIn>", lambda _e: self._placeholder_off())
-        self.entry.bind("<FocusOut>", lambda _e: self._placeholder_on())
+        self.entry = ttk.Entry(self, textvariable=self.var, width=28)
+        self.entry.pack(side="left", fill="x", expand=True)
+        self.var.trace_add("write", lambda *_a: on_change(self.var.get()))
         self.entry.bind("<Escape>", lambda _e: self.var.set(""))
-        self._placeholder_on()
-
-    def _placeholder_on(self) -> None:
-        if not self.var.get():
-            self._ph = True
-            self.entry.configure(fg=C["FAINT"])
-            self.var.set(self._placeholder)
-
-    def _placeholder_off(self) -> None:
-        if self._ph:
-            self._ph = False
-            self.var.set("")
-            self.entry.configure(fg=C["TEXT"])
-
-    def _changed(self, callback: Callable[[str], None]) -> None:
-        value = "" if self._ph else self.var.get()
-        if value:
-            self.clear.pack(side="right", padx=(0, px(8)))
-        else:
-            self.clear.pack_forget()
-        callback(value)
 
     def focus(self) -> None:
         self.entry.focus_set()
@@ -360,7 +358,7 @@ class DownloadTable(tk.Frame):
     def __init__(self, master: tk.Misc, icons: IconSet, *, on_select: Callable[[], None],
                  on_open: Callable[[], None], on_context: Callable[[Any, bool], None],
                  on_sort: Callable[[str], None], on_delete: Callable[[], None]) -> None:
-        super().__init__(master, bg=C["SURFACE"], highlightthickness=0, bd=0)
+        super().__init__(master, bg=C["BG"], highlightthickness=0, bd=0)
         self.icons = icons
         data_columns = [key for key in dl.COLUMN_KEYS if key != "name"]
         self.tree = ttk.Treeview(self, columns=data_columns, style="MD.Treeview", selectmode="extended")
@@ -385,9 +383,9 @@ class DownloadTable(tk.Frame):
         self._order: list[str] = []
 
         self.empty = tk.Frame(self.tree, bg=C["SURFACE"])
-        self.empty_title = tk.Label(self.empty, text="", bg=C["SURFACE"], fg=C["TEXT"], font=ui.font(15, True))
+        self.empty_title = tk.Label(self.empty, text="", bg=C["SURFACE"], fg=C["FAINT"], font=sysfont())
         self.empty_title.pack()
-        self.empty_text = tk.Label(self.empty, text="", bg=C["SURFACE"], fg=C["MUTED"], font=ui.font(13),
+        self.empty_text = tk.Label(self.empty, text="", bg=C["SURFACE"], fg=C["FAINT"], font=sysfont(),
                                    justify="center")
         self.empty_text.pack(pady=(px(6), 0))
 
@@ -634,44 +632,44 @@ class DetailsPane(tk.Frame):
               ("website", "Website"), ("quality", "Quality"))
 
     def __init__(self, master: tk.Misc, icons: IconSet, actions: dict[str, Callable[[], Any]]) -> None:
-        super().__init__(master, bg=C["SURFACE"], highlightthickness=0, bd=0)
+        bg = C["BG"]
+        super().__init__(master, bg=bg, highlightthickness=0, bd=0)
         self.icons = icons
-        tk.Frame(self, bg=C["BORDER_SOFT"], height=1).pack(fill="x", side="top")
-        body = tk.Frame(self, bg=C["SURFACE"])
-        body.pack(fill="both", expand=True, padx=px(16), pady=(px(10), px(10)))
+        body = tk.Frame(self, bg=bg)
+        body.pack(fill="both", expand=True, padx=px(10), pady=(px(8), px(8)))
         body.grid_columnconfigure(1, weight=1)
 
-        self.icon = tk.Label(body, bg=C["SURFACE"])
+        self.icon = tk.Label(body, bg=bg)
         self.icon.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, px(12)))
-        top = tk.Frame(body, bg=C["SURFACE"])
+        top = tk.Frame(body, bg=bg)
         top.grid(row=0, column=1, sticky="ew")
         top.grid_columnconfigure(0, weight=1)
-        self.title = tk.Label(top, text="", bg=C["SURFACE"], fg=C["TEXT"], font=ui.font(14, True), anchor="w")
+        self.title = tk.Label(top, text="", bg=bg, fg=C["TEXT"], font=sysfont(True), anchor="w")
         self.title.grid(row=0, column=0, sticky="ew")
-        self.state = tk.Label(top, text="", bg=C["SURFACE"], fg=C["MUTED"], font=ui.font(12, True), anchor="e")
+        self.state = tk.Label(top, text="", bg=bg, fg=C["MUTED"], font=sysfont(), anchor="e")
         self.state.grid(row=0, column=1, sticky="e", padx=(px(12), 0))
         self.bar = ProgressBar(body, height=16)
         self.bar.grid(row=1, column=1, sticky="ew", pady=(px(7), px(6)))
 
-        grid = tk.Frame(body, bg=C["SURFACE"])
+        grid = tk.Frame(body, bg=bg)
         grid.grid(row=2, column=1, sticky="ew")
         self.values: dict[str, tk.Label] = {}
         for index, (key, label) in enumerate(self.FIELDS):
-            tk.Label(grid, text=label, bg=C["SURFACE"], fg=C["FAINT"], font=ui.font(11), anchor="w").grid(
-                row=0, column=index, sticky="w", padx=(0, px(26)))
-            value = tk.Label(grid, text="—", bg=C["SURFACE"], fg=C["TEXT"], font=ui.font(12), anchor="w")
-            value.grid(row=1, column=index, sticky="w", padx=(0, px(26)))
+            tk.Label(grid, text=label + ":", bg=bg, fg=C["FAINT"], font=sysfont(), anchor="w").grid(
+                row=0, column=index, sticky="w", padx=(0, px(20)))
+            value = tk.Label(grid, text="—", bg=bg, fg=C["TEXT"], font=sysfont(), anchor="w")
+            value.grid(row=1, column=index, sticky="w", padx=(0, px(20)))
             self.values[key] = value
-        self.where = tk.Label(body, text="", bg=C["SURFACE"], fg=C["MUTED"], font=ui.font(12), anchor="w")
+        self.where = tk.Label(body, text="", bg=bg, fg=C["MUTED"], font=sysfont(), anchor="w")
         self.where.grid(row=3, column=1, sticky="ew", pady=(px(6), 0))
 
-        buttons = tk.Frame(body, bg=C["SURFACE"])
+        buttons = tk.Frame(body, bg=bg)
         buttons.grid(row=0, column=2, rowspan=4, sticky="ne", padx=(px(18), 0))
         self.buttons: dict[str, ttk.Button] = {}
         for key, text in (("toggle", "Pause"), ("cancel", "Cancel"), ("open", "Open"), ("open_folder", "Open folder"),
                           ("more", "Details…")):
             button = ttk.Button(buttons, text=text, command=actions[key], width=14)
-            button.pack(fill="x", pady=(0, px(5)))
+            button.pack(fill="x", pady=(0, px(3)))
             self.buttons[key] = button
         self._sig: tuple | None = None
         self.show(None, 0, "")
@@ -724,7 +722,7 @@ class DetailsPane(tk.Frame):
         self._sig = sig
         self.icon.configure(image=self.icons.file(row["category"], status, px(28)))
         self.title.configure(text=row["name"])
-        self.state.configure(text=row["status_text"].upper(), fg=colors.get(status, C["ACCENT"]))
+        self.state.configure(text=row["status_text"], fg=colors.get(status, C["TEXT"]))
         bar_color = bar_colors.get(status, WIN_GREEN)
         if switched:  # another download was selected: jump, do not glide
             self.bar.set(row["progress"], bar_color, animate=False)
@@ -749,23 +747,28 @@ class DetailsPane(tk.Frame):
 
 # --------------------------------------------------------------------------- status bar
 class StatusBar(tk.Frame):
+    """A Windows status bar: text panes separated by etched lines, on the window colour."""
+
     def __init__(self, master: tk.Misc) -> None:
-        super().__init__(master, bg=C["HEADING"], highlightthickness=0, bd=0)
-        tk.Frame(self, bg=C["BORDER_SOFT"], height=1).pack(fill="x", side="top")
-        row = tk.Frame(self, bg=C["HEADING"])
+        bg = C["BG"]
+        super().__init__(master, bg=bg, highlightthickness=0, bd=0)
+        ttk.Separator(self, orient="horizontal").pack(fill="x", side="top")
+        row = tk.Frame(self, bg=bg)
         row.pack(fill="x")
-        self.dot = tk.Label(row, text="●", bg=C["HEADING"], fg=C["SUCCESS"], font=ui.font(11))
-        self.dot.pack(side="left", padx=(px(12), px(4)), pady=px(4))
-        self.message = tk.Label(row, text="Ready", bg=C["HEADING"], fg=C["TEXT"], font=ui.font(12), anchor="w")
-        self.message.pack(side="left", fill="x", expand=True)
-        self.version = tk.Label(row, text="", bg=C["HEADING"], fg=C["FAINT"], font=ui.font(12))
-        self.version.pack(side="right", padx=(px(10), px(12)))
-        self.extension = tk.Label(row, text="", bg=C["HEADING"], fg=C["MUTED"], font=ui.font(12))
-        self.extension.pack(side="right", padx=px(10))
-        self.speed = tk.Label(row, text="", bg=C["HEADING"], fg=C["MUTED"], font=ui.font(12, True))
-        self.speed.pack(side="right", padx=px(10))
-        self.summary = tk.Label(row, text="", bg=C["HEADING"], fg=C["MUTED"], font=ui.font(12))
-        self.summary.pack(side="right", padx=px(10))
+
+        def pane() -> tk.Label:
+            label = tk.Label(row, text="", bg=bg, fg=C["TEXT"], font=sysfont())
+            label.pack(side="right", padx=px(8), pady=px(2))
+            ttk.Separator(row, orient="vertical").pack(side="right", fill="y", pady=px(2))
+            return label
+
+        self.dot = tk.Label(row, text="", bg=bg)  # kept for set_message(); a status bar has no dot
+        self.version = pane()
+        self.extension = pane()
+        self.speed = pane()
+        self.summary = pane()
+        self.message = tk.Label(row, text="Ready", bg=bg, fg=C["TEXT"], font=sysfont(), anchor="w")
+        self.message.pack(side="left", fill="x", expand=True, padx=(px(6), px(4)))
 
     def set_message(self, text: str, color: str) -> None:
         self.message.configure(text=text or "Ready")
@@ -774,7 +777,7 @@ class StatusBar(tk.Frame):
     def set_totals(self, summary: str, speed: str) -> None:
         if self.summary.cget("text") != summary:
             self.summary.configure(text=summary)
-        speed = f"↓ {speed}" if speed else ""
+        speed = f"Speed: {speed}" if speed else ""
         if self.speed.cget("text") != speed:
             self.speed.configure(text=speed)
 
