@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-EXTENSION_VERSION = "2.2.0"
+EXTENSION_VERSION = "2.3.0"
 
 MANIFEST = {
     "manifest_version": 3,
@@ -174,10 +174,29 @@ async function postToApp(path, body) {
       body: JSON.stringify(body || {}),
     });
     const j = await r.json().catch(() => ({}));
-    return {ok: r.ok && !!j.ok, status: r.status};
+    return {...j, ok: r.ok && !!j.ok, status: r.status};
   } catch (e) {
-    return {ok: false};
+    return {ok: false, error: "Could not reach Media Downloader."};
   }
+}
+
+// "Which qualities does this video have?" - the app reads the video's own link (a reel, post,
+// watch page...) with yt-dlp, using this browser's cookies for logged-in sites.
+const analyzeCache = new Map(); // url -> {time, promise}
+function analyzeVideo(url, pageUrl) {
+  const hit = analyzeCache.get(url);
+  if (hit && Date.now() - hit.time < 10 * 60 * 1000) return hit.promise;
+  const promise = (async () => {
+    if (!(await getToken())) return {ok: false, error: "Pair the extension first: paste the token from Media Downloader → Settings → Browser into the extension options."};
+    let cookies = [];
+    for (const source of [...new Set([url, pageUrl].filter(Boolean))]) cookies = cookies.concat(await cookiesFor(source));
+    const result = await postToApp("/analyze", {url, pageUrl: pageUrl || "", cookies});
+    if (!result.ok) analyzeCache.delete(url);
+    return result;
+  })();
+  analyzeCache.set(url, {time: Date.now(), promise});
+  if (analyzeCache.size > 60) analyzeCache.delete(analyzeCache.keys().next().value);
+  return promise;
 }
 
 // Tell the app this browser has the extension, so a link pasted into the app can be opened
@@ -656,6 +675,11 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === "md-menu") { menuFor(tabId).then(sendResponse); return true; }
+  if (msg.type === "md-analyze") {
+    if (!/^https?:/i.test(msg.url || "")) { sendResponse({ok: false, error: "No link for this video."}); return; }
+    analyzeVideo(msg.url, msg.pageUrl || (tab && tab.url) || "").then(sendResponse);
+    return true;
+  }
   if (msg.type === "md-send") {
     const item = msg.item || {};
     const pageUrl = item.pageUrl || (tab && tab.url) || msg.pageUrl || "";
@@ -717,6 +741,51 @@ CONTENT_JS = r"""
   let target = null, shownUntil = 0, menuOpen = false, timer = 0, lastMove = 0, count = 0;
   let pointerX = -1, pointerY = -1, pointerAt = 0;
   let medias = [];
+
+  // ---------------------------------------------------------------- the video's own link
+  // Facebook, Instagram, YouTube, X, TikTok... stream videos in small byte-range pieces
+  // (often video and audio apart), which cannot be downloaded as one file. Their own link
+  // (the reel/post/watch page) can: the app reads it and lists every quality with sound.
+  const SITES = [
+    {re: /(^|\.)youtube(-nocookie)?\.com$|(^|\.)youtu\.be$/, link: /\/watch\?(.*&)?v=|\/shorts\/|\/live\/|\/embed\//, page: /\/watch\?|\/shorts\/|\/live\/|\/embed\//},
+    {re: /(^|\.)facebook\.com$|(^|\.)fb\.watch$/, link: /\/reel\/\d|\/videos\/|\/watch\/?\?v=|\/share\/[rv]\/|story_fbid=|\/posts\//, page: /\/reel\/\d|\/videos\/|\/watch\/?\?v=|story_fbid=/},
+    {re: /(^|\.)instagram\.com$/, link: /\/(p|reel|reels|tv)\/[\w-]+/, page: /\/(p|reel|reels|tv)\/[\w-]+/},
+    {re: /(^|\.)(twitter|x)\.com$/, link: /\/status\/\d+/, page: /\/status\/\d+/},
+    {re: /(^|\.)tiktok\.com$/, link: /\/video\/\d+|\/photo\/\d+/, page: /\/video\/\d+/},
+    {re: /(^|\.)threads\.(net|com)$/, link: /\/post\/[\w-]+/, page: /\/post\/[\w-]+/},
+    {re: /(^|\.)reddit\.com$/, link: /\/comments\/\w+/, page: /\/comments\/\w+/},
+    {re: /(^|\.)(vimeo|dailymotion|twitch|bilibili|pinterest|linkedin|rumble|streamable|vk|ok|soundcloud|bitchute|9gag|imgur|tumblr|snapchat|likee|kick)\.(com|tv|ru|be|tw)$/, link: null, page: null},
+  ];
+
+  const FEED_ITEMS = "ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer, ytd-reel-item-renderer, ytd-playlist-panel-video-renderer";
+
+  function siteFor(host) {
+    return SITES.find(site => site.re.test(host)) || null;
+  }
+
+  function videoLink(el) {
+    const site = siteFor(location.hostname.toLowerCase());
+    const here = location.href.split("#")[0];
+    if (!site) return {url: here, known: false};
+    // On a video's own page (a watch page, a reel, a post, an embed) the address is the link,
+    // unless this video is one of the previews in a list on that page.
+    const inList = el && el.closest && el.closest(FEED_ITEMS);
+    if (!site.link || (site.page && site.page.test(location.pathname + location.search) && !inList)) {
+      return {url: here, known: true};
+    }
+    // Feeds show many videos: take the link of the post that holds this one.
+    let node = el;
+    for (let depth = 0; node && depth < 25; depth++, node = node.parentElement) {
+      const anchors = node.querySelectorAll ? node.querySelectorAll("a[href]") : [];
+      for (const a of anchors) {
+        const href = a.href || "";
+        if (site.link.test(href) && !/[?&](comment_id|reply_comment_id)=/.test(href)) {
+          try { const u = new URL(href, location.href); u.hash = ""; return {url: u.href, known: true}; } catch (e) {}
+        }
+      }
+    }
+    return {url: here, known: true};
+  }
 
   function ask(message) {
     return new Promise(resolve => {
@@ -780,6 +849,7 @@ CONTENT_JS = r"""
   .sep{height:1px;background:#22304f;margin:6px 0}
   .muted{padding:10px 12px;color:#8ea0c4;line-height:1.4}
   .foot{color:#9fb0d2}
+  .title{padding:2px 12px 6px;color:#cfd8ee;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 </style>
 <div class="btn" part="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="m6.5 10 5.5 5.5 5.5-5.5"/><path d="M5 20h14"/></svg><span class="text">Download</span><span class="count"></span></div>
 <div class="menu" role="menu"></div>`;
@@ -873,18 +943,103 @@ CONTENT_JS = r"""
     flash(result && result.ok ? "✓ Sent to Media Downloader" : ((result && result.error) || "Could not send"), 3500);
   }
 
+  let renderSeq = 0;
+
+  function groupHead(label, metaText, current) {
+    const head = document.createElement("div");
+    head.className = "group" + (current ? " now" : "");
+    const name = document.createElement("span"); name.textContent = label;
+    const meta = document.createElement("span"); meta.className = "meta"; meta.textContent = metaText || "";
+    head.append(name, meta);
+    return head;
+  }
+
+  function fmtLength(sec) {
+    sec = Math.round(Number(sec) || 0);
+    if (!sec) return "";
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
+  }
+
+  // "This video": the qualities the app finds for the video's own link (works on Facebook,
+  // Instagram, YouTube, X, TikTok and the other sites yt-dlp supports).
+  function fillVideoBox(box, video, seq, auto) {
+    box.textContent = "";
+    let host = "";
+    try { host = new URL(video.url).hostname.replace(/^www\./, ""); } catch (e) {}
+    box.appendChild(groupHead("This video", host, video.known));
+    const body = document.createElement("div");
+    box.appendChild(body);
+    const sendVideo = (quality, mode, title) => send({type: "md-send", item: {
+      url: video.url, referer: location.href, pageUrl: video.url, quality, mode: mode || "", title: title || "",
+    }});
+
+    async function load() {
+      body.textContent = "";
+      const wait = document.createElement("div");
+      wait.className = "muted";
+      wait.textContent = "Finding qualities…";
+      body.appendChild(wait);
+      place();
+      const r = await ask({type: "md-analyze", url: video.url, pageUrl: location.href});
+      if (!menuOpen || seq !== renderSeq) return;
+      body.textContent = "";
+      if (r && r.ok) {
+        const title = String(r.title || "");
+        if (title) {
+          const t = document.createElement("div");
+          t.className = "title";
+          t.textContent = title + (r.duration ? "  ·  " + fmtLength(r.duration) : "");
+          t.title = title;
+          body.appendChild(t);
+        }
+        const qualities = Array.isArray(r.qualities) ? r.qualities : [];
+        const best = row("best", "Best quality" + (qualities[0] ? " · " + qualities[0] : ""), "video + audio");
+        best.addEventListener("click", () => sendVideo("Best available", "", title));
+        body.appendChild(best);
+        for (const q of qualities) {
+          const el = row("", q, "");
+          el.addEventListener("click", () => sendVideo(q, "", title));
+          body.appendChild(el);
+        }
+        const audio = row("", "Audio only", "MP3");
+        audio.addEventListener("click", () => sendVideo("Best available", "Audio", title));
+        body.appendChild(audio);
+      } else {
+        const fail = row("disabled", "Could not read this video", (r && r.error) || "");
+        fail.title = (r && r.error) || "";
+        body.appendChild(fail);
+        const retry = row("", "Try again", "");
+        retry.addEventListener("click", load);
+        body.appendChild(retry);
+        const anyway = row("", "Send the link to the app anyway", "");
+        anyway.addEventListener("click", () => sendVideo("Best available", "", ""));
+        body.appendChild(anyway);
+      }
+      place();
+    }
+
+    if (auto) load();
+    else {
+      const find = row("best", "Find qualities of this page", "the app reads the link");
+      find.addEventListener("click", load);
+      body.appendChild(find);
+    }
+  }
+
   async function renderMenu() {
+    const seq = ++renderSeq;
     const data = await ask({type: "md-menu"});
-    if (!menuOpen) return;
+    if (!menuOpen || seq !== renderSeq) return;
     menu.textContent = "";
     const groups = (data && data.groups) || [];
+    const video = videoLink(target);
+    const videoBox = document.createElement("div");
+    // Known video sites: their own link is the reliable way, so it comes first.
+    if (video.known) menu.appendChild(videoBox);
     for (const group of groups) {
-      const head = document.createElement("div");
-      head.className = "group" + (group.current ? " now" : "");
-      const name = document.createElement("span"); name.textContent = group.label;
-      const meta = document.createElement("span"); meta.className = "meta"; meta.textContent = group.meta;
-      head.append(name, meta);
-      menu.appendChild(head);
+      if (menu.childNodes.length) menu.appendChild(Object.assign(document.createElement("div"), {className: "sep"}));
+      menu.appendChild(groupHead(group.label, group.meta, group.current && !video.known));
       for (const item of group.items) {
         const el = row((item.best ? "best " : "") + (item.disabled ? "disabled" : ""), item.label, item.detail);
         if (!item.disabled) el.addEventListener("click", () => send({type: "md-send", item}));
@@ -893,16 +1048,17 @@ CONTENT_JS = r"""
     }
     const src = target && (target.currentSrc || target.src);
     if (src && /^https?:/i.test(src) && !groups.some(g => g.items.some(i => i.url === src))) {
-      if (groups.length) menu.appendChild(Object.assign(document.createElement("div"), {className: "sep"}));
+      if (menu.childNodes.length) menu.appendChild(Object.assign(document.createElement("div"), {className: "sep"}));
       const el = row("best", "This " + (target.tagName === "AUDIO" ? "audio" : "video") + " file", "");
       el.addEventListener("click", () => send({type: "md-send", item: {url: src, referer: location.href, quality: "Best available", mode: target.tagName === "AUDIO" ? "Audio" : ""}}));
       menu.appendChild(el);
-    } else if (!groups.length) {
-      const note = document.createElement("div");
-      note.className = "muted";
-      note.textContent = "No stream captured yet. Start playing the video (or pick a server/Sub/Dub), then open this menu again.";
-      menu.appendChild(note);
     }
+    if (!video.known) {
+      if (menu.childNodes.length) menu.appendChild(Object.assign(document.createElement("div"), {className: "sep"}));
+      menu.appendChild(videoBox);
+    }
+    // Look the qualities up straight away on video sites, or when nothing else was captured.
+    fillVideoBox(videoBox, video, seq, video.known || (!groups.length && !src));
     menu.appendChild(Object.assign(document.createElement("div"), {className: "sep"}));
     const page = row("foot", "Send page link instead", "app finds the best quality");
     page.addEventListener("click", () => send({type: "md-send-page"}));

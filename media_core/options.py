@@ -48,12 +48,15 @@ def set_request_context(
     referer: str = "",
     headers: dict[str, Any] | None = None,
     skip_existing: bool | None = None,
+    allow_browser_bridge: bool = True,
 ) -> None:
     """Per-thread overrides (cookies/referer/headers sent by the browser extension for one download).
 
     ``skip_existing=False`` forces a fresh download (History > Redownload) even when the
-    "skip files that already exist" setting is on."""
+    "skip files that already exist" setting is on. ``allow_browser_bridge=False`` keeps a
+    quick lookup (the extension asking for a video's qualities) from opening a browser tab."""
     _LOCAL.skip_existing = skip_existing
+    _LOCAL.allow_browser_bridge = bool(allow_browser_bridge)
     _LOCAL.cookiefile = str(cookiefile or "")
     _LOCAL.referer = str(referer or "")
     clean: dict[str, str] = {}
@@ -70,6 +73,13 @@ def skip_existing() -> bool:
     if override is not None:
         return bool(override)
     return bool(get("skip_existing", True))
+
+
+def browser_bridge() -> Any:
+    """The app's "open this link in the user's browser" resolver, unless disabled for this thread."""
+    if not getattr(_LOCAL, "allow_browser_bridge", True):
+        return None
+    return get("browser_bridge")
 
 
 def clear_request_context() -> None:

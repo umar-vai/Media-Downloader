@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tempfile
 import threading
 import unittest
 import urllib.request
@@ -78,6 +79,55 @@ class BrowserBridgeServerTests(unittest.TestCase):
         self.assertIsNone(self.server.resolve_in_browser("https://a.example/ep", opener=lambda _u: None, cancel_event=cancel, timeout=5))
 
 
+class AnalyzeEndpointTests(unittest.TestCase):
+    """The extension asks the app which qualities a video link (reel, post, watch page) has."""
+
+    def test_analyze_route_returns_the_app_answer(self) -> None:
+        seen: list[dict] = []
+
+        def on_analyze(data: dict) -> dict:
+            seen.append(data)
+            return {"ok": True, "title": "Reel", "qualities": ["1080p", "720p"]}
+
+        server = ExtensionServer(token=TOKEN, on_download=lambda _d: True, app_version="t", on_analyze=on_analyze)
+        self.assertTrue(server.start())
+        self.addCleanup(server.stop)
+        status, body = _post(server.port, "/analyze", {"url": "https://www.facebook.com/reel/1", "cookies": []})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["qualities"], ["1080p", "720p"])
+        self.assertEqual(seen[0]["url"], "https://www.facebook.com/reel/1")
+        self.assertEqual(_post(server.port, "/analyze", {"url": "javascript:alert(1)"})[0], 400)
+        self.assertEqual(_post(server.port, "/analyze", {"url": "https://x.com/a"}, token="bad")[0], 401)
+
+    def test_app_lookup_uses_browser_cookies_and_never_opens_a_tab(self) -> None:
+        import app as app_module
+
+        captured: dict = {}
+
+        def fake_analyze(url, cancel_event):
+            captured["cookiefile"] = engine_options.cookie_options().get("cookiefile", "")
+            captured["bridge"] = engine_options.browser_bridge()
+            captured["cookie_text"] = Path(captured["cookiefile"]).read_text(encoding="utf-8")
+            return {"title": "Reel", "duration": 12.0, "platform": "Facebook",
+                    "qualities": ["360p", "720p", "1080p", "Best available"]}, {}
+
+        engine_options.configure(browser_bridge=lambda *_a: {"streams": []})
+        self.addCleanup(lambda: engine_options.configure(browser_bridge=None))
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(app_module, "EXT_COOKIE_DIR", Path(tmp)), \
+                mock.patch.object(app_module, "shared_analyze_url", side_effect=fake_analyze):
+            result = app_module.DownloaderApp._analyze_for_extension(None, {
+                "url": "https://www.facebook.com/reel/1", "pageUrl": "https://www.facebook.com/reel/1",
+                "cookies": [{"domain": ".facebook.com", "name": "c_user", "value": "1", "hostOnly": False}],
+            })
+            left = list(Path(tmp).iterdir())
+        self.assertEqual(result["qualities"], ["1080p", "720p", "360p"])
+        self.assertIn("c_user", captured["cookie_text"])
+        self.assertIsNone(captured["bridge"])
+        self.assertEqual(left, [], "the temporary cookie file is removed")
+        self.assertIsNotNone(engine_options.browser_bridge())
+
+
 class AnalyzeUsesBrowserBridgeTests(unittest.TestCase):
     def tearDown(self) -> None:
         engine_options.configure(browser_bridge=None)
@@ -136,6 +186,11 @@ class ExtensionSourceTests(unittest.TestCase):
         content_js = browser_extension.CONTENT_JS
         self.assertIn("content.fetch", content_js)
         self.assertIn("md-autoplay", content_js)
+        # Universal sites: each video's own link is looked up by the app.
+        self.assertIn("function videoLink(el)", content_js)
+        self.assertIn('"md-analyze"', content_js)
+        self.assertIn('"/analyze"', bg)
+        self.assertNotIn("No stream captured yet", content_js)
 
 
 if __name__ == "__main__":

@@ -75,9 +75,17 @@ class _ExclusiveServer(ThreadingHTTPServer):
 
 
 class ExtensionServer:
-    def __init__(self, *, token: str, on_download: OnDownload, app_version: str) -> None:
+    def __init__(
+        self,
+        *,
+        token: str,
+        on_download: OnDownload,
+        app_version: str,
+        on_analyze: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    ) -> None:
         self.token = token
         self._on_download = on_download
+        self._on_analyze = on_analyze
         self._version = app_version
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -184,7 +192,7 @@ class ExtensionServer:
                     self._send(403, {"ok": False, "error": "forbidden"})
                     return
                 route = urlsplit(self.path).path
-                if route not in {"/download", "/hello", "/resolved"}:
+                if route not in {"/download", "/hello", "/resolved", "/analyze"}:
                     self._send(404, {"ok": False, "error": "not found"})
                     return
                 supplied = self.headers.get("X-MD-Token") or ""
@@ -216,6 +224,16 @@ class ExtensionServer:
                 url = str(data.get("url") or "").strip()
                 if urlsplit(url).scheme.lower() not in {"http", "https"}:
                     self._send(400, {"ok": False, "error": "bad url"})
+                    return
+                if route == "/analyze":
+                    if owner._on_analyze is None:
+                        self._send(404, {"ok": False, "error": "not available"})
+                        return
+                    try:
+                        result = dict(owner._on_analyze(data) or {})
+                    except Exception as exc:  # never leave the extension waiting on an error page
+                        result = {"ok": False, "error": str(exc)[:300] or "Analysis failed."}
+                    self._send(200, result)
                     return
                 try:
                     accepted = bool(owner._on_download(data))

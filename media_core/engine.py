@@ -259,7 +259,7 @@ def analyze_url(
                 errors.append(f"Browser session {index}: {str(exc).strip()}")
 
     if not info:
-        bridge = engine_options.get("browser_bridge")
+        bridge = engine_options.browser_bridge()
         if callable(bridge):
             _check_cancel(cancel_event)
             if on_status:

@@ -1750,6 +1750,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 token=str(self.settings.get("extension_token") or ""),
                 on_download=lambda data: bool(self.events.put(("external_download", dict(data))) or True),
                 app_version=APP_VERSION,
+                on_analyze=self._analyze_for_extension,
             )
             if server.start():
                 self.extension_server = server
@@ -1818,6 +1819,49 @@ class DownloaderApp(UIMixin, ctk.CTk):
         message = f"Added {len(urls)} link{'s' if len(urls) != 1 else ''} from the clipboard"
         if self.tray is not None:
             self.tray.notify(message, "Media Downloader")
+
+    def _analyze_for_extension(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Answer the extension's "which qualities does this video have?" (runs on the local
+        server's thread). Uses the browser's own cookies, so logged-in Facebook/Instagram
+        posts work, and never opens a browser tab."""
+        url = str(data.get("url") or "").strip()
+        page_url = str(data.get("pageUrl") or "").strip()
+        cookie_path: Path | None = None
+        cookies = data.get("cookies")
+        if isinstance(cookies, list) and cookies:
+            try:
+                cookie_path = write_cookie_file(EXT_COOKIE_DIR, uuid.uuid4().hex, cookies[:2000])
+            except OSError:
+                cookie_path = None
+        engine_options.set_request_context(
+            cookiefile=str(cookie_path or ""),
+            referer=page_url if page_url.startswith(("http://", "https://")) else "",
+            allow_browser_bridge=False,
+        )
+        try:
+            summary, _info = shared_analyze_url(url, cancel_event=threading.Event())
+        except Exception as exc:
+            LOGGER.info("Extension analysis failed url=%s: %s", url, exc)
+            message = " ".join(str(exc).split())
+            return {"ok": False, "error": message[:240] or "This video could not be read."}
+        finally:
+            engine_options.clear_request_context()
+            if cookie_path is not None:
+                try:
+                    cookie_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        heights = sorted(
+            {int(q[:-1]) for q in summary.get("qualities") or [] if str(q).endswith("p") and str(q)[:-1].isdigit()},
+            reverse=True,
+        )
+        return {
+            "ok": True,
+            "title": str(summary.get("title") or ""),
+            "duration": float(summary.get("duration") or 0),
+            "platform": str(summary.get("platform") or ""),
+            "qualities": [f"{h}p" for h in heights],
+        }
 
     def _handle_external_download(self, data: dict[str, Any]) -> None:
         url = str(data.get("url") or "").strip()
