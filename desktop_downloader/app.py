@@ -21,7 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-import customtkinter as ctk
+import tkinter as tk
 from PIL import Image
 from tkinter import filedialog, messagebox
 
@@ -144,8 +144,44 @@ SUCCESS = ui.SUCCESS
 WARNING = ui.WARNING
 DANGER = ui.DANGER
 
-ctk.set_appearance_mode("dark" if theme.IS_DARK else "light")
-ctk.set_default_color_theme("blue")
+
+
+def _enable_dpi_awareness() -> None:
+    """Draw at the real display resolution (no blurry bitmap scaling) on Windows."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor aware
+    except Exception:
+        try:
+            import ctypes
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+def _fit_screen(root: tk.Misc, width: int, height: int) -> tuple[int, int]:
+    """A size in 96-dpi pixels, scaled for the display and kept inside the screen."""
+    w, h = ui.px(width), ui.px(height)
+    return min(w, root.winfo_screenwidth() - 40), min(h, root.winfo_screenheight() - 80)
+
+
+def _dark_title_bar(window: tk.Misc, dark: bool) -> None:
+    """Windows 10/11: a dark title bar for the dark theme (DWMWA_USE_IMMERSIVE_DARK_MODE)."""
+    if os.name != "nt" or not dark:
+        return
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+        value = ctypes.c_int(1)
+        for attribute in (20, 19):
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(value),
+                                                          ctypes.sizeof(value)) == 0:
+                break
+    except Exception:
+        pass
+
 
 LOGGER = get_logger("main")
 
@@ -362,7 +398,7 @@ def get_bundled_updater_path() -> Path | None:
     return candidate if candidate.exists() else None
 
 
-class DownloaderApp(UIMixin, ctk.CTk):
+class DownloaderApp(UIMixin, tk.Tk):
     def __init__(self) -> None:
         if os.name == "nt":
             try:  # own taskbar identity so the download icon shows (and pins) instead of python's
@@ -370,6 +406,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
             except Exception:
                 pass
+        _enable_dpi_awareness()
         super().__init__()
         self.title(APP_NAME)
         self._apply_window_icon()
@@ -377,9 +414,12 @@ class DownloaderApp(UIMixin, ctk.CTk):
         if self._start_minimized:
             self.withdraw()  # launched by Windows at sign-in: go straight to the tray
         self.after(400, self._init_tray)
-        self.geometry("1180x780")
-        self.minsize(900, 560)
-        self.configure(fg_color=BG)
+        ui.init(self)  # display scaling, before any size below
+        width, height = _fit_screen(self, 1180, 780)
+        self.geometry(f"{width}x{height}")
+        self.minsize(*_fit_screen(self, 900, 560))
+        self.configure(bg=BG)
+        self.after(0, lambda: _dark_title_bar(self, theme.IS_DARK))
         self.protocol("WM_DELETE_WINDOW", self._close_app)
 
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -434,19 +474,19 @@ class DownloaderApp(UIMixin, ctk.CTk):
         self.update_downloading = False
         self.update_cancel_event: threading.Event | None = None
 
-        self.url_var = ctk.StringVar()
-        self.name_var = ctk.StringVar()
-        self.open_editor_after_var = ctk.BooleanVar(value=bool(self.settings.get("open_editor_after_download", False)))
+        self.url_var = tk.StringVar()
+        self.name_var = tk.StringVar()
+        self.open_editor_after_var = tk.BooleanVar(value=bool(self.settings.get("open_editor_after_download", False)))
         self.url_auto_after_id: str | None = None
         self.last_analyzed_url = ""
         self.update_expanded = False
-        self.mode_var = ctk.StringVar(value=str(self.settings.get("default_mode") or "Video"))
-        self.video_quality_var = ctk.StringVar(value=str(self.settings.get("video_quality") or "720p"))
-        self.audio_format_var = ctk.StringVar(value=str(self.settings.get("audio_format") or "MP3"))
-        self.audio_quality_var = ctk.StringVar(value=str(self.settings.get("audio_quality") or "192"))
-        self.download_dir_var = ctk.StringVar(value=str(self.download_dir))
-        self.auto_check_updates_var = ctk.BooleanVar(value=bool(self.settings.get("auto_check_updates", True)))
-        self.auto_download_updates_var = ctk.BooleanVar(value=bool(self.settings.get("auto_download_updates", False)))
+        self.mode_var = tk.StringVar(value=str(self.settings.get("default_mode") or "Video"))
+        self.video_quality_var = tk.StringVar(value=str(self.settings.get("video_quality") or "720p"))
+        self.audio_format_var = tk.StringVar(value=str(self.settings.get("audio_format") or "MP3"))
+        self.audio_quality_var = tk.StringVar(value=str(self.settings.get("audio_quality") or "192"))
+        self.download_dir_var = tk.StringVar(value=str(self.download_dir))
+        self.auto_check_updates_var = tk.BooleanVar(value=bool(self.settings.get("auto_check_updates", True)))
+        self.auto_download_updates_var = tk.BooleanVar(value=bool(self.settings.get("auto_download_updates", False)))
 
         self._center_window()
         self._build_ui()
@@ -483,8 +523,6 @@ class DownloaderApp(UIMixin, ctk.CTk):
                 pass
 
         apply()
-        # CustomTkinter swaps in its own icon shortly after start-up; set ours again afterwards.
-        self.after(250, apply)
 
     # ------------------------------------------------------- tray / background
     def _init_tray(self) -> None:
@@ -596,7 +634,7 @@ class DownloaderApp(UIMixin, ctk.CTk):
 
     def _center_window(self) -> None:
         self.update_idletasks()
-        width, height = 1180, 780
+        width, height = _fit_screen(self, 1180, 780)
         x = max(0, (self.winfo_screenwidth() - width) // 2)
         y = max(0, (self.winfo_screenheight() - height) // 2 - 20)
         self.geometry(f"{width}x{height}+{x}+{y}")

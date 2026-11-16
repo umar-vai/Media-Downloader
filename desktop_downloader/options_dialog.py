@@ -160,7 +160,7 @@ class OptionsDialog(native.Dialog):
         for name in TABS:
             page = ttk.Frame(self.tabs, padding=(PAD, PAD, PAD, PAD))
             page.grid_columnconfigure(0, weight=1)
-            self.tabs.add(page, text=f"  {name}  ")
+            self.tabs.add(page, text=name)
             self._pages[name] = page
         self._build_general(self._pages["General"])
         self._build_downloads(self._pages["Downloads"])

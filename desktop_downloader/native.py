@@ -29,12 +29,15 @@ def setup(root: tk.Misc) -> ttk.Style:
     names = style.theme_names()
     if NATIVE and "vista" in names:
         style.theme_use("vista")
+        # Standard Windows tab spacing (the labels carry no padding spaces of their own).
+        style.configure("TNotebook.Tab", padding=(8, 2))
     else:
         style.theme_use("clam")
         _dark_widgets(style)
     bg = dialog_bg(root)
     style.configure("Hint.TLabel", foreground=C["MUTED"])
-    style.configure("Title.TLabel", font=_font(root, 2, bold=True))
+    # Classic dialogs: headings are the system font in bold, not a larger size.
+    style.configure("Title.TLabel", font=_font(root, 0, bold=True))
     style.configure("Big.TLabel", font=_font(root, 5, bold=True))
     style.configure("Error.TLabel", foreground=C["DANGER"])
     style.configure("Ok.TLabel", foreground=C["SUCCESS"])

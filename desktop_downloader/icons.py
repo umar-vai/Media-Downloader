@@ -108,71 +108,76 @@ def _badge(d: ImageDraw.ImageDraw, u: float, cx: float, cy: float, r: float, fil
 
 
 # ------------------------------------------------------------------ toolbar icons
+# Small, flat glyphs in the spirit of a classic Windows toolbar: one shape, one plain colour,
+# no coloured discs or badges behind them.
+TOOL_GREEN = "#2E8B3E"
+TOOL_RED = "#C42B1C"
+TOOL_BLUE = "#2F6FBA"
+
+
+def _page(d: ImageDraw.ImageDraw, u: float, x0: float, y0: float, x1: float, y1: float, ink: str,
+          fill: str = "#FFFFFF") -> None:
+    """A sheet of paper with a folded corner, drawn as an outline."""
+    fold = (x1 - x0) * 0.32
+    pts = [(x0, y0), (x1 - fold, y0), (x1, y0 + fold), (x1, y1), (x0, y1)]
+    d.polygon([(px_ * u, py_ * u) for px_, py_ in pts], fill=fill, outline=ink, width=max(1, int(0.07 * u)))
+    _line(d, u, [(x1 - fold, y0), (x1 - fold, y0 + fold), (x1, y0 + fold)], ink, 0.06)
+
+
 def _tool_painter(name: str, ink: str) -> Painter:
     def paint(d: ImageDraw.ImageDraw, u: float) -> None:
         if name == "add":
-            _circle(d, u, 0.5, 0.5, 0.44, BLUE)
-            _line(d, u, [(0.5, 0.27), (0.5, 0.73)], WHITE, 0.1)
-            _line(d, u, [(0.27, 0.5), (0.73, 0.5)], WHITE, 0.1)
+            _page(d, u, 0.14, 0.06, 0.74, 0.94, ink)
+            _line(d, u, [(0.72, 0.42), (0.72, 0.94)], TOOL_GREEN, 0.15)
+            _line(d, u, [(0.46, 0.68), (0.98, 0.68)], TOOL_GREEN, 0.15)
+        elif name == "batch":
+            _page(d, u, 0.30, 0.04, 0.92, 0.74, ink)
+            _page(d, u, 0.10, 0.24, 0.72, 0.96, ink)
+            _lines(d, u, 0.22, 0.52, 0.36, 0.14, 3, ink, 0.06)
         elif name == "resume":
-            _circle(d, u, 0.5, 0.5, 0.44, GREEN)
-            _play(d, u, 0.53, 0.5, 0.42, WHITE)
+            _poly(d, u, [(0.22, 0.10), (0.22, 0.90), (0.86, 0.50)], TOOL_GREEN)
         elif name == "stop":
-            _circle(d, u, 0.5, 0.5, 0.44, ORANGE)
-            _pause(d, u, 0.5, 0.5, 0.46, WHITE)
-        elif name == "stop_all":
-            _circle(d, u, 0.62, 0.38, 0.32, "#F59E0B")
-            _circle(d, u, 0.42, 0.58, 0.38, WHITE)
-            _circle(d, u, 0.42, 0.58, 0.33, ORANGE)
-            _pause(d, u, 0.42, 0.58, 0.36, WHITE)
+            _rrect(d, u, 0.18, 0.18, 0.82, 0.82, 0.05, TOOL_RED)
+        elif name == "queue_start":
+            _poly(d, u, [(0.06, 0.16), (0.06, 0.84), (0.52, 0.50)], TOOL_GREEN)
+            _poly(d, u, [(0.48, 0.16), (0.48, 0.84), (0.94, 0.50)], TOOL_GREEN)
+        elif name in {"stop_all", "queue_stop"}:
+            _rrect(d, u, 0.34, 0.08, 0.92, 0.66, 0.04, "#E08A80")
+            _rrect(d, u, 0.08, 0.34, 0.66, 0.92, 0.04, TOOL_RED)
         elif name == "delete":
-            _trash(d, u, 0.16, 0.08, 0.68, RED)
+            _line(d, u, [(0.18, 0.18), (0.82, 0.82)], TOOL_RED, 0.17)
+            _line(d, u, [(0.82, 0.18), (0.18, 0.82)], TOOL_RED, 0.17)
         elif name == "delete_done":
-            _trash(d, u, 0.06, 0.06, 0.62, RED)
-            _badge(d, u, 0.72, 0.72, 0.22, GREEN, WHITE)
-            _check(d, u, 0.72, 0.72, 0.24, WHITE, 0.07)
+            _line(d, u, [(0.08, 0.08), (0.62, 0.62)], TOOL_RED, 0.15)
+            _line(d, u, [(0.62, 0.08), (0.08, 0.62)], TOOL_RED, 0.15)
+            _check(d, u, 0.70, 0.74, 0.46, TOOL_GREEN, 0.13)
         elif name == "settings":
             cx = cy = 0.5
             for i in range(8):
                 angle = i * math.pi / 4
                 ca, sa = math.cos(angle), math.sin(angle)
                 pts = []
-                for dx, dy in ((-0.08, 0.30), (0.08, 0.30), (0.07, 0.46), (-0.07, 0.46)):
+                for dx, dy in ((-0.09, 0.28), (0.09, 0.28), (0.08, 0.46), (-0.08, 0.46)):
                     pts.append((cx + dx * ca - dy * sa, cy + dx * sa + dy * ca))
                 _poly(d, u, pts, ink)
             _circle(d, u, cx, cy, 0.33, ink)
             _circle(d, u, cx, cy, 0.13, "#00000000")
-        elif name == "batch":
-            _rrect(d, u, 0.26, 0.08, 0.92, 0.70, 0.09, "#A78BFA")
-            _rrect(d, u, 0.08, 0.24, 0.74, 0.92, 0.09, VIOLET)
-            _lines(d, u, 0.2, 0.44, 0.42, 0.14, 3, WHITE, 0.065)
-        elif name == "queue_start":
-            _lines(d, u, 0.08, 0.2, 0.56, 0.2, 3, ink, 0.09)
-            _badge(d, u, 0.7, 0.7, 0.26, GREEN, WHITE)
-            _play(d, u, 0.72, 0.7, 0.26, WHITE)
-        elif name == "queue_stop":
-            _lines(d, u, 0.08, 0.2, 0.56, 0.2, 3, ink, 0.09)
-            _badge(d, u, 0.7, 0.7, 0.26, RED, WHITE)
-            _rrect(d, u, 0.61, 0.61, 0.79, 0.79, 0.03, WHITE)
         elif name == "browser":
-            _circle(d, u, 0.5, 0.5, 0.44, SKY)
-            _circle(d, u, 0.5, 0.5, 0.34, None, WHITE, 0.06)
-            d.ellipse(_box(u, 0.34, 0.06, 0.66, 0.94), outline=WHITE, width=int(0.06 * u))
-            _line(d, u, [(0.08, 0.5), (0.92, 0.5)], WHITE, 0.06)
-            _line(d, u, [(0.16, 0.3), (0.84, 0.3)], WHITE, 0.05)
-            _line(d, u, [(0.16, 0.7), (0.84, 0.7)], WHITE, 0.05)
+            _circle(d, u, 0.5, 0.5, 0.43, None, TOOL_BLUE, 0.08)
+            d.ellipse(_box(u, 0.31, 0.07, 0.69, 0.93), outline=TOOL_BLUE, width=max(1, int(0.07 * u)))
+            _line(d, u, [(0.07, 0.5), (0.93, 0.5)], TOOL_BLUE, 0.07)
         elif name == "editor":
-            _rrect(d, u, 0.06, 0.16, 0.94, 0.84, 0.1, TEAL)
-            for fx in (0.14, 0.32, 0.5, 0.68, 0.86):
-                _rrect(d, u, fx - 0.05, 0.21, fx + 0.05, 0.29, 0.02, WHITE)
-                _rrect(d, u, fx - 0.05, 0.71, fx + 0.05, 0.79, 0.02, WHITE)
-            _play(d, u, 0.52, 0.5, 0.3, WHITE)
+            _rrect(d, u, 0.06, 0.18, 0.94, 0.82, 0.06, ink)
+            for fx in (0.18, 0.39, 0.61, 0.82):
+                _rrect(d, u, fx - 0.06, 0.24, fx + 0.06, 0.32, 0.01, WHITE)
+                _rrect(d, u, fx - 0.06, 0.68, fx + 0.06, 0.76, 0.01, WHITE)
+            _rrect(d, u, 0.12, 0.38, 0.88, 0.62, 0.02, "#D7E6F5")
         elif name == "folder":
             _folder(d, u, BLUE)
         elif name == "update":
-            _circle(d, u, 0.5, 0.5, 0.44, GREEN)
-            _line(d, u, [(0.5, 0.74), (0.5, 0.3)], WHITE, 0.1)
-            _line(d, u, [(0.3, 0.48), (0.5, 0.27), (0.7, 0.48)], WHITE, 0.1)
+            _line(d, u, [(0.5, 0.08), (0.5, 0.70)], TOOL_GREEN, 0.15)
+            _line(d, u, [(0.20, 0.44), (0.5, 0.76), (0.80, 0.44)], TOOL_GREEN, 0.15)
+            _line(d, u, [(0.12, 0.92), (0.88, 0.92)], ink, 0.08)
         else:
             _circle(d, u, 0.5, 0.5, 0.4, SLATE)
 
@@ -245,27 +250,70 @@ def _file_painter(category: str, state: str, ring: str) -> Painter:
     return paint
 
 
+# Classic Windows folder colours (the manila folder of Explorer's navigation pane).
+FOLDER_BACK = "#DDA82E"
+FOLDER_FRONT = "#F4CF6B"
+
+
+def _plain_folder(d: ImageDraw.ImageDraw, u: float) -> None:
+    _rrect(d, u, 0.06, 0.16, 0.46, 0.32, 0.04, FOLDER_BACK)
+    _rrect(d, u, 0.06, 0.24, 0.94, 0.86, 0.05, FOLDER_BACK)
+    _rrect(d, u, 0.06, 0.36, 0.94, 0.86, 0.05, FOLDER_FRONT)
+
+
 def _tree_painter(name: str, ink: str) -> Painter:
-    colors = {"all": BLUE, "unfinished": ORANGE, "finished": GREEN, "queues": VIOLET}
+    """Sidebar icons in the classic Windows style: a plain folder for the groups and one small,
+    single-purpose glyph per file type, so each category reads at a glance."""
+    line = "#5A5A5A"
+    blue = "#2F6FBA"
 
     def paint(d: ImageDraw.ImageDraw, u: float) -> None:
-        if name in colors:
-            _folder(d, u, colors[name])
-            if name == "finished":
-                _check(d, u, 0.5, 0.6, 0.3, WHITE, 0.09)
-            elif name == "unfinished":
-                _arrow_down(d, u, 0.5, 0.6, 0.34, WHITE, 0.09)
-        elif name == "queue":
+        if name == "queue":
             _lines(d, u, 0.12, 0.25, 0.76, 0.25, 3, ink, 0.1)
-        elif name in CATEGORY_COLORS:
-            _file_painter(name, "", "#00000000")(d, u)
+        elif name == "video":
+            # A film frame: dark strip with sprocket holes and a blue picture area.
+            _rrect(d, u, 0.04, 0.16, 0.96, 0.84, 0.06, "#3C3C3C")
+            for x in (0.1, 0.3, 0.5, 0.7):
+                _rrect(d, u, x, 0.2, x + 0.12, 0.28, 0.01, WHITE)
+                _rrect(d, u, x, 0.72, x + 0.12, 0.8, 0.01, WHITE)
+            _rrect(d, u, 0.1, 0.34, 0.9, 0.66, 0.02, "#5B9BD5")
+            _play(d, u, 0.52, 0.5, 0.26, WHITE)
+        elif name == "audio":
+            # A beamed pair of eighth notes.
+            _circle(d, u, 0.26, 0.78, 0.15, blue)
+            _circle(d, u, 0.74, 0.68, 0.15, blue)
+            _line(d, u, [(0.38, 0.78), (0.38, 0.18)], blue, 0.09)
+            _line(d, u, [(0.86, 0.68), (0.86, 0.08)], blue, 0.09)
+            _poly(d, u, [(0.34, 0.14), (0.9, 0.04), (0.9, 0.2), (0.34, 0.3)], blue)
+        elif name == "compressed":
+            # A zip archive: a yellow box with a zipper down the middle.
+            _rrect(d, u, 0.12, 0.08, 0.88, 0.92, 0.06, FOLDER_FRONT, FOLDER_BACK, 0.06)
+            for i, y in enumerate((0.12, 0.22, 0.32, 0.42)):
+                x = 0.44 if i % 2 else 0.5
+                _rrect(d, u, x, y, x + 0.08, y + 0.08, 0.01, line)
+            _rrect(d, u, 0.4, 0.54, 0.6, 0.74, 0.03, line)
+        elif name == "documents":
+            _page(d, u, 0.16, 0.04, 0.84, 0.96, line)
+            _lines(d, u, 0.28, 0.46, 0.44, 0.14, 3, blue, 0.07)
+        elif name == "programs":
+            # An application window: white body with a blue title bar.
+            _rrect(d, u, 0.06, 0.14, 0.94, 0.86, 0.04, WHITE, line, 0.06)
+            _rrect(d, u, 0.06, 0.14, 0.94, 0.34, 0.04, blue)
+            _rrect(d, u, 0.72, 0.19, 0.86, 0.29, 0.01, WHITE)
+        elif name == "misc":
+            _page(d, u, 0.16, 0.04, 0.84, 0.96, line)
+        elif name == "unfinished":
+            _plain_folder(d, u)
+            _arrow_down(d, u, 0.62, 0.62, 0.42, blue, 0.11)
+        elif name == "finished":
+            _plain_folder(d, u)
+            _check(d, u, 0.6, 0.62, 0.46, "#2E8B3E", 0.11)
         else:
-            _folder(d, u, SLATE)
+            _plain_folder(d, u)
 
     return paint
 
 
-# ------------------------------------------------------------------ cache
 class IconSet:
     """Creates PhotoImages on demand and keeps them alive (Tk drops unreferenced images)."""
 

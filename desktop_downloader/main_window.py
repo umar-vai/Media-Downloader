@@ -37,9 +37,11 @@ def setup_style(root: tk.Misc) -> ttk.Style:
     if native.NATIVE:
         # Leave the list views to the "vista" theme: real Windows column headers, scroll bars,
         # sunken borders and the system highlight colour, like Explorer / IDM / NDM.
-        row = px(20)
+        # Compact rows, like a Windows list view in Details mode (IDM / NDM / Explorer).
+        row = px(18)
         style.configure("MD.Treeview", rowheight=row, font=sysfont())
         style.configure("Side.Treeview", rowheight=row, font=sysfont(), indent=px(19))
+        style.configure("MD.Horizontal.TProgressbar", thickness=px(15))
         return style
     body = ui.font(13)
     heading = ui.font(12, True)
@@ -58,6 +60,9 @@ def setup_style(root: tk.Misc) -> ttk.Style:
     style.map("Side.Treeview", background=[("selected", C["ACCENT_SOFT"])],
               foreground=[("selected", C["TEXT"])])
     style.layout("Side.Treeview", [("Side.Treeview.treearea", {"sticky": "nswe"})])
+
+    style.configure("MD.Horizontal.TProgressbar", troughcolor=C["SURFACE_3"], background=C["SUCCESS"],
+                    bordercolor=C["BORDER"], lightcolor=C["SUCCESS"], darkcolor=C["SUCCESS"], thickness=px(15))
 
     for orient in ("Vertical", "Horizontal"):
         name = f"MD.{orient}.TScrollbar"
@@ -112,11 +117,12 @@ class Tooltip:
 class ToolButton(tk.Label):
     def __init__(self, master: tk.Misc, icons: IconSet, *, text: str, icon: str, command: Callable[[], Any],
                  tip: str = "") -> None:
-        size = px(28)
+        # Small toolbar glyphs with the caption underneath: a compact classic Windows toolbar.
+        size = px(20)
         self._on = icons.tool(icon, size)
         self._off = icons.tool(icon, size, disabled=True)
         super().__init__(master, text=text, image=self._on, compound="top", bg=C["BG"], fg=C["TEXT"],
-                         font=sysfont(), padx=px(7), pady=px(3), bd=0, highlightthickness=1,
+                         font=sysfont(), padx=px(5), pady=px(1), bd=0, highlightthickness=1,
                          highlightbackground=C["BG"], highlightcolor=C["BG"])
         self.command = command
         self.enabled = True
@@ -172,9 +178,21 @@ class Toolbar(tk.Frame):
         self.icons = icons
         self.buttons: dict[str, ToolButton] = {}
         self.inner = tk.Frame(self, bg=C["BG"])
-        self.inner.pack(side="left", padx=px(4), pady=px(3))
+        self.inner.pack(side="left", padx=px(2), pady=px(2))
         self.right = tk.Frame(self, bg=C["BG"])
-        self.right.pack(side="right", padx=px(8))
+        self.right.pack(side="right", padx=px(4))
+        self.bind("<Configure>", lambda _e: self._fit(), add="+")
+
+    def _fit(self) -> None:
+        # In a narrow window the buttons win: optional text on the right (the update note) is
+        # hidden instead of being squeezed into a stray letter.
+        # Measure with the note always counted, so showing/hiding it cannot flip the result.
+        wanted = sum(getattr(child, "full_width", child.winfo_reqwidth)() for child in self.right.winfo_children())
+        tight = self.inner.winfo_reqwidth() + wanted + px(16) > self.winfo_width()
+        for child in self.right.winfo_children():
+            compact = getattr(child, "set_compact", None)
+            if compact is not None:
+                compact(tight)
 
     def add(self, key: str, text: str, icon: str, command: Callable[[], Any], tip: str = "") -> ToolButton:
         button = ToolButton(self.inner, self.icons, text=text, icon=icon, command=command, tip=tip)
@@ -183,7 +201,7 @@ class Toolbar(tk.Frame):
         return button
 
     def separator(self) -> None:
-        ttk.Separator(self.inner, orient="vertical").pack(side="left", fill="y", padx=px(4), pady=px(4))
+        ttk.Separator(self.inner, orient="vertical").pack(side="left", fill="y", padx=px(3), pady=px(3))
 
 
 class UpdateBadge(tk.Frame):
@@ -202,12 +220,22 @@ class UpdateBadge(tk.Frame):
         self.available = False
         self.button = ToolButton(self, icons, text="Updates", icon="update", command=self._clicked,
                                  tip="Check for a new version (one click)")
-        self.button.pack(side="top")
-        self.note = tk.Label(self, text="", bg=C["BG"], fg=C["FAINT"], font=ui.font(10))
-        self.note.pack(side="top")
+        self.button.pack(side="right")
+        self.note = tk.Label(self, text="", bg=C["BG"], fg=C["FAINT"], font=sysfont())
+        self.note.pack(side="right", padx=(0, px(4)))
         self.note.bind("<ButtonRelease-1>", lambda _e: self._clicked())
-        self.pack(side="right", pady=(px(2), 0))
+        self.pack(side="right")
         self.set_state("idle")
+
+    def full_width(self) -> int:
+        return self.button.winfo_reqwidth() + self.note.winfo_reqwidth() + px(4)
+
+    def set_compact(self, on: bool) -> None:
+        shown = bool(self.note.winfo_manager())
+        if on and shown and not self.available:
+            self.note.pack_forget()
+        elif (not on or self.available) and not shown:
+            self.note.pack(side="right", padx=(0, px(4)))
 
     def _clicked(self) -> None:
         if self.available:
@@ -229,7 +257,7 @@ class UpdateBadge(tk.Frame):
         }
         colors = {"available": C["SUCCESS"], "ready": C["SUCCESS"], "error": C["DANGER"], "checking": C["MUTED"]}
         self.note.configure(text=texts.get(state, text), fg=colors.get(state, C["FAINT"]),
-                            font=ui.font(10, state in {"available", "ready"}))
+                            font=sysfont(state in {"available", "ready"}))
         self.button.configure(text="Install update" if self.available else "Updates")
         self.button.set_enabled(state != "checking")
 
@@ -502,132 +530,10 @@ class DownloadTable(tk.Frame):
 
 
 # --------------------------------------------------------------------------- details pane
-# Windows' own progress-bar colours (the bar IDM / NDM show): green while running, yellow when
-# paused, red on an error.
-WIN_GREEN = "#06B025"
-WIN_PAUSED = "#DAB600"
-WIN_ERROR = "#DA2626"
-WIN_TRACK = "#E6E6E6"
-WIN_EDGE = "#BCBCBC"
-
-
-def _mix(color: str, other: str, amount: float) -> str:
-    a = [int(color[i:i + 2], 16) for i in (1, 3, 5)]
-    b = [int(other[i:i + 2], 16) for i in (1, 3, 5)]
-    return "#" + "".join(f"{round(x + (y - x) * amount):02x}" for x, y in zip(a, b))
-
-
-class ProgressBar(tk.Canvas):
-    """A Windows-style progress bar: square, thin border, solid fill and the white shine that
-    sweeps across the filled part while a download runs. ``busy`` (connecting, merging) shows
-    the Windows "marquee": a block sliding through the bar."""
-
-    SLICES = 24
-    SWEEP_MS = 2200
-
-    def __init__(self, master: tk.Misc, height: int = 14) -> None:
-        super().__init__(master, height=px(height), bg=C["SURFACE"], highlightthickness=0, bd=0)
-        self.h = px(height)
-        self.value = 0.0
-        self.shown = 0.0
-        self.busy = False
-        self.running = False
-        self.phase = 0.0
-        self.color = WIN_GREEN
-        self._job: str | None = None
-        dark = _is_dark(C["SURFACE"])
-        self.track_color = C["SURFACE_3"] if dark else WIN_TRACK
-        edge = C["BORDER"] if dark else WIN_EDGE
-        self.track = self.create_rectangle(0, 0, 0, 0, fill=self.track_color, outline=edge)
-        self.fill = self.create_rectangle(0, 0, 0, 0, fill=self.color, outline="")
-        self.top = self.create_rectangle(0, 0, 0, 0, fill=_mix(self.color, "#ffffff", 0.25), outline="")
-        self.shine = [self.create_rectangle(0, 0, 0, 0, outline="", state="hidden") for _ in range(self.SLICES)]
-        self.bind("<Configure>", lambda _e: self._draw())
-
-    def set(self, value: float, color: str | None = None, *, busy: bool = False, animate: bool = True,
-            running: bool = False) -> None:
-        value = max(0.0, min(1.0, float(value)))
-        if color and color != self.color:
-            self.color = color
-            self.itemconfigure(self.fill, fill=color)
-            self.itemconfigure(self.top, fill=_mix(color, "#ffffff", 0.25))
-        if not animate or value < self.shown - 0.05:
-            self.shown = value
-        self.value = value
-        self.busy = busy
-        self.running = running or busy
-        self._draw()
-        self._schedule()
-
-    def _schedule(self) -> None:
-        moving = self.running or abs(self.value - self.shown) > 0.001
-        if moving and self._job is None:
-            self._job = self.after(33, self._tick)
-
-    def _tick(self) -> None:
-        self._job = None
-        if not self.winfo_exists():
-            return
-        diff = self.value - self.shown
-        self.shown = self.value if abs(diff) < 0.001 else self.shown + diff * 0.2
-        if self.running:
-            self.phase = (self.phase + 33 / self.SWEEP_MS) % 1.0
-        self._draw()
-        self._schedule()
-
-    def _draw(self) -> None:
-        w = max(4, self.winfo_width())
-        h = self.h
-        self.coords(self.track, 0, 0, w - 1, h - 1)
-        left, top, right, bottom = 1, 1, w - 1, h - 1
-        span = right - left
-        if self.busy and self.shown <= 0.002:
-            # Marquee: a block slides through the empty bar.
-            block = span * 0.28
-            start = left + (span + block) * self.phase - block
-            a, b = max(left, start), min(right, start + block)
-            fill_from, fill_to = (a, b) if b > a else (left, left)
-        else:
-            fill_from, fill_to = left, left + span * self.shown
-        if fill_to - fill_from < 1:
-            self.itemconfigure(self.fill, state="hidden")
-            self.itemconfigure(self.top, state="hidden")
-        else:
-            self.itemconfigure(self.fill, state="normal")
-            self.itemconfigure(self.top, state="normal")
-            self.coords(self.fill, fill_from, top, fill_to, bottom)
-            self.coords(self.top, fill_from, top, fill_to, top + max(1, (bottom - top) * 0.4))
-        # The shine: a soft white band that runs across the filled part, left to right.
-        filled = fill_to - fill_from
-        if not self.running or (self.busy and self.shown <= 0.002) or filled < 8:
-            for item in self.shine:
-                self.itemconfigure(item, state="hidden")
-            return
-        band = min(max(40.0, span * 0.18), filled)
-        slice_w = band / self.SLICES
-        start = fill_from - band + (filled + band) * self.phase
-        for index, item in enumerate(self.shine):
-            a = start + index * slice_w
-            b = a + slice_w + 0.6
-            a, b = max(fill_from, a), min(fill_to, b)
-            if b <= a:
-                self.itemconfigure(item, state="hidden")
-                continue
-            center = 1 - abs((index + 0.5) / self.SLICES * 2 - 1)  # 0 at the edges, 1 in the middle
-            self.coords(item, a, top, b, bottom)
-            self.itemconfigure(item, state="normal", fill=_mix(self.color, "#ffffff", 0.45 * center))
-        self.tag_raise(self.top)
-
-
-def _is_dark(color: str) -> bool:
-    try:
-        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
-    except (ValueError, IndexError):
-        return False
-    return (r * 299 + g * 587 + b * 114) / 1000 < 128
-
-
 class DetailsPane(tk.Frame):
+    """A plain Windows details area under the list: name and status, the standard progress
+    bar, one line of "Label: value" facts, and the save path with a row of push buttons."""
+
     FIELDS = (("size", "Size"), ("done", "Downloaded"), ("speed", "Transfer rate"), ("eta", "Time left"),
               ("website", "Website"), ("quality", "Quality"))
 
@@ -635,44 +541,88 @@ class DetailsPane(tk.Frame):
         bg = C["BG"]
         super().__init__(master, bg=bg, highlightthickness=0, bd=0)
         self.icons = icons
+        ttk.Separator(self, orient="horizontal").pack(side="top", fill="x")
         body = tk.Frame(self, bg=bg)
-        body.pack(fill="both", expand=True, padx=px(10), pady=(px(8), px(8)))
-        body.grid_columnconfigure(1, weight=1)
+        body.pack(fill="both", expand=True, padx=px(6), pady=(px(4), px(5)))
+        body.grid_columnconfigure(0, weight=1)
 
-        self.icon = tk.Label(body, bg=bg)
-        self.icon.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, px(12)))
         top = tk.Frame(body, bg=bg)
-        top.grid(row=0, column=1, sticky="ew")
+        top.grid(row=0, column=0, sticky="ew")
         top.grid_columnconfigure(0, weight=1)
         self.title = tk.Label(top, text="", bg=bg, fg=C["TEXT"], font=sysfont(True), anchor="w")
         self.title.grid(row=0, column=0, sticky="ew")
-        self.state = tk.Label(top, text="", bg=bg, fg=C["MUTED"], font=sysfont(), anchor="e")
+        self.state = tk.Label(top, text="", bg=bg, fg=C["TEXT"], font=sysfont(), anchor="e")
         self.state.grid(row=0, column=1, sticky="e", padx=(px(12), 0))
-        self.bar = ProgressBar(body, height=16)
-        self.bar.grid(row=1, column=1, sticky="ew", pady=(px(7), px(6)))
 
-        grid = tk.Frame(body, bg=bg)
-        grid.grid(row=2, column=1, sticky="ew")
+        # The standard Windows progress bar (vista theme): no custom colours or effects.
+        self.bar = ttk.Progressbar(body, orient="horizontal", mode="determinate", maximum=1000,
+                                   style="MD.Horizontal.TProgressbar")
+        self.bar.grid(row=1, column=0, sticky="ew", pady=(px(3), px(3)))
+        self._busy = False
+
+        facts = tk.Frame(body, bg=bg)
+        facts.grid(row=2, column=0, sticky="ew")
+        self._facts = facts
         self.values: dict[str, tk.Label] = {}
-        for index, (key, label) in enumerate(self.FIELDS):
-            tk.Label(grid, text=label + ":", bg=bg, fg=C["FAINT"], font=sysfont(), anchor="w").grid(
-                row=0, column=index, sticky="w", padx=(0, px(20)))
-            value = tk.Label(grid, text="—", bg=bg, fg=C["TEXT"], font=sysfont(), anchor="w")
-            value.grid(row=1, column=index, sticky="w", padx=(0, px(20)))
+        self._pairs: list[tuple[tk.Label, tk.Label]] = []
+        for key, label in self.FIELDS:
+            name = tk.Label(facts, text=label + ":", bg=bg, fg=C["MUTED"], font=sysfont(), anchor="w")
+            value = tk.Label(facts, text="—", bg=bg, fg=C["TEXT"], font=sysfont(), anchor="w")
+            self._pairs.append((name, value))
             self.values[key] = value
-        self.where = tk.Label(body, text="", bg=bg, fg=C["MUTED"], font=sysfont(), anchor="w")
-        self.where.grid(row=3, column=1, sticky="ew", pady=(px(6), 0))
+        self._per_row = 0
 
-        buttons = tk.Frame(body, bg=bg)
-        buttons.grid(row=0, column=2, rowspan=4, sticky="ne", padx=(px(18), 0))
+        bottom = tk.Frame(body, bg=bg)
+        bottom.grid(row=3, column=0, sticky="ew", pady=(px(4), 0))
+        bottom.grid_columnconfigure(0, weight=1)
+        self.where = tk.Label(bottom, text="", bg=bg, fg=C["MUTED"], font=sysfont(), anchor="w")
+        self.where.grid(row=0, column=0, sticky="ew", padx=(0, px(8)))
+        buttons = tk.Frame(bottom, bg=bg)
+        buttons.grid(row=0, column=1, sticky="e")
+        self._buttons_row = buttons
+        self._stacked = False
+        body.bind("<Configure>", lambda e: self._reflow(e.width), add="+")
         self.buttons: dict[str, ttk.Button] = {}
         for key, text in (("toggle", "Pause"), ("cancel", "Cancel"), ("open", "Open"), ("open_folder", "Open folder"),
-                          ("more", "Details…")):
-            button = ttk.Button(buttons, text=text, command=actions[key], width=14)
-            button.pack(fill="x", pady=(0, px(3)))
+                          ("more", "Properties…")):
+            button = ttk.Button(buttons, text=text, command=actions[key], width=13 if key == "more" else 11)
+            button.pack(side="left", padx=(px(4), 0))
             self.buttons[key] = button
         self._sig: tuple | None = None
         self.show(None, 0, "")
+
+    def _reflow(self, width: int) -> None:
+        # Wide window: one line of facts and the buttons beside the save path. Narrow window
+        # (or large display scaling): facts wrap to two lines and the buttons go under the path.
+        widths = [name.winfo_reqwidth() + value.winfo_reqwidth() + px(17) for name, value in self._pairs]
+        per_row = len(self._pairs) if sum(widths) <= width else (len(self._pairs) + 1) // 2
+        if per_row != self._per_row:
+            self._per_row = per_row
+            for index, (name, value) in enumerate(self._pairs):
+                row, col = divmod(index, per_row)
+                name.grid(row=row, column=col * 2, sticky="w", padx=(0 if col == 0 else px(14), px(3)))
+                value.grid(row=row, column=col * 2 + 1, sticky="w")
+        stacked = self._buttons_row.winfo_reqwidth() + px(260) > width
+        if stacked != self._stacked:
+            self._stacked = stacked
+            if stacked:
+                self._buttons_row.grid(row=1, column=0, columnspan=2, sticky="e", pady=(px(4), 0))
+            else:
+                self._buttons_row.grid(row=0, column=1, columnspan=1, sticky="e", pady=0)
+
+    def _set_bar(self, value: float, busy: bool) -> None:
+        # Connecting / merging with no progress yet: the standard Windows "marquee" bar.
+        if busy and value <= 0.002:
+            if not self._busy:
+                self.bar.configure(mode="indeterminate")
+                self.bar.start(25)
+                self._busy = True
+            return
+        if self._busy:
+            self.bar.stop()
+            self.bar.configure(mode="determinate")
+            self._busy = False
+        self.bar.configure(value=max(0.0, min(1.0, float(value))) * 1000)
 
     def show(self, row: dict[str, Any] | None, count: int, summary: str) -> None:
         if row is None:
@@ -680,23 +630,21 @@ class DetailsPane(tk.Frame):
             if sig == self._sig:
                 return
             self._sig = sig
-            self.icon.configure(image=self.icons.tree("all", px(28)))
             self.title.configure(text=summary or "No download selected")
             self.state.configure(text="")
-            self.bar.set(0, animate=False)
+            self._set_bar(0, False)
             for value in self.values.values():
                 value.configure(text="—")
             self.where.configure(text="Select a download to see its progress. Double-click to open a finished file."
-                                 if not count else "Use the toolbar or right-click for actions on the selection.")
+                                 if not count else "Use the toolbar or right-click for actions on the selection.",
+                                 fg=C["MUTED"])
             for key, button in self.buttons.items():
                 button.configure(state="normal" if count and key in {"toggle", "cancel"} else "disabled",
                                  text="Pause" if key == "toggle" else button.cget("text"))
             return
         status = row["status"]
-        colors = {"complete": C["SUCCESS"], "failed": C["DANGER"], "missing": C["WARNING"], "paused": C["WARNING"],
-                  "stopping": C["WARNING"], "cancelled": C["MUTED"]}
-        bar_colors = {"failed": WIN_ERROR, "missing": WIN_ERROR, "paused": WIN_PAUSED, "stopping": WIN_PAUSED,
-                      "cancelled": WIN_PAUSED}
+        # Only problems get a colour (like Windows' own red error text); everything else is plain.
+        colors = {"failed": C["DANGER"], "missing": C["DANGER"]}
         done = row["done_bytes"] if row["source"] == "queue" else row["size"]
         if status == "complete":
             done = row["size"]
@@ -718,17 +666,10 @@ class DetailsPane(tk.Frame):
                tuple(sorted(actions)))
         if sig == self._sig:
             return
-        switched = self._sig is None or self._sig[0] != row["key"]
         self._sig = sig
-        self.icon.configure(image=self.icons.file(row["category"], status, px(28)))
         self.title.configure(text=row["name"])
         self.state.configure(text=row["status_text"], fg=colors.get(status, C["TEXT"]))
-        bar_color = bar_colors.get(status, WIN_GREEN)
-        if switched:  # another download was selected: jump, do not glide
-            self.bar.set(row["progress"], bar_color, animate=False)
-        self.bar.set(row["progress"], bar_color,
-                     busy=status in {"connecting", "finishing", "retrying"},
-                     running=status in {"downloading", "connecting", "finishing", "retrying"})
+        self._set_bar(row["progress"], status in {"connecting", "finishing", "retrying"})
         for key, label in self.values.items():
             label.configure(text=values[key])
         self.where.configure(text=where, fg=C["DANGER"] if status == "failed" else C["MUTED"])

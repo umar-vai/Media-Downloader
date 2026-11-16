@@ -6,14 +6,18 @@ from typing import Callable
 
 from PIL import Image, ImageTk
 
-BG = "#07101D"
-SURFACE_2 = "#101C31"
-SURFACE_3 = "#14223A"
-BORDER = "#223456"
-TEXT = "#F7FAFF"
-MUTED = "#8798B5"
-CYAN = "#23D5FF"
-PURPLE = "#7657FF"
+from theme import C, IS_DARK
+
+# Classic Windows colours: a white track, the system highlight blue for the selection and its
+# handles, and a plain black (white in the dark theme) playhead.
+BG = C["SURFACE"]
+SURFACE_2 = C["SURFACE_2"]
+SURFACE_3 = C["SURFACE_3"]
+BORDER = C["BORDER"]
+TEXT = C["TEXT"]
+MUTED = C["MUTED"]
+CYAN = C["TEXT"]                                   # playhead
+PURPLE = C["ACCENT"] if IS_DARK else C["SELECT"]   # selection handles
 
 
 class TimelineCanvas(tk.Canvas):
@@ -212,7 +216,7 @@ class TimelineCanvas(tk.Canvas):
                 self.create_rectangle(left, strip_top, start_x, strip_bottom, fill="#020712", stipple="gray50", outline="")
             if self.end < self.view_end:
                 self.create_rectangle(end_x, strip_top, right, strip_bottom, fill="#020712", stipple="gray50", outline="")
-            self.create_rectangle(start_x, strip_top, end_x, strip_bottom, outline=CYAN, width=2)
+            self.create_rectangle(start_x, strip_top, end_x, strip_bottom, outline=PURPLE, width=2)
         else:
             self.create_rectangle(left, strip_top, right, strip_bottom, fill="#020712", stipple="gray50", outline="")
             start_x = self._time_to_x(self.start)
@@ -272,7 +276,7 @@ class TimelineCanvas(tk.Canvas):
             self.create_text(x, ruler_y + 15, text=label, fill=MUTED, font=("Segoe UI", 8))
 
         zoomed = visible_span < self.duration - 0.001
-        hint = "Zoomed timeline • drag cyan playhead to scrub" if zoomed else "Drag purple handles to trim • Drag cyan playhead to scrub"
+        hint = "Zoomed timeline • drag the playhead to scrub" if zoomed else "Drag the blue handles to trim • Drag the playhead to scrub"
         self.create_text(
             width / 2,
             strip_bottom + 9,

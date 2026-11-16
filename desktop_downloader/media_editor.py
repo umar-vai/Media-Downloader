@@ -8,13 +8,13 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-import customtkinter as ctk
 import tkinter as tk
 from PIL import Image, ImageTk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
+import native
 from app_logging import get_logger
 from editor_history import EditorHistory, EditorSnapshot
 from media_editor_engine import (
@@ -35,27 +35,28 @@ from media_editor_engine import (
 )
 from media_editor_widgets import TimelineCanvas
 from media_player import EmbeddedMediaPlayer, PlayerUnavailableError
+from theme import C
+from ui_kit import px
 
 
 APP_TITLE = "Media Editor"
 
-BG = "#060B14"
-SURFACE = "#0B1323"
-SURFACE_2 = "#101C31"
-SURFACE_3 = "#14223A"
-BORDER = "#223456"
-TEXT = "#F7FAFF"
-MUTED = "#8798B5"
-CYAN = "#23D5FF"
-CYAN_HOVER = "#0EBDE9"
-PURPLE = "#7657FF"
-PURPLE_HOVER = "#6547E9"
-SUCCESS = "#24D18C"
-WARNING = "#FFB84D"
-DANGER = "#FF647C"
+# Classic Windows look: the system colours from the app theme. Only problems are coloured;
+# progress and success messages are plain text, as in a Windows status bar.
+BG = C["BG"]
+SURFACE = C["SURFACE"]
+TEXT = C["TEXT"]
+MUTED = C["MUTED"]
+DANGER = C["DANGER"]
+SUCCESS = TEXT
+WARNING = TEXT
+# Kept for the playback code, which still passes button colours (ignored by EButton).
+CYAN = CYAN_HOVER = PURPLE = PURPLE_HOVER = ""
+PREVIEW_BG = "#000000"  # the video preview stays black, like any media player
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus"}
+SPEEDS = ["0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"]
 
 LOGGER = get_logger("editor")
 
@@ -77,7 +78,71 @@ def _short_path(path: Path, limit: int = 52) -> str:
     return f"{text[:keep]}…{text[-keep:]}"
 
 
-class MediaEditorWindow(ctk.CTkToplevel):
+# --------------------------------------------------------------------------- native adapters
+# The editing code below was written against CustomTkinter widgets. These thin ttk wrappers
+# accept the same calls (colour keywords are ignored) so that code did not have to change.
+class EButton(ttk.Button):
+    def configure(self, cnf: Any = None, **kw: Any) -> Any:  # type: ignore[override]
+        for key in ("fg_color", "hover_color", "text_color", "border_color", "font"):
+            kw.pop(key, None)
+        if cnf is None and not kw:
+            return super().configure()
+        return super().configure(cnf, **kw)
+
+    config = configure  # type: ignore[assignment]
+
+
+class Choice(ttk.Combobox):
+    """A read-only drop-down list that behaves like CTkOptionMenu (command gets the value)."""
+
+    def __init__(self, master: tk.Misc, variable: tk.Variable, values: list[str],
+                 command: Callable[[str], Any] | None = None, width: int = 12) -> None:
+        super().__init__(master, textvariable=variable, values=values, state="readonly", width=width)
+        self._command = command
+        self.bind("<<ComboboxSelected>>", self._selected, add="+")
+
+    def _selected(self, _event: Any = None) -> None:
+        self.selection_clear()
+        if self._command is not None:
+            self._command(self.get())
+
+    def configure(self, cnf: Any = None, **kw: Any) -> Any:  # type: ignore[override]
+        if kw.get("state") == "normal":
+            kw["state"] = "readonly"  # never editable: pick from the list only
+        if cnf is None and not kw:
+            return super().configure()
+        return super().configure(cnf, **kw)
+
+    config = configure  # type: ignore[assignment]
+
+
+class Tabs(ttk.Notebook):
+    """ttk tabs with CTkTabview's ``set(name)``."""
+
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master)
+        self._pages: dict[str, ttk.Frame] = {}
+
+    def page(self, name: str) -> ttk.Frame:
+        frame = ttk.Frame(self, padding=(native.PAD, native.PAD, native.PAD, native.PAD))
+        frame.grid_columnconfigure(0, weight=1)
+        self.add(frame, text=name)
+        self._pages[name] = frame
+        return frame
+
+    def set(self, name: str) -> None:
+        if name in self._pages:
+            self.select(self._pages[name])
+
+
+class Progress(native.Progress):
+    """ttk progress bar with CTkProgressBar's ``set``/``start``/``stop``."""
+
+    def start(self, interval: int = 20) -> None:  # type: ignore[override]
+        super().start(interval)
+
+
+class MediaEditorWindow(tk.Toplevel):
     def __init__(self, parent: Any, source_path: Path, output_dir: Path | None = None) -> None:
         super().__init__(parent)
         self.parent = parent
@@ -110,31 +175,40 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.temp_dir = Path(tempfile.gettempdir()) / "MediaDownloaderEditor"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
 
-        self.start_var = ctk.StringVar(value="00:00.000")
-        self.end_var = ctk.StringVar(value="")
-        self.playhead_var = ctk.DoubleVar(value=0.0)
+        self.start_var = tk.StringVar(self, value="00:00.000")
+        self.end_var = tk.StringVar(self, value="")
+        self.playhead_var = tk.DoubleVar(self, value=0.0)
 
-        self.crop_var = ctk.StringVar(value="Original")
-        self.rotate_var = ctk.StringVar(value="0°")
-        self.speed_var = ctk.StringVar(value="1.0x")
-        self.custom_x_var = ctk.StringVar(value="0")
-        self.custom_y_var = ctk.StringVar(value="0")
-        self.custom_w_var = ctk.StringVar(value="")
-        self.custom_h_var = ctk.StringVar(value="")
+        self.crop_var = tk.StringVar(self, value="Original")
+        self.rotate_var = tk.StringVar(self, value="0°")
+        self.speed_var = tk.StringVar(self, value="1.0x")
+        self.custom_x_var = tk.StringVar(self, value="0")
+        self.custom_y_var = tk.StringVar(self, value="0")
+        self.custom_w_var = tk.StringVar(self, value="")
+        self.custom_h_var = tk.StringVar(self, value="")
 
-        self.mute_var = ctk.BooleanVar(value=False)
-        self.volume_var = ctk.DoubleVar(value=100.0)
-        self.fade_in_var = ctk.StringVar(value="0")
-        self.fade_out_var = ctk.StringVar(value="0")
+        self.mute_var = tk.BooleanVar(self, value=False)
+        self.volume_var = tk.DoubleVar(self, value=100.0)
+        self.fade_in_var = tk.StringVar(self, value="0")
+        self.fade_out_var = tk.StringVar(self, value="0")
 
-        self.output_name_var = ctk.StringVar(value=f"{self.source_path.stem}_edited")
-        self.format_var = ctk.StringVar(value="MP4")
-        self.quality_var = ctk.StringVar(value="High")
+        self.output_name_var = tk.StringVar(self, value=f"{self.source_path.stem}_edited")
+        self.format_var = tk.StringVar(self, value="MP4")
+        self.quality_var = tk.StringVar(self, value="High")
 
-        self.title(APP_TITLE)
-        self.geometry("1240x800")
-        self.minsize(980, 650)
-        self.configure(fg_color=BG)
+        self.title(f"{self.source_path.name} - {APP_TITLE}")
+        self.configure(bg=native.dialog_bg(self))
+        try:
+            icon = getattr(parent, "_icon_file", None)
+            if icon:
+                self.iconbitmap(icon)
+        except tk.TclError:
+            pass
+        # Fit the screen (work area) at any display scaling.
+        screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
+        width, height = min(px(1100), screen_w - 40), min(px(720), screen_h - 90)
+        self.geometry(f"{width}x{height}")
+        self.minsize(min(px(900), width), min(px(600), height))
         self.protocol("WM_DELETE_WINDOW", self._close)
 
         self._build_ui()
@@ -173,26 +247,33 @@ class MediaEditorWindow(ctk.CTkToplevel):
             if not self._closing:
                 self.after(40, self._drain_ui_queue)
 
-    def _card(self, master: Any, **kwargs: Any) -> ctk.CTkFrame:
-        return ctk.CTkFrame(
-            master,
-            fg_color=SURFACE,
-            corner_radius=16,
-            border_width=1,
-            border_color=BORDER,
-            **kwargs,
-        )
+    # ------------------------------------------------------------------ layout helpers
+    def _button(self, master: tk.Misc, text: str, command: Callable[[], Any], *, width: int = 0,
+                state: str = "normal", default: bool = False) -> EButton:
+        kw: dict[str, Any] = {"text": text, "command": command, "state": state}
+        if width:
+            kw["width"] = width
+        if default:
+            kw["default"] = "active"
+        return EButton(master, **kw)
+
+    def _label(self, master: tk.Misc, text: str = "", *, muted: bool = False, wrap: int = 0) -> native.Text:
+        label = native.Text(master, text, wrap=wrap)
+        if muted:
+            label.configure(foreground=MUTED)
+        return label
 
     def _build_ui(self) -> None:
+        self._build_menu()
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(2, weight=1)
 
         self._build_topbar()
+        ttk.Separator(self, orient="horizontal").grid(row=1, column=0, sticky="ew")
 
-        workspace = ctk.CTkFrame(self, fg_color="transparent")
-        workspace.grid(row=1, column=0, sticky="nsew", padx=18, pady=(14, 10))
-        workspace.grid_columnconfigure(0, weight=5)
-        workspace.grid_columnconfigure(1, weight=2)
+        workspace = ttk.Frame(self, padding=(native.PAD, native.PAD, native.PAD, 0))
+        workspace.grid(row=2, column=0, sticky="nsew")
+        workspace.grid_columnconfigure(0, weight=1)
         workspace.grid_rowconfigure(0, weight=1)
 
         self._build_preview(workspace)
@@ -201,646 +282,247 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self._build_timeline()
         self._build_bottom_bar()
 
+    def _build_menu(self) -> None:
+        bar = tk.Menu(self, tearoff=0)
+        file_menu = tk.Menu(bar, tearoff=0)
+        file_menu.add_command(label="Open source", command=self.open_source)
+        file_menu.add_command(label="Choose output folder…", command=self.choose_output_folder)
+        file_menu.add_separator()
+        file_menu.add_command(label="Preview edit (15s)", command=self.preview_edit_clip)
+        file_menu.add_command(label="Export…", command=self.export_media)
+        file_menu.add_command(label="Open export", command=self.open_export)
+        file_menu.add_separator()
+        file_menu.add_command(label="Close", command=self._close)
+        bar.add_cascade(label="File", menu=file_menu, underline=0)
+        edit_menu = tk.Menu(bar, tearoff=0)
+        edit_menu.add_command(label="Undo", accelerator="Ctrl+Z", command=self.undo_edit)
+        edit_menu.add_command(label="Redo", accelerator="Ctrl+Y", command=self.redo_edit)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Reset edits", command=self.reset_edits)
+        edit_menu.add_command(label="Reset range", command=self.reset_range)
+        bar.add_cascade(label="Edit", menu=edit_menu, underline=0)
+        self._file_menu = file_menu
+        self._edit_menu = edit_menu
+        file_menu.configure(postcommand=self._refresh_menus)
+        edit_menu.configure(postcommand=self._refresh_menus)
+        self.configure(menu=bar)
+
+    def _refresh_menus(self) -> None:
+        def state(widget: Any) -> str:
+            try:
+                return "normal" if str(widget.cget("state")) != "disabled" else "disabled"
+            except Exception:
+                return "normal"
+        self._edit_menu.entryconfigure("Undo", state=state(self.undo_button))
+        self._edit_menu.entryconfigure("Redo", state=state(self.redo_button))
+        self._file_menu.entryconfigure("Export…", state=state(self.export_button))
+        self._file_menu.entryconfigure("Preview edit (15s)", state=state(self.preview_clip_button))
+        self._file_menu.entryconfigure("Open export", state=state(self.open_export_button))
+
     def _build_topbar(self) -> None:
-        top = ctk.CTkFrame(self, height=62, corner_radius=0, fg_color=SURFACE)
+        # A plain row of push buttons under the menu, like a classic tool window.
+        top = ttk.Frame(self, padding=(native.PAD, native.GAP, native.PAD, native.GAP))
         top.grid(row=0, column=0, sticky="ew")
-        top.grid_columnconfigure(1, weight=1)
+        self.undo_button = self._button(top, "Undo", self.undo_edit, state="disabled")
+        self.undo_button.pack(side="left")
+        self.redo_button = self._button(top, "Redo", self.redo_edit, state="disabled")
+        self.redo_button.pack(side="left", padx=(native.GAP, 0))
+        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=native.PAD)
+        self._button(top, "Reset edits", self.reset_edits).pack(side="left")
+        self._button(top, "Open source", self.open_source).pack(side="left", padx=(native.GAP, 0))
+        # The file name is in the window title; these two stay for the editing code.
+        self.source_label = self._label(top)
+        self.loading_chip = self._label(top)
 
-        ctk.CTkLabel(
-            top,
-            text="ME",
-            width=38,
-            height=38,
-            corner_radius=10,
-            fg_color=PURPLE,
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 13),
-        ).grid(row=0, column=0, padx=(18, 12), pady=12)
-
-        title_wrap = ctk.CTkFrame(top, fg_color="transparent")
-        title_wrap.grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(
-            title_wrap,
-            text="MEDIA EDITOR",
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 13),
-        ).pack(anchor="w")
-        self.source_label = ctk.CTkLabel(
-            title_wrap,
-            text=self.source_path.name,
-            text_color=MUTED,
-            font=("Segoe UI", 9),
-        )
-        self.source_label.pack(anchor="w", pady=(2, 0))
-
-        self.loading_chip = ctk.CTkLabel(
-            top,
-            text="LOADING",
-            height=28,
-            corner_radius=9,
-            fg_color="#2D2514",
-            text_color=WARNING,
-            font=("Segoe UI Semibold", 9),
-        )
-        self.loading_chip.grid(row=0, column=2, padx=(8, 8))
-
-        self.undo_button = ctk.CTkButton(
-            top,
-            text="Undo",
-            width=72,
-            height=34,
-            corner_radius=9,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
-            command=self.undo_edit,
-            state="disabled",
-        )
-        self.undo_button.grid(row=0, column=3, padx=(8, 0))
-
-        self.redo_button = ctk.CTkButton(
-            top,
-            text="Redo",
-            width=72,
-            height=34,
-            corner_radius=9,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
-            command=self.redo_edit,
-            state="disabled",
-        )
-        self.redo_button.grid(row=0, column=4, padx=(8, 0))
-
-        ctk.CTkButton(
-            top,
-            text="Reset edits",
-            width=105,
-            height=34,
-            corner_radius=9,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
-            command=self.reset_edits,
-        ).grid(row=0, column=5, padx=(8, 0))
-
-        ctk.CTkButton(
-            top,
-            text="Open source",
-            width=105,
-            height=34,
-            corner_radius=9,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
-            command=self.open_source,
-        ).grid(row=0, column=6, padx=(8, 18))
-
-    def _build_preview(self, workspace: ctk.CTkFrame) -> None:
-        card = self._card(workspace)
-        card.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
-        card.grid_columnconfigure(0, weight=1)
-        card.grid_rowconfigure(0, weight=1)
-
-        preview_wrap = ctk.CTkFrame(card, fg_color="#030812", corner_radius=11)
-        preview_wrap.grid(row=0, column=0, sticky="nsew", padx=12, pady=(12, 8))
-        preview_wrap.grid_columnconfigure(0, weight=1)
-        preview_wrap.grid_rowconfigure(0, weight=1)
+    def _build_preview(self, workspace: ttk.Frame) -> None:
+        area = ttk.Frame(workspace)
+        area.grid(row=0, column=0, sticky="nsew", padx=(0, native.PAD))
+        area.grid_columnconfigure(0, weight=1)
+        area.grid_rowconfigure(0, weight=1)
 
         self.preview_canvas = tk.Canvas(
-            preview_wrap,
-            bg="#030812",
+            area,
+            bg=PREVIEW_BG,
             bd=0,
-            highlightthickness=0,
+            highlightthickness=1,
+            highlightbackground=C["BORDER"],
             cursor="crosshair",
         )
         self.preview_canvas.grid(row=0, column=0, sticky="nsew")
         self.preview_canvas.bind("<Configure>", self._on_preview_resize)
         self.preview_canvas.create_text(
-            20,
-            20,
+            px(12),
+            px(12),
             text="Loading media…",
-            fill=MUTED,
+            fill="#C0C0C0",
             anchor="nw",
-            font=("Segoe UI", 12),
+            font=native.font(self),
             tags="placeholder",
         )
 
-        transport = ctk.CTkFrame(card, fg_color="transparent")
-        transport.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
+        transport = ttk.Frame(area)
+        transport.grid(row=1, column=0, sticky="ew", pady=(native.GAP, 0))
         transport.grid_columnconfigure(5, weight=1)
+        self._button(transport, "◀ 5s", lambda: self.step_playhead(-5.0), width=6).grid(row=0, column=0)
+        self._button(transport, "Set In", self.set_in_here, width=8).grid(row=0, column=1, padx=(native.GAP, 0))
+        self.play_button = self._button(transport, "▶ Play", self.toggle_playback, state="disabled")
+        self.play_button.grid(row=0, column=2, padx=(native.GAP, 0))
+        self.current_time_label = self._label(transport, "00:00.000 / --:--")
+        self.current_time_label.grid(row=0, column=3, padx=native.PAD)
+        self._button(transport, "Set Out", self.set_out_here, width=8).grid(row=0, column=4)
+        self.preview_status_label = self._label(transport, "Space Play/Pause • I/O In/Out • ←/→ Frame", muted=True)
+        self.preview_status_label.grid(row=0, column=5, sticky="w", padx=native.PAD)
+        self._button(transport, "5s ▶", lambda: self.step_playhead(5.0), width=6).grid(row=0, column=6)
 
-        ctk.CTkButton(
-            transport,
-            text="◀ 5s",
-            width=68,
-            height=34,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            command=lambda: self.step_playhead(-5.0),
-        ).grid(row=0, column=0, padx=(0, 5))
+    def _build_inspector(self, workspace: ttk.Frame) -> None:
+        self.tabs = Tabs(workspace)
+        self.tabs.grid(row=0, column=1, sticky="nsew")
+        self._build_video_tab(self.tabs.page("Video"))
+        self._build_audio_tab(self.tabs.page("Audio"))
+        self._build_export_tab(self.tabs.page("Export"))
 
-        ctk.CTkButton(
-            transport,
-            text="Set In",
-            width=72,
-            height=34,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            command=self.set_in_here,
-        ).grid(row=0, column=1, padx=5)
+    def _field_label(self, master: Any, text: str) -> native.Text:
+        return self._label(master, text)
 
-        self.play_button = ctk.CTkButton(
-            transport,
-            text="▶ Play",
-            width=88,
-            height=36,
-            fg_color=PURPLE,
-            hover_color=PURPLE_HOVER,
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 10),
-            command=self.toggle_playback,
-            state="disabled",
-        )
-        self.play_button.grid(row=0, column=2, padx=5)
+    def _build_video_tab(self, tab: ttk.Frame) -> None:
+        frame = native.group(tab, "Frame and speed", row=0, column=0, sticky="ew")
+        frame.grid_columnconfigure(1, weight=1)
+        self._field_label(frame, "Crop:").grid(row=0, column=0, sticky="w", pady=2)
+        self.crop_menu = Choice(frame, self.crop_var, list(CROP_PRESETS), self._crop_changed, width=16)
+        self.crop_menu.grid(row=0, column=1, columnspan=3, sticky="ew", pady=2, padx=(native.GAP, 0))
+        self._field_label(frame, "Rotate:").grid(row=1, column=0, sticky="w", pady=2)
+        self.rotate_menu = Choice(frame, self.rotate_var, ["0°", "90°", "180°", "270°"], self._rotation_changed,
+                                  width=6)
+        self.rotate_menu.grid(row=1, column=1, sticky="w", pady=2, padx=(native.GAP, 0))
+        self._field_label(frame, "Speed:").grid(row=1, column=2, sticky="e", pady=2, padx=(native.PAD, 0))
+        self.speed_menu = Choice(frame, self.speed_var, SPEEDS, self._speed_changed, width=6)
+        self.speed_menu.grid(row=1, column=3, sticky="w", pady=2, padx=(native.GAP, 0))
 
-        self.current_time_label = ctk.CTkLabel(
-            transport,
-            text="00:00.000 / --:--",
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 10),
-        )
-        self.current_time_label.grid(row=0, column=3, padx=10)
-
-        ctk.CTkButton(
-            transport,
-            text="Set Out",
-            width=76,
-            height=34,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            command=self.set_out_here,
-        ).grid(row=0, column=4, padx=5)
-
-        self.preview_status_label = ctk.CTkLabel(
-            transport,
-            text="Space Play/Pause • I/O In/Out • ←/→ Frame",
-            text_color=MUTED,
-            font=("Segoe UI", 9),
-            anchor="w",
-        )
-        self.preview_status_label.grid(row=0, column=5, sticky="w", padx=10)
-
-        ctk.CTkButton(
-            transport,
-            text="5s ▶",
-            width=68,
-            height=34,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            command=lambda: self.step_playhead(5.0),
-        ).grid(row=0, column=6, padx=(5, 0))
-
-    def _build_inspector(self, workspace: ctk.CTkFrame) -> None:
-        card = self._card(workspace)
-        card.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
-        card.grid_columnconfigure(0, weight=1)
-        card.grid_rowconfigure(0, weight=1)
-
-        self.tabs = ctk.CTkTabview(
-            card,
-            fg_color=SURFACE,
-            segmented_button_fg_color=SURFACE_2,
-            segmented_button_selected_color=PURPLE,
-            segmented_button_selected_hover_color=PURPLE_HOVER,
-            segmented_button_unselected_color=SURFACE_2,
-            segmented_button_unselected_hover_color=SURFACE_3,
-        )
-        self.tabs.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        self.tabs.add("Video")
-        self.tabs.add("Audio")
-        self.tabs.add("Export")
-
-        tab_surfaces = {}
-        for name in ("Video", "Audio", "Export"):
-            tab = self.tabs.tab(name)
-            tab.grid_columnconfigure(0, weight=1)
-            tab.grid_rowconfigure(0, weight=1)
-            surface = ctk.CTkScrollableFrame(
-                tab,
-                fg_color="transparent",
-                scrollbar_button_color=SURFACE_3,
-                scrollbar_button_hover_color=PURPLE,
-            )
-            surface.grid(row=0, column=0, sticky="nsew")
-            tab_surfaces[name] = surface
-
-        self._build_video_tab(tab_surfaces["Video"])
-        self._build_audio_tab(tab_surfaces["Audio"])
-        self._build_export_tab(tab_surfaces["Export"])
-
-    def _field_label(self, master: Any, text: str) -> ctk.CTkLabel:
-        return ctk.CTkLabel(master, text=text, text_color=MUTED, font=("Segoe UI", 9), anchor="w")
-
-    def _build_video_tab(self, tab: ctk.CTkFrame) -> None:
-        tab.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            tab,
-            text="FRAME & SPEED",
-            text_color=CYAN,
-            font=("Segoe UI Semibold", 10),
-        ).grid(row=0, column=0, sticky="w", pady=(8, 12))
-
-        self._field_label(tab, "Crop / aspect ratio").grid(row=1, column=0, sticky="w")
-        self.crop_menu = ctk.CTkOptionMenu(
-            tab,
-            variable=self.crop_var,
-            values=list(CROP_PRESETS),
-            command=self._crop_changed,
-            fg_color=SURFACE_3,
-            button_color=PURPLE,
-            button_hover_color=PURPLE_HOVER,
-        )
-        self.crop_menu.grid(row=2, column=0, sticky="ew", pady=(4, 10))
-
-        row = ctk.CTkFrame(tab, fg_color="transparent")
-        row.grid(row=3, column=0, sticky="ew")
-        row.grid_columnconfigure(0, weight=1)
-        row.grid_columnconfigure(1, weight=1)
-
-        left = ctk.CTkFrame(row, fg_color="transparent")
-        left.grid(row=0, column=0, sticky="ew", padx=(0, 5))
-        self._field_label(left, "Rotate").pack(anchor="w")
-        self.rotate_menu = ctk.CTkOptionMenu(
-            left,
-            variable=self.rotate_var,
-            values=["0°", "90°", "180°", "270°"],
-            command=self._rotation_changed,
-            fg_color=SURFACE_3,
-            button_color=PURPLE,
-        )
-        self.rotate_menu.pack(fill="x", pady=(4, 0))
-
-        right = ctk.CTkFrame(row, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="ew", padx=(5, 0))
-        self._field_label(right, "Speed").pack(anchor="w")
-        self.speed_menu = ctk.CTkOptionMenu(
-            right,
-            variable=self.speed_var,
-            values=["0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"],
-            command=self._speed_changed,
-            fg_color=SURFACE_3,
-            button_color=PURPLE,
-        )
-        self.speed_menu.pack(fill="x", pady=(4, 0))
-
-        custom = ctk.CTkFrame(tab, fg_color=SURFACE_2, corner_radius=10)
-        custom.grid(row=4, column=0, sticky="ew", pady=(14, 0))
-        for column in range(2):
-            custom.grid_columnconfigure(column, weight=1)
-
-        ctk.CTkLabel(
-            custom,
-            text="CUSTOM CROP",
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 9),
-        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(9, 6))
-
-        self.custom_entries: list[ctk.CTkEntry] = []
+        custom = native.group(tab, "Custom crop", row=1, column=0, sticky="ew", pady=(native.PAD, 0))
+        self.custom_entries: list[ttk.Entry] = []
         fields = [
-            ("X", self.custom_x_var),
-            ("Y", self.custom_y_var),
-            ("Width", self.custom_w_var),
-            ("Height", self.custom_h_var),
+            ("X:", self.custom_x_var),
+            ("Y:", self.custom_y_var),
+            ("Width:", self.custom_w_var),
+            ("Height:", self.custom_h_var),
         ]
         for index, (label, variable) in enumerate(fields):
-            cell = ctk.CTkFrame(custom, fg_color="transparent")
-            cell.grid(row=1 + index // 2, column=index % 2, sticky="ew", padx=(10, 5) if index % 2 == 0 else (5, 10), pady=4)
-            self._field_label(cell, label).pack(anchor="w")
-            entry = ctk.CTkEntry(cell, textvariable=variable, height=32)
-            entry.pack(fill="x", pady=(2, 0))
+            row, col = divmod(index, 2)
+            self._field_label(custom, label).grid(row=row, column=col * 2, sticky="w", pady=2,
+                                                  padx=(0 if col == 0 else native.PAD, native.GAP))
+            entry = ttk.Entry(custom, textvariable=variable, width=7)
+            entry.grid(row=row, column=col * 2 + 1, sticky="w", pady=2)
             entry.configure(state="disabled")
             entry.bind("<Return>", lambda _event: self.apply_custom_crop())
             self.custom_entries.append(entry)
+        self.apply_crop_button = self._button(custom, "Apply crop", self.apply_custom_crop, state="disabled")
+        self.apply_crop_button.grid(row=2, column=0, columnspan=4, sticky="e", pady=(native.GAP, 0))
 
-        self.apply_crop_button = ctk.CTkButton(
-            custom,
-            text="Apply custom crop",
-            height=34,
-            fg_color=SURFACE_3,
-            hover_color="#1B3153",
-            command=self.apply_custom_crop,
-            state="disabled",
-        )
-        self.apply_crop_button.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(8, 10))
+        self._button(tab, "Reset video edits", self.reset_video_edits, width=16).grid(
+            row=2, column=0, sticky="e", pady=(native.PAD, 0))
 
-        ctk.CTkButton(
-            tab,
-            text="Reset video edits",
-            height=36,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=MUTED,
-            command=self.reset_video_edits,
-        ).grid(row=5, column=0, sticky="ew", pady=(14, 0))
+    def _build_audio_tab(self, tab: ttk.Frame) -> None:
+        frame = native.group(tab, "Audio", row=0, column=0, sticky="ew")
+        frame.grid_columnconfigure(1, weight=1)
+        self._field_label(frame, "Speed:").grid(row=0, column=0, sticky="w", pady=2)
+        self.audio_speed_menu = Choice(frame, self.speed_var, SPEEDS, self._speed_changed, width=6)
+        self.audio_speed_menu.grid(row=0, column=1, sticky="w", pady=2, padx=(native.GAP, 0))
+        self.mute_switch = ttk.Checkbutton(frame, text="Mute audio", variable=self.mute_var,
+                                           command=self._sync_audio_state)
+        self.mute_switch.grid(row=1, column=0, columnspan=3, sticky="w", pady=(native.GAP, 2))
 
-    def _build_audio_tab(self, tab: ctk.CTkFrame) -> None:
-        tab.grid_columnconfigure(0, weight=1)
+        self._field_label(frame, "Volume:").grid(row=2, column=0, sticky="w", pady=2)
 
-        ctk.CTkLabel(
-            tab,
-            text="AUDIO",
-            text_color=CYAN,
-            font=("Segoe UI Semibold", 10),
-        ).grid(row=0, column=0, sticky="w", pady=(8, 12))
+        def volume_moved(value: str) -> None:
+            whole = round(float(value))  # whole percent steps, as before
+            if abs(self.volume_var.get() - whole) > 1e-9:
+                self.volume_var.set(whole)
+            self._volume_changed(whole)
 
-        self._field_label(tab, "Playback / export speed").grid(row=1, column=0, sticky="w")
-        self.audio_speed_menu = ctk.CTkOptionMenu(
-            tab,
-            variable=self.speed_var,
-            values=["0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"],
-            command=self._speed_changed,
-            fg_color=SURFACE_3,
-            button_color=PURPLE,
-        )
-        self.audio_speed_menu.grid(row=2, column=0, sticky="ew", pady=(4, 14))
-
-        self.mute_switch = ctk.CTkSwitch(
-            tab,
-            text="Mute audio",
-            variable=self.mute_var,
-            text_color=TEXT,
-            progress_color=PURPLE,
-            button_color=TEXT,
-            button_hover_color=CYAN,
-            command=self._sync_audio_state,
-        )
-        self.mute_switch.grid(row=3, column=0, sticky="w", pady=(0, 14))
-
-        self.volume_text = ctk.CTkLabel(
-            tab,
-            text="Volume 100%",
-            text_color=MUTED,
-            font=("Segoe UI", 9),
-            anchor="w",
-        )
-        self.volume_text.grid(row=4, column=0, sticky="w")
-        self.volume_slider = ctk.CTkSlider(
-            tab,
-            from_=0,
-            to=200,
-            variable=self.volume_var,
-            number_of_steps=200,
-            progress_color=CYAN,
-            button_color=TEXT,
-            button_hover_color=CYAN,
-            command=self._volume_changed,
-        )
-        self.volume_slider.grid(row=5, column=0, sticky="ew", pady=(5, 16))
+        self.volume_slider = ttk.Scale(frame, from_=0, to=200, orient="horizontal", variable=self.volume_var,
+                                       command=volume_moved)
+        self.volume_slider.grid(row=2, column=1, sticky="ew", pady=2, padx=(native.GAP, native.GAP))
         self.volume_slider.bind("<ButtonRelease-1>", lambda _event: self._record_history_snapshot())
+        self.volume_text = self._label(frame, "Volume 100%")
+        self.volume_text.grid(row=2, column=2, sticky="w", pady=2)
 
-        fade = ctk.CTkFrame(tab, fg_color="transparent")
-        fade.grid(row=6, column=0, sticky="ew")
-        fade.grid_columnconfigure(0, weight=1)
-        fade.grid_columnconfigure(1, weight=1)
+        fade = native.group(tab, "Fade", row=1, column=0, sticky="ew", pady=(native.PAD, 0))
+        self._field_label(fade, "Fade in:").grid(row=0, column=0, sticky="w", pady=2)
+        self.fade_in_entry = ttk.Entry(fade, textvariable=self.fade_in_var, width=7)
+        self.fade_in_entry.grid(row=0, column=1, sticky="w", pady=2, padx=(native.GAP, native.GAP))
+        self._field_label(fade, "sec").grid(row=0, column=2, sticky="w")
+        self._field_label(fade, "Fade out:").grid(row=0, column=3, sticky="w", pady=2, padx=(native.PAD, 0))
+        self.fade_out_entry = ttk.Entry(fade, textvariable=self.fade_out_var, width=7)
+        self.fade_out_entry.grid(row=0, column=4, sticky="w", pady=2, padx=(native.GAP, native.GAP))
+        self._field_label(fade, "sec").grid(row=0, column=5, sticky="w")
+        for entry in (self.fade_in_entry, self.fade_out_entry):
+            entry.bind("<Return>", lambda _event: self._record_history_snapshot())
+            entry.bind("<FocusOut>", lambda _event: self._record_history_snapshot())
 
-        left = ctk.CTkFrame(fade, fg_color="transparent")
-        left.grid(row=0, column=0, sticky="ew", padx=(0, 5))
-        self._field_label(left, "Fade in (sec)").pack(anchor="w")
-        self.fade_in_entry = ctk.CTkEntry(left, textvariable=self.fade_in_var, height=34)
-        self.fade_in_entry.pack(fill="x", pady=(4, 0))
-        self.fade_in_entry.bind("<Return>", lambda _event: self._record_history_snapshot())
-        self.fade_in_entry.bind("<FocusOut>", lambda _event: self._record_history_snapshot())
+        self._button(tab, "Reset audio edits", self.reset_audio_edits, width=16).grid(
+            row=2, column=0, sticky="e", pady=(native.PAD, 0))
 
-        right = ctk.CTkFrame(fade, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="ew", padx=(5, 0))
-        self._field_label(right, "Fade out (sec)").pack(anchor="w")
-        self.fade_out_entry = ctk.CTkEntry(right, textvariable=self.fade_out_var, height=34)
-        self.fade_out_entry.pack(fill="x", pady=(4, 0))
-        self.fade_out_entry.bind("<Return>", lambda _event: self._record_history_snapshot())
-        self.fade_out_entry.bind("<FocusOut>", lambda _event: self._record_history_snapshot())
+    def _build_export_tab(self, tab: ttk.Frame) -> None:
+        frame = native.group(tab, "Output", row=0, column=0, sticky="ew")
+        frame.grid_columnconfigure(1, weight=1)
+        self._field_label(frame, "File name:").grid(row=0, column=0, sticky="w", pady=2)
+        self.output_name_entry = ttk.Entry(frame, textvariable=self.output_name_var)
+        self.output_name_entry.grid(row=0, column=1, columnspan=3, sticky="ew", pady=2, padx=(native.GAP, 0))
+        self._field_label(frame, "Format:").grid(row=1, column=0, sticky="w", pady=2)
+        self.format_menu = Choice(frame, self.format_var, ["MP4", "MKV", "MOV"],
+                                  lambda _value: self._update_export_summary(), width=7)
+        self.format_menu.grid(row=1, column=1, sticky="w", pady=2, padx=(native.GAP, 0))
+        self._field_label(frame, "Quality:").grid(row=1, column=2, sticky="e", pady=2, padx=(native.PAD, 0))
+        self.quality_menu = Choice(frame, self.quality_var, ["High", "Balanced", "Small"],
+                                   lambda _value: self._update_export_summary(), width=9)
+        self.quality_menu.grid(row=1, column=3, sticky="w", pady=2, padx=(native.GAP, 0))
+        self._field_label(frame, "Folder:").grid(row=2, column=0, sticky="nw", pady=2)
+        self.output_dir_label = self._label(frame, _short_path(self.output_dir), wrap=px(240))
+        self.output_dir_label.grid(row=2, column=1, columnspan=2, sticky="ew", pady=2, padx=(native.GAP, 0))
+        self.choose_output_button = self._button(frame, "Browse…", self.choose_output_folder)
+        self.choose_output_button.grid(row=2, column=3, sticky="ne", pady=2)
 
-        ctk.CTkButton(
-            tab,
-            text="Reset audio edits",
-            height=36,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=MUTED,
-            command=self.reset_audio_edits,
-        ).grid(row=7, column=0, sticky="ew", pady=(18, 0))
-
-    def _build_export_tab(self, tab: ctk.CTkFrame) -> None:
-        tab.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            tab,
-            text="EXPORT",
-            text_color=CYAN,
-            font=("Segoe UI Semibold", 10),
-        ).grid(row=0, column=0, sticky="w", pady=(8, 12))
-
-        self._field_label(tab, "File name").grid(row=1, column=0, sticky="w")
-        self.output_name_entry = ctk.CTkEntry(tab, textvariable=self.output_name_var, height=36)
-        self.output_name_entry.grid(row=2, column=0, sticky="ew", pady=(4, 12))
-
-        export_row = ctk.CTkFrame(tab, fg_color="transparent")
-        export_row.grid(row=3, column=0, sticky="ew")
-        export_row.grid_columnconfigure(0, weight=1)
-        export_row.grid_columnconfigure(1, weight=1)
-
-        left = ctk.CTkFrame(export_row, fg_color="transparent")
-        left.grid(row=0, column=0, sticky="ew", padx=(0, 5))
-        self._field_label(left, "Format").pack(anchor="w")
-        self.format_menu = ctk.CTkOptionMenu(
-            left,
-            variable=self.format_var,
-            values=["MP4", "MKV", "MOV"],
-            command=lambda _value: self._update_export_summary(),
-            fg_color=SURFACE_3,
-            button_color=PURPLE,
-        )
-        self.format_menu.pack(fill="x", pady=(4, 0))
-
-        right = ctk.CTkFrame(export_row, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="ew", padx=(5, 0))
-        self._field_label(right, "Quality").pack(anchor="w")
-        self.quality_menu = ctk.CTkOptionMenu(
-            right,
-            variable=self.quality_var,
-            values=["High", "Balanced", "Small"],
-            command=lambda _value: self._update_export_summary(),
-            fg_color=SURFACE_3,
-            button_color=PURPLE,
-        )
-        self.quality_menu.pack(fill="x", pady=(4, 0))
-
-        summary = ctk.CTkFrame(tab, fg_color=SURFACE_2, corner_radius=10)
-        summary.grid(row=4, column=0, sticky="ew", pady=(14, 4))
+        summary = native.group(tab, "Output summary", row=1, column=0, sticky="ew", pady=(native.PAD, 0))
         summary.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            summary,
-            text="OUTPUT SUMMARY",
-            text_color=TEXT,
-            font=("Segoe UI Semibold", 9),
-        ).grid(row=0, column=0, sticky="w", padx=10, pady=(9, 2))
-        self.export_summary_label = ctk.CTkLabel(
-            summary,
-            text="Load media to calculate output details.",
-            text_color=MUTED,
-            font=("Segoe UI", 9),
-            anchor="w",
-            justify="left",
-            wraplength=290,
-        )
-        self.export_summary_label.grid(row=1, column=0, sticky="ew", padx=10, pady=(2, 10))
+        self.export_summary_label = self._label(summary, "Load media to calculate output details.", wrap=px(280))
+        self.export_summary_label.grid(row=0, column=0, sticky="ew")
 
-        self.choose_output_button = ctk.CTkButton(
-            tab,
-            text="Choose output folder",
-            height=36,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            command=self.choose_output_folder,
-        )
-        self.choose_output_button.grid(row=5, column=0, sticky="ew", pady=(10, 6))
-
-        self.output_dir_label = ctk.CTkLabel(
-            tab,
-            text=_short_path(self.output_dir),
-            text_color=MUTED,
-            font=("Segoe UI", 9),
-            anchor="w",
-            justify="left",
-            wraplength=310,
-        )
-        self.output_dir_label.grid(row=6, column=0, sticky="ew")
-
-        ctk.CTkLabel(
-            tab,
-            text="Edits are non-destructive. Your source file is never overwritten.",
-            text_color="#667996",
-            font=("Segoe UI", 9),
-            justify="left",
-            wraplength=310,
-        ).grid(row=7, column=0, sticky="ew", pady=(16, 0))
+        self._label(tab, "Your source file is never overwritten.", muted=True, wrap=px(300)).grid(
+            row=2, column=0, sticky="ew", pady=(native.PAD, 0))
 
     def _build_timeline(self) -> None:
-        card = self._card(self)
-        card.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 10))
+        card = native.group(self, "Timeline", row=3, column=0, sticky="ew", padx=native.PAD, pady=(native.PAD, 0))
         card.grid_columnconfigure(0, weight=1)
 
-        header = ctk.CTkFrame(card, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=12, pady=(9, 4))
-        header.grid_columnconfigure(3, weight=1)
-
-        ctk.CTkLabel(
-            header,
-            text="TIMELINE",
-            text_color=CYAN,
-            font=("Segoe UI Semibold", 9),
-        ).grid(row=0, column=0, sticky="w")
-
-        self.selection_label = ctk.CTkLabel(
-            header,
-            text="Selection: --",
-            text_color=MUTED,
-            font=("Segoe UI", 9),
-        )
-        self.selection_label.grid(row=0, column=1, sticky="w", padx=(12, 0))
-
-        self.media_info_label = ctk.CTkLabel(
-            header,
-            text="",
-            text_color="#667996",
-            font=("Segoe UI", 9),
-        )
-        self.media_info_label.grid(row=0, column=3, sticky="e", padx=(8, 10))
-
-        ctk.CTkButton(
-            header,
-            text="Fit",
-            width=44,
-            height=26,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=MUTED,
-            command=self.timeline_fit,
-        ).grid(row=0, column=4, padx=(0, 4))
-
-        ctk.CTkButton(
-            header,
-            text="−",
-            width=32,
-            height=26,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=TEXT,
-            command=self.timeline_zoom_out,
-        ).grid(row=0, column=5, padx=2)
-
-        ctk.CTkButton(
-            header,
-            text="+",
-            width=32,
-            height=26,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=TEXT,
-            command=self.timeline_zoom_in,
-        ).grid(row=0, column=6, padx=(2, 0))
+        header = ttk.Frame(card)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, native.GAP))
+        header.grid_columnconfigure(1, weight=1)
+        self.selection_label = self._label(header, "Selection: --")
+        self.selection_label.grid(row=0, column=0, sticky="w")
+        self._button(header, "Fit", self.timeline_fit, width=5).grid(row=0, column=2, padx=(0, native.GAP))
+        self._button(header, "−", self.timeline_zoom_out, width=3).grid(row=0, column=3, padx=(0, native.GAP))
+        self._button(header, "+", self.timeline_zoom_in, width=3).grid(row=0, column=4)
 
         self.timeline = TimelineCanvas(
             card,
             on_seek=self._on_timeline_seek,
             on_range_change=self._on_range_change,
         )
-        self.timeline.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
+        self.timeline.grid(row=1, column=0, sticky="ew")
 
-        range_row = ctk.CTkFrame(card, fg_color="transparent")
-        range_row.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
-        range_row.grid_columnconfigure(1, weight=1)
-        range_row.grid_columnconfigure(3, weight=1)
-
-        ctk.CTkLabel(range_row, text="IN", text_color=MUTED, font=("Segoe UI Semibold", 8)).grid(row=0, column=0, padx=(0, 6))
-        self.start_entry = ctk.CTkEntry(range_row, textvariable=self.start_var, height=32, width=150)
+        range_row = ttk.Frame(card)
+        range_row.grid(row=2, column=0, sticky="ew", pady=(native.GAP, 0))
+        self._field_label(range_row, "In:").grid(row=0, column=0, padx=(0, native.GAP))
+        self.start_entry = ttk.Entry(range_row, textvariable=self.start_var, width=12)
         self.start_entry.grid(row=0, column=1, sticky="w")
         self.start_entry.bind("<Return>", lambda _event: self.apply_range_entries())
         self.start_entry.bind("<FocusOut>", lambda _event: self.apply_range_entries(silent=True))
-
-        ctk.CTkLabel(range_row, text="OUT", text_color=MUTED, font=("Segoe UI Semibold", 8)).grid(row=0, column=2, padx=(16, 6))
-        self.end_entry = ctk.CTkEntry(range_row, textvariable=self.end_var, height=32, width=150)
+        self._field_label(range_row, "Out:").grid(row=0, column=2, padx=(native.PAD, native.GAP))
+        self.end_entry = ttk.Entry(range_row, textvariable=self.end_var, width=12)
         self.end_entry.grid(row=0, column=3, sticky="w")
         self.end_entry.bind("<Return>", lambda _event: self.apply_range_entries())
         self.end_entry.bind("<FocusOut>", lambda _event: self.apply_range_entries(silent=True))
-
-        ctk.CTkButton(
-            range_row,
-            text="Reset range",
-            width=95,
-            height=32,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=MUTED,
-            command=self.reset_range,
-        ).grid(row=0, column=4, padx=(16, 0))
+        self._button(range_row, "Reset range", self.reset_range).grid(row=0, column=4, padx=(native.PAD, 0))
 
     def timeline_fit(self) -> None:
         if not self.render_busy:
@@ -855,88 +537,32 @@ class MediaEditorWindow(ctk.CTkToplevel):
             self.timeline.zoom_out()
 
     def _build_bottom_bar(self) -> None:
-        bar = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=0, height=62)
-        bar.grid(row=3, column=0, sticky="ew")
+        actions = ttk.Frame(self, padding=(native.PAD, native.PAD, native.PAD, native.PAD))
+        actions.grid(row=4, column=0, sticky="ew")
+        self.preview_clip_button = self._button(actions, "Preview edit (15s)", self.preview_edit_clip, width=17,
+                                                state="disabled")
+        self.preview_clip_button.pack(side="left")
+        self.cancel_button = self._button(actions, "Cancel", self.cancel_export, state="disabled")
+        self.cancel_button.pack(side="right", padx=(native.GAP, 0))
+        self.export_button = self._button(actions, "Export…", self.export_media, state="disabled", default=True)
+        self.export_button.pack(side="right", padx=(native.GAP, 0))
+        self.open_export_button = self._button(actions, "Open export", self.open_export, state="disabled")
+        self.open_export_button.pack(side="right")
+
+        # Windows status bar: message, progress bar, media details.
+        ttk.Separator(self, orient="horizontal").grid(row=5, column=0, sticky="ew")
+        bar = ttk.Frame(self, padding=(native.GAP, 2, native.GAP, 2))
+        bar.grid(row=6, column=0, sticky="ew")
         bar.grid_columnconfigure(0, weight=1)
-
-        status_wrap = ctk.CTkFrame(bar, fg_color="transparent")
-        status_wrap.grid(row=0, column=0, sticky="ew", padx=(18, 10), pady=10)
-        status_wrap.grid_columnconfigure(0, weight=1)
-
-        self.status_label = ctk.CTkLabel(
-            status_wrap,
-            text="Loading media…",
-            text_color=MUTED,
-            font=("Segoe UI", 10),
-            anchor="w",
-        )
+        self.status_label = self._label(bar, "Loading media…")
         self.status_label.grid(row=0, column=0, sticky="ew")
-
-        self.progress = ctk.CTkProgressBar(
-            status_wrap,
-            height=7,
-            corner_radius=4,
-            fg_color=SURFACE_3,
-            progress_color=CYAN,
-            mode="determinate",
-        )
-        self.progress.grid(row=1, column=0, sticky="ew", pady=(5, 0))
+        self.progress = Progress(bar, length=px(160))
+        self.progress.grid(row=0, column=1, padx=native.PAD)
         self.progress.set(0)
-
-        self.preview_clip_button = ctk.CTkButton(
-            bar,
-            text="Preview edit (15s)",
-            width=132,
-            height=40,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            border_width=1,
-            border_color=BORDER,
-            command=self.preview_edit_clip,
-            state="disabled",
-        )
-        self.preview_clip_button.grid(row=0, column=1, padx=6, pady=10)
-
-        self.cancel_button = ctk.CTkButton(
-            bar,
-            text="Cancel",
-            width=82,
-            height=40,
-            fg_color="transparent",
-            hover_color=SURFACE_2,
-            border_width=1,
-            border_color=BORDER,
-            text_color=MUTED,
-            command=self.cancel_export,
-            state="disabled",
-        )
-        self.cancel_button.grid(row=0, column=2, padx=6, pady=10)
-
-        self.open_export_button = ctk.CTkButton(
-            bar,
-            text="Open export",
-            width=105,
-            height=40,
-            fg_color=SURFACE_2,
-            hover_color=SURFACE_3,
-            command=self.open_export,
-            state="disabled",
-        )
-        self.open_export_button.grid(row=0, column=3, padx=6, pady=10)
-
-        self.export_button = ctk.CTkButton(
-            bar,
-            text="Export edited media",
-            width=155,
-            height=40,
-            fg_color=CYAN,
-            hover_color=CYAN_HOVER,
-            text_color="#031018",
-            font=("Segoe UI Semibold", 11),
-            command=self.export_media,
-            state="disabled",
-        )
-        self.export_button.grid(row=0, column=4, padx=(6, 18), pady=10)
+        ttk.Separator(bar, orient="vertical").grid(row=0, column=2, sticky="ns")
+        self.status_info = self._label(bar, "")
+        self.status_info.grid(row=0, column=3, sticky="e", padx=(native.GAP, 0))
+        self.media_info_label = self.status_info  # the editing code writes media details here
 
     def _start_load(self) -> None:
         threading.Thread(target=self._load_worker, daemon=True).start()
@@ -2139,7 +1765,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self._set_render_busy(False)
         LOGGER.info("Export cancelled source=%s", self.source_path)
         self.progress.set(0)
-        self.export_button.configure(state="normal", text="Export edited media")
+        self.export_button.configure(state="normal", text="Export…")
         self.preview_clip_button.configure(state="normal")
         self.cancel_button.configure(state="disabled")
         self.status_label.configure(text="Export cancelled", text_color=MUTED)
@@ -2149,7 +1775,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self.last_export = output
         LOGGER.info("Export completed source=%s output=%s", self.source_path, output)
         self.progress.set(1)
-        self.export_button.configure(state="normal", text="Export edited media")
+        self.export_button.configure(state="normal", text="Export…")
         self.preview_clip_button.configure(state="normal")
         self.cancel_button.configure(state="disabled")
         self.open_export_button.configure(state="normal")
@@ -2171,7 +1797,7 @@ class MediaEditorWindow(ctk.CTkToplevel):
         self._set_render_busy(False)
         LOGGER.error("Export failed source=%s error=%s", self.source_path, error)
         self.progress.set(0)
-        self.export_button.configure(state="normal", text="Export edited media")
+        self.export_button.configure(state="normal", text="Export…")
         self.preview_clip_button.configure(state="normal")
         self.cancel_button.configure(state="disabled")
         self.status_label.configure(text="Export failed", text_color=DANGER)
