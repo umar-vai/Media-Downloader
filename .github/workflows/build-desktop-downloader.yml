@@ -64,6 +64,7 @@ jobs:
           python -m py_compile desktop_downloader/power.py
           python -m py_compile desktop_downloader/tray.py
           python -m py_compile desktop_downloader/single_instance.py
+          python -m py_compile desktop_downloader/file_drag.py
           python -m py_compile desktop_downloader/download_queue.py
           python -m py_compile desktop_downloader/browser_resolver.py
           python -m py_compile desktop_downloader/diagnostics_window.py

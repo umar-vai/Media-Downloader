@@ -431,11 +431,13 @@ def available_actions(rows: list[dict[str, Any]]) -> set[str]:
             actions.add("cancel")
         if row["status"] in FINISHED | {"failed", "cancelled"} and row["url"]:
             actions.add("redownload")
+    if any(row["status"] == "complete" and row["file_exists"] and row["path"] for row in rows):
+        actions.add("copy_file")
+    if any(row["save_to"] or row["path"] for row in rows):
+        actions.add("open_folder")
     single = rows[0] if len(rows) == 1 else None
     if single is not None:
         actions.add("properties")
-        if single["save_to"]:
-            actions.add("open_folder")
         if single["status"] == "complete" and single["file_exists"]:
             actions.update({"open", "edit"})
         if single["has_details"]:
@@ -443,6 +445,21 @@ def available_actions(rows: list[dict[str, Any]]) -> set[str]:
         if single["page_url"].startswith(("http://", "https://")):
             actions.add("open_page")
     return actions
+
+
+def action_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """How many of the selected rows each bulk command will act on."""
+    counts = {"resume": 0, "stop": 0, "cancel": 0, "redownload": 0, "copy_file": 0, "copy_link": 0,
+              "delete": len(rows)}
+    for row in rows:
+        status = row["status"]
+        counts["resume"] += status in RESUMABLE
+        counts["stop"] += row["source"] == "queue" and status in STOPPABLE
+        counts["cancel"] += row["source"] == "queue" and status in STOPPABLE | {"paused"}
+        counts["redownload"] += status in FINISHED | {"failed", "cancelled"} and bool(row["url"])
+        counts["copy_file"] += status == "complete" and bool(row["file_exists"]) and bool(row["path"])
+        counts["copy_link"] += bool(row["url"])
+    return counts
 
 
 def selection_summary(rows: list[dict[str, Any]]) -> str:
