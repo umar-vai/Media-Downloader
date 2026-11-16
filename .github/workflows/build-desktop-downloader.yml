@@ -156,7 +156,6 @@ jobs:
             --collect-all curl_cffi `
             --collect-all imageio_ffmpeg `
             --collect-all websocket `
-            --collect-all customtkinter `
             --collect-all pystray `
             --hidden-import pystray._win32 `
             --collect-all PIL `
@@ -191,7 +190,6 @@ jobs:
             --collect-all yt_dlp `
             --collect-all curl_cffi `
             --collect-all imageio_ffmpeg `
-            --collect-all customtkinter `
             --collect-all pystray `
             --hidden-import pystray._win32 `
             --collect-all PIL `
