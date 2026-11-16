@@ -76,6 +76,7 @@ jobs:
           python -m py_compile desktop_downloader/media_player.py
           python -m py_compile desktop_downloader/media_editor_engine.py
           python -m py_compile desktop_downloader/media_editor_widgets.py
+          python -m py_compile desktop_downloader/crop_geometry.py
           python -m py_compile desktop_downloader/launcher.py
           python -m py_compile desktop_downloader/media_sources.py
           python -m py_compile desktop_downloader/network_proxy.py

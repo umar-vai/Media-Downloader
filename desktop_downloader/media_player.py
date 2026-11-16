@@ -196,16 +196,18 @@ class EmbeddedMediaPlayer:
         *,
         crop: tuple[int, int, int, int] | None,
         rotate_degrees: int,
+        filters: list[str] | None = None,
     ) -> None:
+        """Show the edit live. ``filters`` (crop, flip, colour) replaces ``crop`` when given."""
         if self.audio_only:
             return
 
-        if crop:
+        chain = list(filters or [])
+        if not chain and crop:
             x, y, width, height = crop
-            self._command(
-                ["vf", "set", f"crop={int(width)}:{int(height)}:{int(x)}:{int(y)}"],
-                tolerate_dead=True,
-            )
+            chain = [f"crop={int(width)}:{int(height)}:{int(x)}:{int(y)}"]
+        if chain:
+            self._command(["vf", "set", ",".join(chain)], tolerate_dead=True)
         else:
             self._command(["vf", "clr"], tolerate_dead=True)
 

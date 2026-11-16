@@ -11,8 +11,12 @@ if str(DESKTOP_DIR) not in sys.path:
 
 from media_editor_engine import (
     MediaInfo,
+    atempo_chain,
     build_audio_filters,
     build_export_command,
+    build_player_filters,
+    color_filter,
+    output_dimensions,
     build_video_filters,
     compute_crop,
     even_size,
@@ -171,6 +175,48 @@ Stream #0:1: Video: mjpeg, yuvj420p(pc), 600x600, 90k tbr, 90k tbn (attached pic
         self.assertFalse(info.has_video)
         self.assertEqual(info.width, 0)
         self.assertEqual(info.height, 0)
+
+    def test_ratio_preset_accepts_moved_box(self) -> None:
+        self.assertEqual(compute_crop(self.video, "9:16", (100, 0, 404, 720)), (100, 0, 404, 720))
+        with self.assertRaises(ValueError):
+            compute_crop(self.video, "9:16", (1000, 0, 404, 720))
+
+    def test_new_ratio_presets(self) -> None:
+        x, y, width, height = compute_crop(self.video, "4:3") or (0, 0, 0, 0)
+        self.assertEqual(height, 720)
+        self.assertEqual(width, 960)
+        self.assertEqual(x, 160)
+
+    def test_flip_rotate_color_order(self) -> None:
+        filters = build_video_filters(self.video, "1:1", None, "90°", 1.0, flip_h=True, brightness=50,
+                                      saturation=-100)
+        names = [f.split("=")[0] for f in filters]
+        self.assertLess(names.index("crop"), names.index("hflip"))
+        self.assertLess(names.index("hflip"), names.index("transpose"))
+        self.assertLess(names.index("transpose"), names.index("eq"))
+        self.assertIn("saturation=0.000", filters[names.index("eq")])
+
+    def test_color_filter_neutral_is_none(self) -> None:
+        self.assertIsNone(color_filter(0, 0, 0))
+        self.assertEqual(color_filter(0, 100, 0), "eq=contrast=2.000")
+
+    def test_player_filters_skip_rotation(self) -> None:
+        filters = build_player_filters(self.video, "Original", None, flip_v=True, contrast=20)
+        self.assertEqual(filters, ["vflip", "eq=contrast=1.200"])
+
+    def test_output_resolution_never_upscales(self) -> None:
+        self.assertEqual(output_dimensions(self.video, None, "0°", "480p"), (852, 480))
+        self.assertEqual(output_dimensions(self.video, None, "0°", "1080p"), (1280, 720))
+        self.assertEqual(output_dimensions(self.video, (0, 0, 404, 720), "0°", "360p"), (360, 642))
+        self.assertEqual(output_dimensions(self.video, None, "90°", "Original"), (720, 1280))
+        filters = build_video_filters(self.video, "Original", None, "0°", 1.0, resolution="480p")
+        self.assertEqual(filters[-1], "scale=852:480:flags=lanczos")
+
+    def test_atempo_chain_covers_extreme_speeds(self) -> None:
+        self.assertEqual(atempo_chain(1.0), [])
+        self.assertEqual(atempo_chain(0.25), ["atempo=0.5", "atempo=0.5"])
+        self.assertEqual(atempo_chain(4.0), ["atempo=2", "atempo=2"])
+        self.assertEqual(atempo_chain(3.0), ["atempo=2", "atempo=1.5"])
 
     def test_safe_export_name(self) -> None:
         self.assertEqual(safe_export_name('bad:/name*?.mp4'), "bad_name_.mp4")

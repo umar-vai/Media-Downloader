@@ -18,6 +18,12 @@ class EditorSnapshot:
     volume: float
     fade_in: str
     fade_out: str
+    flip_h: bool = False
+    flip_v: bool = False
+    brightness: float = 0.0
+    contrast: float = 0.0
+    saturation: float = 0.0
+    resolution: str = "Original"
 
 
 class EditorHistory:
