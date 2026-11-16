@@ -262,12 +262,52 @@ def _plain_folder(d: ImageDraw.ImageDraw, u: float) -> None:
 
 
 def _tree_painter(name: str, ink: str) -> Painter:
-    """Sidebar icons: the same plain folder for every category, like a classic download
-    manager's tree. The labels tell the categories apart."""
+    """Sidebar icons in the classic Windows style: a plain folder for the groups and one small,
+    single-purpose glyph per file type, so each category reads at a glance."""
+    line = "#5A5A5A"
+    blue = "#2F6FBA"
 
     def paint(d: ImageDraw.ImageDraw, u: float) -> None:
         if name == "queue":
             _lines(d, u, 0.12, 0.25, 0.76, 0.25, 3, ink, 0.1)
+        elif name == "video":
+            # A film frame: dark strip with sprocket holes and a blue picture area.
+            _rrect(d, u, 0.04, 0.16, 0.96, 0.84, 0.06, "#3C3C3C")
+            for x in (0.1, 0.3, 0.5, 0.7):
+                _rrect(d, u, x, 0.2, x + 0.12, 0.28, 0.01, WHITE)
+                _rrect(d, u, x, 0.72, x + 0.12, 0.8, 0.01, WHITE)
+            _rrect(d, u, 0.1, 0.34, 0.9, 0.66, 0.02, "#5B9BD5")
+            _play(d, u, 0.52, 0.5, 0.26, WHITE)
+        elif name == "audio":
+            # A beamed pair of eighth notes.
+            _circle(d, u, 0.26, 0.78, 0.15, blue)
+            _circle(d, u, 0.74, 0.68, 0.15, blue)
+            _line(d, u, [(0.38, 0.78), (0.38, 0.18)], blue, 0.09)
+            _line(d, u, [(0.86, 0.68), (0.86, 0.08)], blue, 0.09)
+            _poly(d, u, [(0.34, 0.14), (0.9, 0.04), (0.9, 0.2), (0.34, 0.3)], blue)
+        elif name == "compressed":
+            # A zip archive: a yellow box with a zipper down the middle.
+            _rrect(d, u, 0.12, 0.08, 0.88, 0.92, 0.06, FOLDER_FRONT, FOLDER_BACK, 0.06)
+            for i, y in enumerate((0.12, 0.22, 0.32, 0.42)):
+                x = 0.44 if i % 2 else 0.5
+                _rrect(d, u, x, y, x + 0.08, y + 0.08, 0.01, line)
+            _rrect(d, u, 0.4, 0.54, 0.6, 0.74, 0.03, line)
+        elif name == "documents":
+            _page(d, u, 0.16, 0.04, 0.84, 0.96, line)
+            _lines(d, u, 0.28, 0.46, 0.44, 0.14, 3, blue, 0.07)
+        elif name == "programs":
+            # An application window: white body with a blue title bar.
+            _rrect(d, u, 0.06, 0.14, 0.94, 0.86, 0.04, WHITE, line, 0.06)
+            _rrect(d, u, 0.06, 0.14, 0.94, 0.34, 0.04, blue)
+            _rrect(d, u, 0.72, 0.19, 0.86, 0.29, 0.01, WHITE)
+        elif name == "misc":
+            _page(d, u, 0.16, 0.04, 0.84, 0.96, line)
+        elif name == "unfinished":
+            _plain_folder(d, u)
+            _arrow_down(d, u, 0.62, 0.62, 0.42, blue, 0.11)
+        elif name == "finished":
+            _plain_folder(d, u)
+            _check(d, u, 0.6, 0.62, 0.46, "#2E8B3E", 0.11)
         else:
             _plain_folder(d, u)
 
