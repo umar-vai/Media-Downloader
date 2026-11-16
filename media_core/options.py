@@ -109,8 +109,12 @@ def clear_request_context() -> None:
 
 
 def apply_request_options(opts: dict[str, Any]) -> dict[str, Any]:
-    """Inject the user's cookies and the request referer into a yt-dlp option dict."""
-    for key, value in cookie_options().items():
+    """Inject the user's cookies and the request referer into a yt-dlp option dict.
+
+    ``_skip_request_cookies`` in ``opts`` leaves out the cookies the extension sent for this
+    request (the user's own cookie settings still apply)."""
+    skip_request = bool(opts.pop("_skip_request_cookies", False))
+    for key, value in cookie_options(include_request=not skip_request).items():
         opts.setdefault(key, value)
     referer = getattr(_LOCAL, "referer", "")
     if referer:
@@ -125,10 +129,10 @@ def apply_request_options(opts: dict[str, Any]) -> dict[str, Any]:
     return opts
 
 
-def cookie_options() -> dict[str, Any]:
+def cookie_options(*, include_request: bool = True) -> dict[str, Any]:
     """yt-dlp options that attach the user's own cookies to every request."""
     result: dict[str, Any] = {}
-    request_cookies = getattr(_LOCAL, "cookiefile", "")
+    request_cookies = getattr(_LOCAL, "cookiefile", "") if include_request else ""
     if request_cookies and Path(request_cookies).is_file():
         return {"cookiefile": request_cookies}
     cookie_file = str(get("cookies_file", "") or "").strip()
