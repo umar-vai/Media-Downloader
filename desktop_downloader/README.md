@@ -13,6 +13,22 @@ Downloaded files are saved to:
 
 You can change the save location from Settings.
 
+## v4.4.1 — visual editor crop and transform tools
+
+- Crop directly on the video preview: draw, move and resize the crop box; use ratio presets or a freeform custom shape.
+- Add crop presets for 4:3, 3:4, 3:2, 2:3 and 21:9, with keyboard nudging and Enter/Escape controls.
+- Flip horizontally or vertically and rotate in 90-degree steps.
+- Adjust brightness, contrast and saturation with live preview and matching export filters.
+- Change playback/export speed from 0.25x to 4x while preserving audio pitch.
+- Export at the original size or downscale to 2160p, 1440p, 1080p, 720p, 480p or 360p without upscaling.
+- Save the edited frame under the playhead as PNG or JPG; all new edits participate in undo/redo.
+
+## v4.4.0 — download manager workflow
+
+- Drag completed downloads from the list into Explorer, Telegram, WhatsApp or browser upload areas; copy selected files with Ctrl+Shift+C.
+- Use Explorer-style Ctrl/Shift multi-selection, drag selection and bulk context-menu actions.
+- Launching the app while it is already in the tray now restores the running window.
+
 ## v3.11.3 — tray-safe updates and single-instance launch
 
 - Normal window Close continues to hide to the system tray; background downloads
