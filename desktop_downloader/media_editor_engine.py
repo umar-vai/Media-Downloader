@@ -24,12 +24,38 @@ class MediaInfo:
 
 CROP_PRESETS: dict[str, tuple[int, int] | None | str] = {
     "Original": None,
+    "Custom": "custom",
     "16:9": (16, 9),
     "9:16": (9, 16),
     "1:1": (1, 1),
     "4:5": (4, 5),
-    "Custom": "custom",
+    "4:3": (4, 3),
+    "3:4": (3, 4),
+    "3:2": (3, 2),
+    "2:3": (2, 3),
+    "21:9": (21, 9),
 }
+
+# Output size: the short side of the exported video, never larger than the source.
+RESOLUTIONS: dict[str, int | None] = {
+    "Original": None,
+    "2160p": 2160,
+    "1440p": 1440,
+    "1080p": 1080,
+    "720p": 720,
+    "480p": 480,
+    "360p": 360,
+}
+
+SPEED_LIMITS = (0.25, 4.0)
+
+
+def crop_ratio(preset: str) -> float | None:
+    """Width / height for a fixed-ratio preset, or None for Original and Custom."""
+    ratio = CROP_PRESETS.get(preset)
+    if isinstance(ratio, tuple):
+        return ratio[0] / ratio[1]
+    return None
 
 
 def ffmpeg_exe() -> str:
@@ -134,9 +160,11 @@ def compute_crop(
     if info.width <= 0 or info.height <= 0:
         raise ValueError("Video dimensions could not be detected.")
 
-    if preset == "Custom":
-        if custom is None:
-            raise ValueError("Custom crop needs X, Y, width and height.")
+    if preset not in CROP_PRESETS:
+        raise ValueError(f"Unknown crop preset: {preset}")
+
+    # A crop box placed by hand (Custom, or a ratio preset that was moved or resized).
+    if custom is not None:
         x, y, width, height = custom
         x = max(0, int(x))
         y = max(0, int(y))
@@ -146,11 +174,17 @@ def compute_crop(
             raise ValueError("Custom crop is outside the source frame.")
         return x, y, width, height
 
-    ratio = CROP_PRESETS.get(preset)
-    if not isinstance(ratio, tuple):
-        return None
+    if preset == "Custom":
+        raise ValueError("Custom crop needs X, Y, width and height.")
 
-    target_ratio = ratio[0] / ratio[1]
+    target_ratio = crop_ratio(preset)
+    if target_ratio is None:
+        return None
+    return centered_crop(info, target_ratio)
+
+
+def centered_crop(info: MediaInfo, target_ratio: float) -> tuple[int, int, int, int]:
+    """The largest box of ``target_ratio`` that fits the frame, centred."""
     source_ratio = info.width / info.height
     if source_ratio > target_ratio:
         height = even_size(info.height)
@@ -164,6 +198,90 @@ def compute_crop(
     return x, y, width, height
 
 
+def color_filter(brightness: float = 0, contrast: float = 0, saturation: float = 0) -> str | None:
+    """FFmpeg ``eq`` filter for slider values from -100 to 100 (0 = unchanged)."""
+    def clamp(value: float) -> float:
+        return max(-100.0, min(100.0, float(value or 0)))
+
+    brightness, contrast, saturation = clamp(brightness), clamp(contrast), clamp(saturation)
+    if not (brightness or contrast or saturation):
+        return None
+    parts = []
+    if brightness:
+        parts.append(f"brightness={brightness / 100 * 0.3:.3f}")
+    if contrast:
+        parts.append(f"contrast={1 + contrast / 100 * (1.0 if contrast > 0 else 0.7):.3f}")
+    if saturation:
+        parts.append(f"saturation={1 + saturation / 100:.3f}")
+    return "eq=" + ":".join(parts)
+
+
+def flip_filters(flip_h: bool = False, flip_v: bool = False) -> list[str]:
+    filters: list[str] = []
+    if flip_h:
+        filters.append("hflip")
+    if flip_v:
+        filters.append("vflip")
+    return filters
+
+
+def rotate_filters(rotate: str) -> list[str]:
+    if rotate == "90°":
+        return ["transpose=1"]
+    if rotate == "180°":
+        return ["hflip", "vflip"]
+    if rotate == "270°":
+        return ["transpose=2"]
+    return []
+
+
+def output_dimensions(
+    info: MediaInfo,
+    crop: tuple[int, int, int, int] | None,
+    rotate: str,
+    resolution: str = "Original",
+) -> tuple[int, int]:
+    """Final width and height after crop, rotation and the output size choice."""
+    if crop:
+        width, height = crop[2], crop[3]
+    else:
+        width, height = info.width, info.height
+    if rotate in {"90°", "270°"}:
+        width, height = height, width
+    if width <= 0 or height <= 0:
+        return 0, 0
+    target = RESOLUTIONS.get(resolution)
+    short = min(width, height)
+    if target and target < short:
+        scale = target / short
+        width, height = width * scale, height * scale
+    return even_size(round(width)), even_size(round(height))
+
+
+def build_player_filters(
+    info: MediaInfo,
+    crop_preset: str,
+    custom_crop: tuple[int, int, int, int] | None,
+    *,
+    flip_h: bool = False,
+    flip_v: bool = False,
+    brightness: float = 0,
+    contrast: float = 0,
+    saturation: float = 0,
+) -> list[str]:
+    """The filters the embedded player shows live (rotation is a player property)."""
+    filters: list[str] = []
+    crop = compute_crop(info, crop_preset, custom_crop)
+    if crop:
+        x, y, width, height = crop
+        filters.append(f"crop={width}:{height}:{x}:{y}")
+    filters += flip_filters(flip_h, flip_v)
+    color = color_filter(brightness, contrast, saturation)
+    if color:
+        filters.append(color)
+    return filters
+
+
 def build_video_filters(
     info: MediaInfo,
     crop_preset: str,
@@ -173,19 +291,26 @@ def build_video_filters(
     *,
     include_speed: bool = True,
     preview_size: tuple[int, int] | None = None,
+    flip_h: bool = False,
+    flip_v: bool = False,
+    brightness: float = 0,
+    contrast: float = 0,
+    saturation: float = 0,
+    resolution: str = "Original",
 ) -> list[str]:
+    # Order matches the live player: crop, flip, rotate, colour.
     filters: list[str] = []
     crop = compute_crop(info, crop_preset, custom_crop)
     if crop:
         x, y, width, height = crop
         filters.append(f"crop={width}:{height}:{x}:{y}")
 
-    if rotate == "90°":
-        filters.append("transpose=1")
-    elif rotate == "180°":
-        filters.extend(["hflip", "vflip"])
-    elif rotate == "270°":
-        filters.append("transpose=2")
+    filters += flip_filters(flip_h, flip_v)
+    filters += rotate_filters(rotate)
+
+    color = color_filter(brightness, contrast, saturation)
+    if color:
+        filters.append(color)
 
     if include_speed and abs(speed - 1.0) > 0.0001:
         filters.append(f"setpts=PTS/{speed:g}")
@@ -195,9 +320,31 @@ def build_video_filters(
         filters.append(f"scale={width}:{height}:force_original_aspect_ratio=decrease")
         filters.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black")
     else:
-        filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+        out_w, out_h = output_dimensions(info, crop, rotate, resolution)
+        if RESOLUTIONS.get(resolution) and out_w and out_h:
+            filters.append(f"scale={out_w}:{out_h}:flags=lanczos")
+        else:
+            filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
 
     return filters
+
+
+def atempo_chain(speed: float) -> list[str]:
+    """``atempo`` filters for any speed: each step stays within 0.5 to 2.0."""
+    speed = max(SPEED_LIMITS[0], min(SPEED_LIMITS[1], float(speed)))
+    if abs(speed - 1.0) <= 0.0001:
+        return []
+    steps: list[str] = []
+    remaining = speed
+    while remaining > 2.0 + 1e-9:
+        steps.append("atempo=2")
+        remaining /= 2.0
+    while remaining < 0.5 - 1e-9:
+        steps.append("atempo=0.5")
+        remaining /= 0.5
+    if abs(remaining - 1.0) > 0.0001:
+        steps.append(f"atempo={remaining:g}")
+    return steps
 
 
 def build_audio_filters(
@@ -209,9 +356,7 @@ def build_audio_filters(
     *,
     include_fades: bool = True,
 ) -> list[str]:
-    filters: list[str] = []
-    if abs(speed - 1.0) > 0.0001:
-        filters.append(f"atempo={speed:g}")
+    filters: list[str] = atempo_chain(speed)
 
     volume = max(0.0, float(volume_percent)) / 100.0
     if abs(volume - 1.0) > 0.0001:
@@ -332,6 +477,12 @@ def build_export_command(
     fade_in: float,
     fade_out: float,
     quality: str,
+    flip_h: bool = False,
+    flip_v: bool = False,
+    brightness: float = 0,
+    contrast: float = 0,
+    saturation: float = 0,
+    resolution: str = "Original",
 ) -> tuple[list[str], float]:
     clip_duration = max(0.001, end - start)
     output_duration = clip_duration / max(0.01, speed)
@@ -359,6 +510,12 @@ def build_export_command(
             rotate,
             speed,
             include_speed=True,
+            flip_h=flip_h,
+            flip_v=flip_v,
+            brightness=brightness,
+            contrast=contrast,
+            saturation=saturation,
+            resolution=resolution,
         )
         command += ["-map", "0:v:0", "-vf", ",".join(video_filters)]
 
@@ -423,6 +580,7 @@ def build_preview_clip_command(
     volume_percent: float,
     fade_in: float,
     fade_out: float,
+    **video: Any,
 ) -> list[str]:
     end = min(info.duration, start + max(0.5, duration))
     command, _ = build_export_command(
@@ -440,8 +598,36 @@ def build_preview_clip_command(
         fade_in=fade_in,
         fade_out=fade_out,
         quality="Balanced",
+        **video,
     )
     # Preview generation is not parsed for progress, so remove progress output.
     progress_index = command.index("-progress")
     command = command[:progress_index] + [str(output)]
+    return command
+
+
+def build_frame_export_command(path: Path, output: Path, position: float, filters: list[str]) -> list[str]:
+    """Save one edited frame as an image (PNG or JPG, from the output suffix)."""
+    command = [
+        ffmpeg_exe(),
+        "-y",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{max(0.0, position):.3f}",
+        "-i",
+        str(path),
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        "-an",
+    ]
+    if filters:
+        command += ["-vf", ",".join(filters)]
+    if output.suffix.lower() in {".jpg", ".jpeg"}:
+        command += ["-q:v", "2"]
+    command.append(str(output))
     return command

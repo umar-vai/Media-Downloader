@@ -11,21 +11,26 @@ from pathlib import Path
 from typing import Any, Callable
 
 import tkinter as tk
-from PIL import Image, ImageTk
+from PIL import Image, ImageEnhance, ImageTk
 from tkinter import filedialog, messagebox, ttk
 
+import crop_geometry as cg
 import native
 from app_logging import get_logger
 from editor_history import EditorHistory, EditorSnapshot
 from media_editor_engine import (
     CROP_PRESETS,
     CREATE_NO_WINDOW,
+    RESOLUTIONS,
     MediaInfo,
-    build_audio_filters,
     build_export_command,
+    build_frame_export_command,
+    build_player_filters,
     build_preview_clip_command,
     build_video_filters,
     compute_crop,
+    crop_ratio,
+    output_dimensions,
     extract_preview_frame,
     extract_waveform,
     format_time,
@@ -56,7 +61,20 @@ PREVIEW_BG = "#000000"  # the video preview stays black, like any media player
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus"}
-SPEEDS = ["0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"]
+SPEEDS = ["0.25x", "0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x", "3.0x", "4.0x"]
+ROTATIONS = ["0°", "90°", "180°", "270°"]
+CROP_FRAME_SIZE = (1280, 720)  # still frame shown while the crop box is adjusted
+CROP_CURSORS = {
+    "move": "fleur",
+    "n": "top_side",
+    "s": "bottom_side",
+    "e": "right_side",
+    "w": "left_side",
+    "nw": "top_left_corner",
+    "ne": "top_right_corner",
+    "sw": "bottom_left_corner",
+    "se": "bottom_right_corner",
+}
 
 LOGGER = get_logger("editor")
 
@@ -186,6 +204,28 @@ class MediaEditorWindow(tk.Toplevel):
         self.custom_y_var = tk.StringVar(self, value="0")
         self.custom_w_var = tk.StringVar(self, value="")
         self.custom_h_var = tk.StringVar(self, value="")
+        self.flip_h_var = tk.BooleanVar(self, value=False)
+        self.flip_v_var = tk.BooleanVar(self, value=False)
+        self.brightness_var = tk.DoubleVar(self, value=0.0)
+        self.contrast_var = tk.DoubleVar(self, value=0.0)
+        self.saturation_var = tk.DoubleVar(self, value=0.0)
+        self.resolution_var = tk.StringVar(self, value="Original")
+
+        # On-video crop box. While it is shown the player is hidden and a still frame of the
+        # whole source is drawn on the preview canvas, with the box on top.
+        self.crop_mode = False
+        self.crop_rect: cg.Rect | None = None
+        self.crop_drag: dict[str, Any] | None = None
+        self.crop_saved: tuple[str, str, str, str, str] | None = None
+        self.crop_frame_pil: Image.Image | None = None
+        self.crop_frame_photo: ImageTk.PhotoImage | None = None
+        self.crop_frame_photo_size: tuple[int, int] = (0, 0)
+        self.crop_frame_scaled: Image.Image | None = None
+        self.crop_bright_photo: ImageTk.PhotoImage | None = None
+        self.crop_frame_generation = 0
+        self.crop_frame_after_id: str | None = None
+        self.crop_view: tuple[float, float, float] | None = None  # offset x, offset y, scale
+        self.color_after_id: str | None = None
 
         self.mute_var = tk.BooleanVar(self, value=False)
         self.volume_var = tk.DoubleVar(self, value=100.0)
@@ -222,6 +262,13 @@ class MediaEditorWindow(tk.Toplevel):
         self.bind("<Control-z>", lambda event: self._on_history_shortcut(event, "undo"))
         self.bind("<Control-y>", lambda event: self._on_history_shortcut(event, "redo"))
         self.bind("<Control-Shift-Z>", lambda event: self._on_history_shortcut(event, "redo"))
+        self.bind("<Up>", lambda event: self._on_vertical_arrow(event, -1, False))
+        self.bind("<Down>", lambda event: self._on_vertical_arrow(event, 1, False))
+        self.bind("<Shift-Up>", lambda event: self._on_vertical_arrow(event, -1, True))
+        self.bind("<Shift-Down>", lambda event: self._on_vertical_arrow(event, 1, True))
+        self.bind("<Return>", self._on_crop_return)
+        self.bind("<Escape>", self._on_crop_escape)
+        self.bind("<KeyPress-c>", self._on_crop_shortcut)
         self.after(40, self._drain_ui_queue)
         self.after(80, self._start_load)
 
@@ -289,6 +336,7 @@ class MediaEditorWindow(tk.Toplevel):
         file_menu.add_command(label="Choose output folder…", command=self.choose_output_folder)
         file_menu.add_separator()
         file_menu.add_command(label="Preview edit (15s)", command=self.preview_edit_clip)
+        file_menu.add_command(label="Save current frame…", command=self.save_current_frame)
         file_menu.add_command(label="Export…", command=self.export_media)
         file_menu.add_command(label="Open export", command=self.open_export)
         file_menu.add_separator()
@@ -297,6 +345,8 @@ class MediaEditorWindow(tk.Toplevel):
         edit_menu = tk.Menu(bar, tearoff=0)
         edit_menu.add_command(label="Undo", accelerator="Ctrl+Z", command=self.undo_edit)
         edit_menu.add_command(label="Redo", accelerator="Ctrl+Y", command=self.redo_edit)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Crop on video", accelerator="C", command=self.toggle_crop_mode)
         edit_menu.add_separator()
         edit_menu.add_command(label="Reset edits", command=self.reset_edits)
         edit_menu.add_command(label="Reset range", command=self.reset_range)
@@ -350,6 +400,14 @@ class MediaEditorWindow(tk.Toplevel):
         )
         self.preview_canvas.grid(row=0, column=0, sticky="nsew")
         self.preview_canvas.bind("<Configure>", self._on_preview_resize)
+        self.preview_canvas.bind("<Button-1>", self._crop_press)
+        self.preview_canvas.bind("<B1-Motion>", self._crop_motion)
+        self.preview_canvas.bind("<ButtonRelease-1>", self._crop_release)
+        self.preview_canvas.bind("<Motion>", self._crop_hover)
+        self.preview_canvas.bind("<Double-Button-1>", self._crop_double_click)
+        # The embedded player draws into this frame, which sits over the canvas. Hiding it
+        # uncovers the canvas, where the crop box is drawn (nothing can be drawn over mpv).
+        self.video_host = tk.Frame(area, bg=PREVIEW_BG, bd=0, highlightthickness=0)
         self.preview_canvas.create_text(
             px(12),
             px(12),
@@ -362,22 +420,42 @@ class MediaEditorWindow(tk.Toplevel):
 
         transport = ttk.Frame(area)
         transport.grid(row=1, column=0, sticky="ew", pady=(native.GAP, 0))
+        self.transport_bar = transport
         transport.grid_columnconfigure(5, weight=1)
-        self._button(transport, "◀ 5s", lambda: self.step_playhead(-5.0), width=6).grid(row=0, column=0)
-        self._button(transport, "Set In", self.set_in_here, width=8).grid(row=0, column=1, padx=(native.GAP, 0))
-        self.play_button = self._button(transport, "▶ Play", self.toggle_playback, state="disabled")
+        self._button(transport, "◀ 5s", lambda: self.step_playhead(-5.0), width=4).grid(row=0, column=0)
+        self._button(transport, "Set In", self.set_in_here, width=6).grid(row=0, column=1, padx=(native.GAP, 0))
+        self.play_button = self._button(transport, "▶ Play", self.toggle_playback, state="disabled", width=8)
         self.play_button.grid(row=0, column=2, padx=(native.GAP, 0))
         self.current_time_label = self._label(transport, "00:00.000 / --:--")
-        self.current_time_label.grid(row=0, column=3, padx=native.PAD)
-        self._button(transport, "Set Out", self.set_out_here, width=8).grid(row=0, column=4)
+        self.current_time_label.grid(row=0, column=3, padx=native.GAP)
+        self._button(transport, "Set Out", self.set_out_here, width=6).grid(row=0, column=4)
         self.preview_status_label = self._label(transport, "Space Play/Pause • I/O In/Out • ←/→ Frame", muted=True)
-        self.preview_status_label.grid(row=0, column=5, sticky="w", padx=native.PAD)
-        self._button(transport, "5s ▶", lambda: self.step_playhead(5.0), width=6).grid(row=0, column=6)
+        self.preview_status_label.grid(row=0, column=5, sticky="w", padx=(native.GAP, native.GAP))
+        self._button(transport, "5s ▶", lambda: self.step_playhead(5.0), width=4).grid(row=0, column=6)
+        self.crop_video_button = self._button(transport, "✂ Crop", self.toggle_crop_mode, state="disabled", width=6)
+        self.crop_video_button.grid(row=0, column=7, padx=(native.GAP, 0))
+
+        # Shown instead of the transport row while the crop box is on screen.
+        crop_bar = ttk.Frame(area)
+        crop_bar.grid_columnconfigure(2, weight=1)
+        self.crop_bar = crop_bar
+        self._field_label(crop_bar, "Size:").grid(row=0, column=0, sticky="w")
+        self.crop_bar_menu = Choice(crop_bar, self.crop_var, list(CROP_PRESETS), self._crop_changed, width=8)
+        self.crop_bar_menu.grid(row=0, column=1, sticky="w", padx=(native.GAP, native.GAP))
+        self.crop_size_label = self._label(crop_bar, "")
+        self.crop_size_label.grid(row=0, column=2, sticky="w")
+        self._button(crop_bar, "Center", self.crop_center, width=7).grid(row=0, column=3, padx=(native.GAP, 0))
+        self._button(crop_bar, "Max size", self.crop_max_size, width=8).grid(row=0, column=4, padx=(native.GAP, 0))
+        self._button(crop_bar, "Cancel", lambda: self.exit_crop_mode(apply=False), width=7).grid(
+            row=0, column=5, padx=(native.GAP, 0))
+        self._button(crop_bar, "✓ Done", lambda: self.exit_crop_mode(apply=True), width=7, default=True).grid(
+            row=0, column=6, padx=(native.GAP, 0))
 
     def _build_inspector(self, workspace: ttk.Frame) -> None:
         self.tabs = Tabs(workspace)
         self.tabs.grid(row=0, column=1, sticky="nsew")
         self._build_video_tab(self.tabs.page("Video"))
+        self._build_color_tab(self.tabs.page("Color"))
         self._build_audio_tab(self.tabs.page("Audio"))
         self._build_export_tab(self.tabs.page("Export"))
 
@@ -385,40 +463,86 @@ class MediaEditorWindow(tk.Toplevel):
         return self._label(master, text)
 
     def _build_video_tab(self, tab: ttk.Frame) -> None:
-        frame = native.group(tab, "Frame and speed", row=0, column=0, sticky="ew")
-        frame.grid_columnconfigure(1, weight=1)
-        self._field_label(frame, "Crop:").grid(row=0, column=0, sticky="w", pady=2)
-        self.crop_menu = Choice(frame, self.crop_var, list(CROP_PRESETS), self._crop_changed, width=16)
-        self.crop_menu.grid(row=0, column=1, columnspan=3, sticky="ew", pady=2, padx=(native.GAP, 0))
-        self._field_label(frame, "Rotate:").grid(row=1, column=0, sticky="w", pady=2)
-        self.rotate_menu = Choice(frame, self.rotate_var, ["0°", "90°", "180°", "270°"], self._rotation_changed,
-                                  width=6)
-        self.rotate_menu.grid(row=1, column=1, sticky="w", pady=2, padx=(native.GAP, 0))
-        self._field_label(frame, "Speed:").grid(row=1, column=2, sticky="e", pady=2, padx=(native.PAD, 0))
-        self.speed_menu = Choice(frame, self.speed_var, SPEEDS, self._speed_changed, width=6)
-        self.speed_menu.grid(row=1, column=3, sticky="w", pady=2, padx=(native.GAP, 0))
+        crop = native.group(tab, "Crop", row=0, column=0, sticky="ew")
+        crop.grid_columnconfigure(1, weight=1)
+        crop.grid_columnconfigure(3, weight=1)
+        self._field_label(crop, "Size:").grid(row=0, column=0, sticky="w", pady=2)
+        self.crop_menu = Choice(crop, self.crop_var, list(CROP_PRESETS), self._crop_changed, width=10)
+        self.crop_menu.grid(row=0, column=1, sticky="ew", pady=2, padx=(native.GAP, 0))
+        self.crop_edit_button = self._button(crop, "✂ Crop on video", self.toggle_crop_mode, state="disabled")
+        self.crop_edit_button.grid(row=0, column=2, columnspan=2, sticky="e", pady=2, padx=(native.GAP, 0))
 
-        custom = native.group(tab, "Custom crop", row=1, column=0, sticky="ew", pady=(native.PAD, 0))
         self.custom_entries: list[ttk.Entry] = []
         fields = [
             ("X:", self.custom_x_var),
             ("Y:", self.custom_y_var),
-            ("Width:", self.custom_w_var),
-            ("Height:", self.custom_h_var),
+            ("W:", self.custom_w_var),
+            ("H:", self.custom_h_var),
         ]
+        numbers = ttk.Frame(crop)
+        numbers.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(2, 0))
         for index, (label, variable) in enumerate(fields):
-            row, col = divmod(index, 2)
-            self._field_label(custom, label).grid(row=row, column=col * 2, sticky="w", pady=2,
-                                                  padx=(0 if col == 0 else native.PAD, native.GAP))
-            entry = ttk.Entry(custom, textvariable=variable, width=7)
-            entry.grid(row=row, column=col * 2 + 1, sticky="w", pady=2)
+            self._field_label(numbers, label).grid(row=0, column=index * 2, sticky="w",
+                                                   padx=(0 if index == 0 else native.GAP, 2))
+            entry = ttk.Entry(numbers, textvariable=variable, width=5)
+            entry.grid(row=0, column=index * 2 + 1, sticky="w")
             entry.configure(state="disabled")
             entry.bind("<Return>", lambda _event: self.apply_custom_crop())
+            entry.bind("<FocusOut>", lambda _event: self.apply_custom_crop(silent=True))
             self.custom_entries.append(entry)
-        self.apply_crop_button = self._button(custom, "Apply crop", self.apply_custom_crop, state="disabled")
-        self.apply_crop_button.grid(row=2, column=0, columnspan=4, sticky="e", pady=(native.GAP, 0))
 
-        self._button(tab, "Reset video edits", self.reset_video_edits, width=16).grid(
+        frame = native.group(tab, "Rotate, flip and speed", row=1, column=0, sticky="ew", pady=(native.PAD, 0))
+        frame.grid_columnconfigure(4, weight=1)
+        self._field_label(frame, "Rotate:").grid(row=0, column=0, sticky="w", pady=2)
+        self.rotate_left_button = self._button(frame, "⟲", lambda: self.rotate_step(-1), width=3)
+        self.rotate_left_button.grid(row=0, column=1, sticky="w", pady=2, padx=(native.GAP, 0))
+        self.rotate_menu = Choice(frame, self.rotate_var, ROTATIONS, self._rotation_changed, width=5)
+        self.rotate_menu.grid(row=0, column=2, sticky="w", pady=2, padx=(native.GAP, 0))
+        self.rotate_right_button = self._button(frame, "⟳", lambda: self.rotate_step(1), width=3)
+        self.rotate_right_button.grid(row=0, column=3, sticky="w", pady=2, padx=(native.GAP, 0))
+        self.flip_h_check = ttk.Checkbutton(frame, text="Flip horizontal", variable=self.flip_h_var,
+                                            command=self._flip_changed)
+        self.flip_h_check.grid(row=1, column=0, columnspan=3, sticky="w", pady=2)
+        self.flip_v_check = ttk.Checkbutton(frame, text="Flip vertical", variable=self.flip_v_var,
+                                            command=self._flip_changed)
+        self.flip_v_check.grid(row=1, column=3, columnspan=2, sticky="w", pady=2, padx=(native.PAD, 0))
+        self._field_label(frame, "Speed:").grid(row=2, column=0, sticky="w", pady=2)
+        self.speed_menu = Choice(frame, self.speed_var, SPEEDS, self._speed_changed, width=6)
+        self.speed_menu.grid(row=2, column=1, columnspan=3, sticky="w", pady=2, padx=(native.GAP, 0))
+        self._button(frame, "Reset video", self.reset_video_edits).grid(row=2, column=4, sticky="e", pady=2)
+
+    def _build_color_tab(self, tab: ttk.Frame) -> None:
+        frame = native.group(tab, "Color", row=0, column=0, sticky="ew")
+        frame.grid_columnconfigure(1, weight=1)
+        self.color_sliders: list[ttk.Scale] = []
+        self.color_value_labels: dict[str, native.Text] = {}
+        rows = [
+            ("Brightness:", "brightness", self.brightness_var),
+            ("Contrast:", "contrast", self.contrast_var),
+            ("Saturation:", "saturation", self.saturation_var),
+        ]
+        for row, (label, key, variable) in enumerate(rows):
+            self._field_label(frame, label).grid(row=row, column=0, sticky="w", pady=2)
+
+            def moved(value: str, key: str = key, variable: tk.DoubleVar = variable) -> None:
+                whole = round(float(value))
+                if abs(variable.get() - whole) > 1e-9:
+                    variable.set(whole)
+                self._color_changed(key)
+
+            slider = ttk.Scale(frame, from_=-100, to=100, orient="horizontal", variable=variable, command=moved)
+            slider.grid(row=row, column=1, sticky="ew", pady=2, padx=(native.GAP, native.GAP))
+            slider.bind("<ButtonRelease-1>", lambda _event: self._record_history_snapshot())
+            slider.bind("<Double-Button-1>", lambda _event, v=variable, k=key: self._reset_one_color(v, k))
+            value_label = self._label(frame, "0")
+            value_label.configure(width=4)
+            value_label.grid(row=row, column=2, sticky="e", pady=2)
+            self.color_sliders.append(slider)
+            self.color_value_labels[key] = value_label
+
+        self._label(tab, "Double-click a slider to reset it. The video preview shows the change live.",
+                    muted=True, wrap=px(280)).grid(row=1, column=0, sticky="ew", pady=(native.PAD, 0))
+        self._button(tab, "Reset color", self.reset_color, width=16).grid(
             row=2, column=0, sticky="e", pady=(native.PAD, 0))
 
     def _build_audio_tab(self, tab: ttk.Frame) -> None:
@@ -476,19 +600,25 @@ class MediaEditorWindow(tk.Toplevel):
         self.quality_menu = Choice(frame, self.quality_var, ["High", "Balanced", "Small"],
                                    lambda _value: self._update_export_summary(), width=9)
         self.quality_menu.grid(row=1, column=3, sticky="w", pady=2, padx=(native.GAP, 0))
-        self._field_label(frame, "Folder:").grid(row=2, column=0, sticky="nw", pady=2)
+        self._field_label(frame, "Size:").grid(row=2, column=0, sticky="w", pady=2)
+        self.resolution_menu = Choice(frame, self.resolution_var, list(RESOLUTIONS), self._resolution_changed,
+                                      width=9)
+        self.resolution_menu.grid(row=2, column=1, sticky="w", pady=2, padx=(native.GAP, 0))
+        self._field_label(frame, "Folder:").grid(row=3, column=0, sticky="nw", pady=2)
         self.output_dir_label = self._label(frame, _short_path(self.output_dir), wrap=px(240))
-        self.output_dir_label.grid(row=2, column=1, columnspan=2, sticky="ew", pady=2, padx=(native.GAP, 0))
+        self.output_dir_label.grid(row=3, column=1, columnspan=2, sticky="ew", pady=2, padx=(native.GAP, 0))
         self.choose_output_button = self._button(frame, "Browse…", self.choose_output_folder)
-        self.choose_output_button.grid(row=2, column=3, sticky="ne", pady=2)
+        self.choose_output_button.grid(row=3, column=3, sticky="ne", pady=2)
 
         summary = native.group(tab, "Output summary", row=1, column=0, sticky="ew", pady=(native.PAD, 0))
         summary.grid_columnconfigure(0, weight=1)
         self.export_summary_label = self._label(summary, "Load media to calculate output details.", wrap=px(280))
         self.export_summary_label.grid(row=0, column=0, sticky="ew")
 
+        self.save_frame_button = self._button(tab, "Save current frame…", self.save_current_frame, state="disabled")
+        self.save_frame_button.grid(row=2, column=0, sticky="w", pady=(native.PAD, 0))
         self._label(tab, "Your source file is never overwritten.", muted=True, wrap=px(300)).grid(
-            row=2, column=0, sticky="ew", pady=(native.PAD, 0))
+            row=3, column=0, sticky="ew", pady=(native.PAD, 0))
 
     def _build_timeline(self) -> None:
         card = native.group(self, "Timeline", row=3, column=0, sticky="ew", padx=native.PAD, pady=(native.PAD, 0))
@@ -603,6 +733,9 @@ class MediaEditorWindow(tk.Toplevel):
             source_format = self.source_path.suffix.upper().lstrip(".")
             self.format_var.set(source_format if source_format in {"MP4", "MKV", "MOV"} else "MP4")
             self.tabs.set("Video")
+            self.crop_video_button.configure(state="normal")
+            self.crop_edit_button.configure(state="normal")
+            self.save_frame_button.configure(state="normal")
             self.schedule_preview(delay=10)
             self._start_thumbnail_generation()
         else:
@@ -610,9 +743,10 @@ class MediaEditorWindow(tk.Toplevel):
             source_format = self.source_path.suffix.upper().lstrip(".")
             self.format_var.set(source_format if source_format in {"MP3", "M4A", "WAV"} else "MP3")
             self.tabs.set("Audio")
-            self.crop_menu.configure(state="disabled")
-            self.rotate_menu.configure(state="disabled")
+            for widget in self._video_only_controls():
+                widget.configure(state="disabled")
             self.speed_menu.configure(state="normal")
+            self.resolution_menu.configure(state="disabled")
             self._start_waveform_generation()
 
         if not info.has_audio:
@@ -647,6 +781,9 @@ class MediaEditorWindow(tk.Toplevel):
         messagebox.showerror(APP_TITLE, error, parent=self)
 
     def _on_preview_resize(self, _event=None) -> None:
+        if self.crop_mode:
+            self._draw_crop_overlay()
+            return
         if self.player is not None and self.player.ready:
             return
         if self.preview_pil is not None:
@@ -696,15 +833,19 @@ class MediaEditorWindow(tk.Toplevel):
 
     def _init_embedded_player(self) -> None:
         try:
-            self.update_idletasks()
-            window_id = self.preview_canvas.winfo_id() if self.info and self.info.has_video else None
+            window_id = None
+            if self.info and self.info.has_video:
+                if not self.crop_mode:
+                    self._show_video_host(True)
+                self.update_idletasks()
+                window_id = self.video_host.winfo_id()
             player = EmbeddedMediaPlayer(
                 self.source_path,
                 window_id=window_id,
                 audio_only=bool(self.info and not self.info.has_video),
             )
             self.player = player
-            self.play_button.configure(text="Starting player…", state="disabled")
+            self.play_button.configure(text="Starting…", state="disabled")
             self.preview_status_label.configure(text="Starting crash-isolated playback engine…", text_color=WARNING)
             threading.Thread(
                 target=self._wait_for_player_worker,
@@ -745,7 +886,7 @@ class MediaEditorWindow(tk.Toplevel):
             self._apply_player_video_transform()
             player.seek(float(self.playhead_var.get()))
             self.preview_generation += 1
-            if self.info and self.info.has_video:
+            if self.info and self.info.has_video and not self.crop_mode:
                 self.preview_canvas.delete("all")
             self.play_button.configure(text="▶ Play", state="normal")
             self.preview_status_label.configure(text="Embedded mpv player ready • Space = Play/Pause", text_color=MUTED)
@@ -768,7 +909,8 @@ class MediaEditorWindow(tk.Toplevel):
                 old_player.close()
             except Exception:
                 pass
-        self.play_button.configure(text="Playback unavailable", state="disabled")
+        self._show_video_host(False)
+        self.play_button.configure(text="No player", state="disabled")
         self.preview_status_label.configure(
             text="Native player stopped safely • using frame preview",
             text_color=WARNING,
@@ -776,8 +918,15 @@ class MediaEditorWindow(tk.Toplevel):
         detail = (error or "Playback helper stopped unexpectedly.").strip()
         LOGGER.warning("Playback fallback active source=%s error=%s", self.source_path, detail)
         self.status_label.configure(text=f"Playback fallback active: {detail[-240:]}", text_color=WARNING)
-        if self.info and self.info.has_video:
+        if self.info and self.info.has_video and not self.crop_mode:
             self.schedule_preview(delay=20)
+
+    def _show_video_host(self, visible: bool) -> None:
+        if visible:
+            self.video_host.grid(row=0, column=0, sticky="nsew", padx=1, pady=1)
+            self.video_host.lift(self.preview_canvas)
+        else:
+            self.video_host.grid_remove()
 
     def _schedule_player_tick(self, delay: int = 18) -> None:
         if self._closing or self.player is None:
@@ -819,8 +968,7 @@ class MediaEditorWindow(tk.Toplevel):
         self.render_busy = busy
         state = "disabled" if busy else "normal"
         controls = [
-            self.crop_menu,
-            self.rotate_menu,
+            *self._video_only_controls(),
             self.speed_menu,
             self.audio_speed_menu,
             self.mute_switch,
@@ -833,8 +981,7 @@ class MediaEditorWindow(tk.Toplevel):
             self.choose_output_button,
             self.start_entry,
             self.end_entry,
-            self.apply_crop_button,
-            *self.custom_entries,
+            self.resolution_menu,
         ]
         for widget in controls:
             try:
@@ -852,15 +999,13 @@ class MediaEditorWindow(tk.Toplevel):
         else:
             if self.player is not None and self.player.ready:
                 self.play_button.configure(state="normal")
-            self._crop_changed(self.crop_var.get())
+            self._sync_crop_entries()
             self._sync_audio_state()
             if self.info is not None and not self.info.has_video:
-                self.crop_menu.configure(state="disabled")
-                self.rotate_menu.configure(state="disabled")
+                for widget in self._video_only_controls():
+                    widget.configure(state="disabled")
                 self.quality_menu.configure(state="disabled")
-                self.apply_crop_button.configure(state="disabled")
-                for entry in self.custom_entries:
-                    entry.configure(state="disabled")
+                self.resolution_menu.configure(state="disabled")
             if self.info is not None and not self.info.has_audio:
                 self.mute_switch.configure(state="disabled")
                 self.volume_slider.configure(state="disabled")
@@ -870,6 +1015,8 @@ class MediaEditorWindow(tk.Toplevel):
     def toggle_playback(self) -> None:
         if self.render_busy:
             return
+        if self.crop_mode:
+            self.exit_crop_mode(apply=True)
         if self.player is None:
             messagebox.showinfo(
                 APP_TITLE,
@@ -934,6 +1081,14 @@ class MediaEditorWindow(tk.Toplevel):
         self.playhead_var.set(value)
         self.timeline.set_playhead(value)
         self._update_current_time_label()
+        if self.crop_mode:
+            if self.player is not None:
+                try:
+                    self.player.seek(value)
+                except Exception:
+                    pass
+            self._request_crop_frame(delay=120)
+            return
         if self.player is not None:
             try:
                 self.player.seek(value)
@@ -967,6 +1122,12 @@ class MediaEditorWindow(tk.Toplevel):
             volume=float(self.volume_var.get()),
             fade_in=self.fade_in_var.get(),
             fade_out=self.fade_out_var.get(),
+            flip_h=bool(self.flip_h_var.get()),
+            flip_v=bool(self.flip_v_var.get()),
+            brightness=float(self.brightness_var.get()),
+            contrast=float(self.contrast_var.get()),
+            saturation=float(self.saturation_var.get()),
+            resolution=self.resolution_var.get(),
         )
 
     def _record_history_snapshot(self) -> None:
@@ -999,6 +1160,13 @@ class MediaEditorWindow(tk.Toplevel):
             self.volume_var.set(snapshot.volume)
             self.fade_in_var.set(snapshot.fade_in)
             self.fade_out_var.set(snapshot.fade_out)
+            self.flip_h_var.set(snapshot.flip_h)
+            self.flip_v_var.set(snapshot.flip_v)
+            self.brightness_var.set(snapshot.brightness)
+            self.contrast_var.set(snapshot.contrast)
+            self.saturation_var.set(snapshot.saturation)
+            self.resolution_var.set(snapshot.resolution)
+            self._update_color_labels()
 
             start = max(0.0, min(parse_time(snapshot.start), self.info.duration))
             end = max(start + 0.001, min(parse_time(snapshot.end), self.info.duration))
@@ -1006,10 +1174,10 @@ class MediaEditorWindow(tk.Toplevel):
             if self.playhead_var.get() < start or self.playhead_var.get() > end:
                 self._seek_player(start)
 
-            custom = snapshot.crop == "Custom"
-            for entry in self.custom_entries:
-                entry.configure(state="normal" if custom else "disabled")
-            self.apply_crop_button.configure(state="normal" if custom else "disabled")
+            self._sync_crop_entries()
+            if self.crop_mode:
+                self.crop_rect = self._crop_rect_from_vars()
+                self._draw_crop_overlay()
 
             self._speed_changed(snapshot.speed)
             self._volume_changed(snapshot.volume)
@@ -1023,7 +1191,7 @@ class MediaEditorWindow(tk.Toplevel):
         self._update_history_buttons()
 
     def undo_edit(self) -> None:
-        if self.render_busy:
+        if self.render_busy or self.crop_drag is not None:
             return
         snapshot = self.history.undo()
         if snapshot is not None:
@@ -1031,7 +1199,7 @@ class MediaEditorWindow(tk.Toplevel):
             self.status_label.configure(text="Undo applied", text_color=MUTED)
 
     def redo_edit(self) -> None:
-        if self.render_busy:
+        if self.render_busy or self.crop_drag is not None:
             return
         snapshot = self.history.redo()
         if snapshot is not None:
@@ -1059,6 +1227,9 @@ class MediaEditorWindow(tk.Toplevel):
     def _on_arrow_shortcut(self, _event: Any, direction: int, coarse: bool) -> str | None:
         if not self._shortcut_allowed() or self.render_busy:
             return None
+        if self.crop_mode:
+            self.crop_nudge(direction * (10 if coarse else 1), 0)
+            return "break"
         if coarse:
             delta = 5.0 * direction
         else:
@@ -1078,7 +1249,7 @@ class MediaEditorWindow(tk.Toplevel):
         return "break"
 
     def schedule_preview(self, delay: int = 140) -> None:
-        if not self.info or not self.info.has_video:
+        if not self.info or not self.info.has_video or self.crop_mode:
             return
         if self.player is not None and self.player.ready:
             return
@@ -1105,6 +1276,7 @@ class MediaEditorWindow(tk.Toplevel):
                 self._speed_value(),
                 include_speed=False,
                 preview_size=(960, 540),
+                **self._video_adjustments(),
             )
         except Exception as exc:
             self._preview_failed(str(exc))
@@ -1132,7 +1304,7 @@ class MediaEditorWindow(tk.Toplevel):
                 self._post_ui(self._preview_failed, str(exc))
 
     def _apply_preview_frame(self, generation: int, image: Image.Image) -> None:
-        if generation != self.preview_generation:
+        if generation != self.preview_generation or self.crop_mode:
             return
         if self.player is not None and self.player.ready:
             return
@@ -1240,12 +1412,7 @@ class MediaEditorWindow(tk.Toplevel):
             fmt = self.format_var.get()
             if self.info.has_video:
                 crop = compute_crop(self.info, self.crop_var.get(), self._current_custom_crop())
-                if crop:
-                    _x, _y, width, height = crop
-                else:
-                    width, height = self.info.width, self.info.height
-                if self.rotate_var.get() in {"90°", "270°"}:
-                    width, height = height, width
+                width, height = output_dimensions(self.info, crop, self.rotate_var.get(), self.resolution_var.get())
                 dimensions = f"{width}×{height}" if width and height else "source resolution"
                 detail = (
                     f"{fmt} • {self.quality_var.get()} • {dimensions}\n"
@@ -1335,20 +1502,74 @@ class MediaEditorWindow(tk.Toplevel):
         if not previous:
             self._record_history_snapshot()
 
-    def _crop_changed(self, value: str) -> None:
-        custom = value == "Custom"
+    # ------------------------------------------------------------------ crop, rotate, flip, colour
+    def _video_only_controls(self) -> list[Any]:
+        return [
+            self.crop_menu,
+            self.crop_bar_menu,
+            self.crop_edit_button,
+            self.crop_video_button,
+            *self.custom_entries,
+            self.rotate_menu,
+            self.rotate_left_button,
+            self.rotate_right_button,
+            self.flip_h_check,
+            self.flip_v_check,
+            *self.color_sliders,
+            self.save_frame_button,
+        ]
+
+    def _sync_crop_entries(self) -> None:
+        has_video = bool(self.info and self.info.has_video)
+        active = has_video and self.crop_var.get() != "Original" and not self.render_busy
         for entry in self.custom_entries:
-            entry.configure(state="normal" if custom else "disabled")
-        self.apply_crop_button.configure(state="normal" if custom else "disabled")
-        if custom and self.info:
-            if not self.custom_w_var.get():
-                self.custom_w_var.set(str(self.info.width))
-            if not self.custom_h_var.get():
-                self.custom_h_var.set(str(self.info.height))
+            entry.configure(state="normal" if active else "disabled")
+        crop_state = "normal" if has_video and not self.render_busy else "disabled"
+        self.crop_edit_button.configure(state=crop_state,
+                                        text="✓ Done cropping" if self.crop_mode else "✂ Crop on video")
+        self.crop_video_button.configure(state=crop_state)
+
+    def _video_adjustments(self) -> dict[str, Any]:
+        return {
+            "flip_h": bool(self.flip_h_var.get()),
+            "flip_v": bool(self.flip_v_var.get()),
+            "brightness": float(self.brightness_var.get()),
+            "contrast": float(self.contrast_var.get()),
+            "saturation": float(self.saturation_var.get()),
+        }
+
+    def _write_crop_vars(self, box: tuple[int, int, int, int]) -> None:
+        x, y, width, height = box
+        self.custom_x_var.set(str(x))
+        self.custom_y_var.set(str(y))
+        self.custom_w_var.set(str(width))
+        self.custom_h_var.set(str(height))
+
+    def _crop_changed(self, value: str) -> None:
+        if not self.info or not self.info.has_video:
+            return
+        width, height = self.info.width, self.info.height
+        if value == "Original":
+            if self.crop_mode:
+                self._leave_crop_mode()
+        elif width > 0 and height > 0:
+            ratio = crop_ratio(value)
+            if ratio is not None:
+                # A size preset starts as the largest box of that shape; move or resize it after.
+                self.crop_rect = cg.centered(ratio, width, height)
+            else:
+                self.crop_rect = self._crop_rect_from_vars()
+            self._write_crop_vars(cg.finalize(self.crop_rect, width, height))
+            if not self.crop_mode:
+                self.enter_crop_mode()
+            else:
+                self._draw_crop_overlay()
+        self._sync_crop_entries()
         self._apply_player_video_transform()
         self._update_export_summary()
         self.schedule_preview(delay=40)
-        self._record_history_snapshot()
+        if not self.crop_mode:
+            self._record_history_snapshot()
 
     def _rotation_changed(self, _value: str) -> None:
         self._apply_player_video_transform()
@@ -1356,44 +1577,469 @@ class MediaEditorWindow(tk.Toplevel):
         self.schedule_preview(delay=20)
         self._record_history_snapshot()
 
+    def rotate_step(self, direction: int) -> None:
+        if self.render_busy or not self.info or not self.info.has_video:
+            return
+        try:
+            index = ROTATIONS.index(self.rotate_var.get())
+        except ValueError:
+            index = 0
+        self.rotate_var.set(ROTATIONS[(index + direction) % len(ROTATIONS)])
+        self._rotation_changed(self.rotate_var.get())
+
+    def _flip_changed(self) -> None:
+        self._apply_player_video_transform()
+        self.schedule_preview(delay=20)
+        self._record_history_snapshot()
+
+    def _update_color_labels(self) -> None:
+        for key, variable in (
+            ("brightness", self.brightness_var),
+            ("contrast", self.contrast_var),
+            ("saturation", self.saturation_var),
+        ):
+            value = int(round(variable.get()))
+            self.color_value_labels[key].configure(text=f"{value:+d}" if value else "0")
+
+    def _color_changed(self, _key: str) -> None:
+        self._update_color_labels()
+        # Sliders fire on every pixel; update the player at most every 80 ms.
+        if self.color_after_id is not None:
+            return
+
+        def apply() -> None:
+            self.color_after_id = None
+            self._apply_player_video_transform()
+            self.schedule_preview(delay=60)
+
+        self.color_after_id = self.after(80, apply)
+
+    def _reset_one_color(self, variable: tk.DoubleVar, key: str) -> str:
+        if not self.render_busy:
+            variable.set(0.0)
+            self._color_changed(key)
+            self._record_history_snapshot()
+        return "break"
+
+    def reset_color(self) -> None:
+        if self.render_busy:
+            return
+        for variable in (self.brightness_var, self.contrast_var, self.saturation_var):
+            variable.set(0.0)
+        self._color_changed("all")
+        self._record_history_snapshot()
+
+    def _resolution_changed(self, _value: str) -> None:
+        self._update_export_summary()
+        self._record_history_snapshot()
+
     def _apply_player_video_transform(self) -> None:
         if self.player is None or not self.player.ready or not self.info or not self.info.has_video:
             return
         try:
-            crop = compute_crop(self.info, self.crop_var.get(), self._current_custom_crop())
+            filters = build_player_filters(
+                self.info,
+                self.crop_var.get(),
+                self._current_custom_crop(),
+                **self._video_adjustments(),
+            )
             rotate_map = {"0°": 0, "90°": 90, "180°": 180, "270°": 270}
             self.player.set_video_transform(
-                crop=crop,
+                crop=None,
                 rotate_degrees=rotate_map.get(self.rotate_var.get(), 0),
+                filters=filters,
             )
         except Exception as exc:
             self.status_label.configure(text=f"Preview transform error: {exc}", text_color=WARNING)
 
     def _current_custom_crop(self) -> tuple[int, int, int, int] | None:
-        if self.crop_var.get() != "Custom":
+        if self.crop_var.get() == "Original":
+            return None
+        if not self.custom_w_var.get() or not self.custom_h_var.get():
             return None
         return (
-            int(self.custom_x_var.get() or 0),
-            int(self.custom_y_var.get() or 0),
-            int(self.custom_w_var.get() or 0),
-            int(self.custom_h_var.get() or 0),
+            int(float(self.custom_x_var.get() or 0)),
+            int(float(self.custom_y_var.get() or 0)),
+            int(float(self.custom_w_var.get() or 0)),
+            int(float(self.custom_h_var.get() or 0)),
         )
 
-    def apply_custom_crop(self) -> None:
-        if self.render_busy:
+    def apply_custom_crop(self, silent: bool = False) -> None:
+        if self.render_busy or self._applying_history:
             return
-        if not self.info:
+        if not self.info or self.crop_var.get() == "Original":
             return
         try:
             crop = self._current_custom_crop()
             compute_crop(self.info, "Custom", crop)
+            if self.crop_mode:
+                self.crop_rect = self._crop_rect_from_vars()
+                self._draw_crop_overlay()
             self._apply_player_video_transform()
             self._update_export_summary()
             self.schedule_preview(delay=20)
             self._record_history_snapshot()
-            self.status_label.configure(text="Custom crop applied to preview", text_color=SUCCESS)
+            if not silent:
+                self.status_label.configure(text="Crop numbers applied", text_color=SUCCESS)
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, str(exc), parent=self)
+            if silent:
+                self.status_label.configure(text=f"Crop numbers not applied: {exc}", text_color=DANGER)
+            else:
+                messagebox.showerror(APP_TITLE, str(exc), parent=self)
+
+    # ------------------------------------------------------------------ crop box on the video
+    def _crop_rect_from_vars(self) -> cg.Rect:
+        info = self.info
+        assert info is not None
+        try:
+            box = compute_crop(info, self.crop_var.get(), self._current_custom_crop())
+        except Exception:
+            box = None
+        if box:
+            return tuple(float(v) for v in box)  # type: ignore[return-value]
+        return cg.centered(crop_ratio(self.crop_var.get()), info.width, info.height)
+
+    def toggle_crop_mode(self) -> None:
+        if self.crop_mode:
+            self.exit_crop_mode(apply=True)
+        else:
+            self.enter_crop_mode()
+
+    def enter_crop_mode(self) -> None:
+        info = self.info
+        if self.crop_mode or self.render_busy or not info or not info.has_video:
+            return
+        if info.width <= 0 or info.height <= 0:
+            messagebox.showwarning(APP_TITLE, "The video size could not be detected, so it cannot be cropped.",
+                                   parent=self)
+            return
+        self.pause_playback()
+        # Cancel goes back to the last committed edit (the size menu may already have changed).
+        last = self.history.current
+        if last is not None:
+            self.crop_saved = (last.crop, last.custom_x, last.custom_y, last.custom_w, last.custom_h)
+        else:
+            self.crop_saved = (
+                self.crop_var.get(),
+                self.custom_x_var.get(),
+                self.custom_y_var.get(),
+                self.custom_w_var.get(),
+                self.custom_h_var.get(),
+            )
+        if self.crop_var.get() == "Original":
+            self.crop_var.set("Custom")
+            self._write_crop_vars(cg.finalize(cg.full_frame(info.width, info.height), info.width, info.height))
+        self.crop_rect = self._crop_rect_from_vars()
+        self.crop_mode = True
+        self.crop_drag = None
+        if self.preview_after_id is not None:
+            try:
+                self.after_cancel(self.preview_after_id)
+            except Exception:
+                pass
+            self.preview_after_id = None
+        self.preview_generation += 1
+        self._show_video_host(False)
+        self.transport_bar.grid_remove()
+        self.crop_bar.grid(row=1, column=0, sticky="ew", pady=(native.GAP, 0))
+        self.tabs.set("Video")
+        self._sync_crop_entries()
+        self.preview_canvas.focus_set()
+        self.status_label.configure(
+            text="Crop: drag the box to move it, its corners or edges to resize, or outside it for a new box. "
+                 "Enter = Done, Esc = Cancel, arrows nudge.",
+            text_color=MUTED,
+        )
+        self._draw_crop_overlay()
+        self._request_crop_frame(delay=0)
+
+    def exit_crop_mode(self, apply: bool = True) -> None:
+        if not self.crop_mode:
+            return
+        info = self.info
+        if not apply and self.crop_saved is not None:
+            preset, x, y, w, h = self.crop_saved
+            self.crop_var.set(preset)
+            self.custom_x_var.set(x)
+            self.custom_y_var.set(y)
+            self.custom_w_var.set(w)
+            self.custom_h_var.set(h)
+        elif info and self.crop_rect is not None:
+            box = cg.finalize(self.crop_rect, info.width, info.height)
+            if self.crop_var.get() == "Custom" and box == (0, 0, info.width // 2 * 2, info.height // 2 * 2):
+                # The box still covers the whole frame: that is no crop at all.
+                self.crop_var.set("Original")
+            self._write_crop_vars(box)
+        self._leave_crop_mode()
+        self._sync_crop_entries()
+        self._apply_player_video_transform()
+        self._update_export_summary()
+        self.schedule_preview(delay=20)
+        if apply:
+            self._record_history_snapshot()
+            crop = None
+            if info:
+                try:
+                    crop = compute_crop(info, self.crop_var.get(), self._current_custom_crop())
+                except Exception:
+                    crop = None
+            text = f"Crop set to {crop[2]}×{crop[3]}" if crop else "Crop removed"
+            self.status_label.configure(text=text, text_color=SUCCESS)
+        else:
+            self.status_label.configure(text="Crop change cancelled", text_color=MUTED)
+
+    def _leave_crop_mode(self) -> None:
+        self.crop_mode = False
+        self.crop_drag = None
+        self.crop_saved = None
+        self.crop_frame_generation += 1
+        self.crop_bar.grid_remove()
+        self.transport_bar.grid()
+        self.preview_canvas.configure(cursor="crosshair")
+        self.preview_canvas.delete("all")
+        if self.player is not None and self.player.ready:
+            self._show_video_host(True)
+            try:
+                self.player.seek(float(self.playhead_var.get()))
+            except Exception:
+                pass
+        elif self.preview_pil is not None:
+            self._draw_preview_image(self.preview_pil)
+
+    def _request_crop_frame(self, delay: int = 120) -> None:
+        if not self.crop_mode:
+            return
+        if self.crop_frame_after_id is not None:
+            try:
+                self.after_cancel(self.crop_frame_after_id)
+            except Exception:
+                pass
+        self.crop_frame_after_id = self.after(max(1, delay), self._start_crop_frame)
+
+    def _start_crop_frame(self) -> None:
+        self.crop_frame_after_id = None
+        if not self.crop_mode:
+            return
+        self.crop_frame_generation += 1
+        generation = self.crop_frame_generation
+        position = float(self.playhead_var.get())
+        width, height = CROP_FRAME_SIZE
+        filters = [f"scale={width}:{height}:force_original_aspect_ratio=decrease"]
+        threading.Thread(target=self._crop_frame_worker, args=(generation, position, filters), daemon=True).start()
+
+    def _crop_frame_worker(self, generation: int, position: float, filters: list[str]) -> None:
+        try:
+            data = extract_preview_frame(self.source_path, position, filters, timeout=10)
+            image = Image.open(io.BytesIO(data)).convert("RGB")
+            self._post_ui(self._apply_crop_frame, generation, image)
+        except Exception as exc:
+            LOGGER.warning("Crop frame failed source=%s error=%s", self.source_path, exc)
+
+    def _apply_crop_frame(self, generation: int, image: Image.Image) -> None:
+        if generation != self.crop_frame_generation or not self.crop_mode:
+            return
+        self.crop_frame_pil = image
+        self.crop_frame_photo = None
+        self._draw_crop_overlay()
+
+    def _crop_to_canvas(self, x: float, y: float) -> tuple[float, float]:
+        ox, oy, scale = self.crop_view or (0.0, 0.0, 1.0)
+        return ox + x * scale, oy + y * scale
+
+    def _canvas_to_crop(self, x: float, y: float) -> tuple[float, float]:
+        ox, oy, scale = self.crop_view or (0.0, 0.0, 1.0)
+        return (x - ox) / scale, (y - oy) / scale
+
+    def _draw_crop_overlay(self) -> None:
+        if not self.crop_mode or not self.info or self.crop_rect is None:
+            return
+        canvas = self.preview_canvas
+        canvas.delete("all")
+        cw, ch = canvas.winfo_width(), canvas.winfo_height()
+        frame_w, frame_h = self.info.width, self.info.height
+        margin = px(18)
+        scale = min((cw - 2 * margin) / frame_w, (ch - 2 * margin) / frame_h)
+        if scale <= 0:
+            return
+        dw, dh = frame_w * scale, frame_h * scale
+        ox, oy = (cw - dw) / 2, (ch - dh) / 2
+        self.crop_view = (ox, oy, scale)
+
+        left, top = self._crop_to_canvas(self.crop_rect[0], self.crop_rect[1])
+        right, bottom = self._crop_to_canvas(self.crop_rect[0] + self.crop_rect[2],
+                                             self.crop_rect[1] + self.crop_rect[3])
+
+        size = (max(1, int(round(dw))), max(1, int(round(dh))))
+        if self.crop_frame_pil is not None:
+            # The whole frame darkened, with the kept part drawn bright on top.
+            if self.crop_frame_photo is None or self.crop_frame_photo_size != size:
+                self.crop_frame_scaled = self.crop_frame_pil.resize(size, Image.Resampling.BILINEAR)
+                dim = ImageEnhance.Brightness(self.crop_frame_scaled).enhance(0.35)
+                self.crop_frame_photo = ImageTk.PhotoImage(dim)
+                self.crop_frame_photo_size = size
+            canvas.create_image(ox, oy, image=self.crop_frame_photo, anchor="nw")
+            box_l = max(0, int(round(left - ox)))
+            box_t = max(0, int(round(top - oy)))
+            box_r = min(size[0], int(round(right - ox)))
+            box_b = min(size[1], int(round(bottom - oy)))
+            if box_r > box_l and box_b > box_t:
+                self.crop_bright_photo = ImageTk.PhotoImage(self.crop_frame_scaled.crop((box_l, box_t, box_r, box_b)))
+                canvas.create_image(ox + box_l, oy + box_t, image=self.crop_bright_photo, anchor="nw")
+        else:
+            canvas.create_rectangle(ox, oy, ox + dw, oy + dh, fill="#1E1E1E", outline="")
+            canvas.create_text(ox + dw / 2, oy + dh / 2, text="Loading frame…", fill="#C0C0C0",
+                               font=native.font(self))
+        # Rule-of-thirds guides.
+        for i in (1, 2):
+            gx = left + (right - left) * i / 3
+            gy = top + (bottom - top) * i / 3
+            canvas.create_line(gx, top, gx, bottom, fill="#FFFFFF", dash=(3, 4))
+            canvas.create_line(left, gy, right, gy, fill="#FFFFFF", dash=(3, 4))
+        canvas.create_rectangle(left - 1, top - 1, right + 1, bottom + 1, outline="#000000", width=1)
+        canvas.create_rectangle(left, top, right, bottom, outline="#FFFFFF", width=2)
+
+        # Handles: corners and edge midpoints.
+        handle = px(5)
+        mid_x, mid_y = (left + right) / 2, (top + bottom) / 2
+        for hx, hy in ((left, top), (mid_x, top), (right, top), (right, mid_y),
+                       (right, bottom), (mid_x, bottom), (left, bottom), (left, mid_y)):
+            canvas.create_rectangle(hx - handle, hy - handle, hx + handle, hy + handle,
+                                    fill="#FFFFFF", outline="#000000")
+
+        box = cg.finalize(self.crop_rect, frame_w, frame_h)
+        text = f"{box[2]} × {box[3]}"
+        label = canvas.create_text(left + px(8), top + px(8), text=text, fill="#FFFFFF", anchor="nw",
+                                   font=native.font(self, bold=True))
+        x1, y1, x2, y2 = canvas.bbox(label)
+        backing = canvas.create_rectangle(x1 - 4, y1 - 2, x2 + 4, y2 + 2, fill="#000000", outline="")
+        canvas.tag_lower(backing, label)
+
+        preset = self.crop_var.get()
+        self.crop_size_label.configure(text=f"{box[2]}×{box[3]}" if crop_ratio(preset) else f"{box[2]}×{box[3]} free")
+
+    def _crop_press(self, event: Any) -> str | None:
+        if not self.crop_mode or self.crop_rect is None or not self.info or self.crop_view is None:
+            return None
+        self.preview_canvas.focus_set()
+        sx, sy = self._canvas_to_crop(event.x, event.y)
+        scale = self.crop_view[2]
+        handle = cg.hit_test(self.crop_rect, sx, sy, px(9) / scale)
+        self.crop_drag = {
+            "handle": handle or "new",
+            "start": (sx, sy),
+            "rect": self.crop_rect,
+            "moved": False,
+        }
+        return "break"
+
+    def _crop_motion(self, event: Any) -> str | None:
+        drag = self.crop_drag
+        if not self.crop_mode or drag is None or not self.info:
+            return None
+        frame_w, frame_h = self.info.width, self.info.height
+        sx, sy = self._canvas_to_crop(event.x, event.y)
+        ax, ay = drag["start"]
+        ratio = crop_ratio(self.crop_var.get())
+        if drag["handle"] == "new":
+            if not drag["moved"] and max(abs(sx - ax), abs(sy - ay)) * (self.crop_view or (0, 0, 1))[2] < 4:
+                return "break"
+            rect = cg.from_points(ax, ay, sx, sy, frame_w, frame_h, ratio)
+            if rect[2] < 2 or rect[3] < 2:
+                return "break"
+        else:
+            rect = cg.resize(drag["rect"], drag["handle"], sx - ax, sy - ay, frame_w, frame_h, ratio)
+        drag["moved"] = True
+        self.crop_rect = rect
+        self._write_crop_vars(cg.finalize(rect, frame_w, frame_h))
+        self._draw_crop_overlay()
+        self._update_export_summary()
+        return "break"
+
+    def _crop_release(self, _event: Any) -> str | None:
+        drag = self.crop_drag
+        if drag is None:
+            return None
+        self.crop_drag = None
+        if drag["handle"] == "new" and self.crop_rect is not None:
+            if self.crop_rect[2] < cg.MIN_SIZE or self.crop_rect[3] < cg.MIN_SIZE:
+                self.crop_rect = drag["rect"]  # a click, or a box too small to be useful
+        if self.info and self.crop_rect is not None:
+            self._write_crop_vars(cg.finalize(self.crop_rect, self.info.width, self.info.height))
+        self._draw_crop_overlay()
+        self._update_export_summary()
+        return "break"
+
+    def _crop_hover(self, event: Any) -> None:
+        if not self.crop_mode or self.crop_rect is None or self.crop_view is None or self.crop_drag is not None:
+            return
+        sx, sy = self._canvas_to_crop(event.x, event.y)
+        handle = cg.hit_test(self.crop_rect, sx, sy, px(9) / self.crop_view[2])
+        try:
+            self.preview_canvas.configure(cursor=CROP_CURSORS.get(handle or "", "crosshair"))
+        except tk.TclError:
+            self.preview_canvas.configure(cursor="crosshair")
+
+    def _crop_double_click(self, event: Any) -> str | None:
+        if self.crop_mode:
+            if self.crop_rect is not None and self.crop_view is not None:
+                sx, sy = self._canvas_to_crop(event.x, event.y)
+                if cg.hit_test(self.crop_rect, sx, sy, 0) == "move":
+                    self.exit_crop_mode(apply=True)
+            return "break"
+        if self.info and self.info.has_video and not self.render_busy:
+            self.enter_crop_mode()
+            return "break"
+        return None
+
+    def _set_crop_rect(self, rect: cg.Rect) -> None:
+        if not self.info:
+            return
+        self.crop_rect = rect
+        self._write_crop_vars(cg.finalize(rect, self.info.width, self.info.height))
+        self._draw_crop_overlay()
+        self._update_export_summary()
+
+    def crop_center(self) -> None:
+        if self.crop_mode and self.info and self.crop_rect is not None:
+            _x, _y, w, h = self.crop_rect
+            self._set_crop_rect(((self.info.width - w) / 2, (self.info.height - h) / 2, w, h))
+
+    def crop_max_size(self) -> None:
+        if self.crop_mode and self.info:
+            self._set_crop_rect(cg.centered(crop_ratio(self.crop_var.get()), self.info.width, self.info.height))
+
+    def crop_nudge(self, dx: float, dy: float) -> None:
+        if self.crop_mode and self.info and self.crop_rect is not None:
+            self._set_crop_rect(cg.nudge(self.crop_rect, dx, dy, self.info.width, self.info.height))
+
+    def _on_vertical_arrow(self, _event: Any, direction: int, coarse: bool) -> str | None:
+        if not self.crop_mode or not self._shortcut_allowed():
+            return None
+        self.crop_nudge(0, direction * (10 if coarse else 1))
+        return "break"
+
+    def _on_crop_return(self, _event: Any) -> str | None:
+        if not self.crop_mode or not self._shortcut_allowed():
+            return None
+        self.exit_crop_mode(apply=True)
+        return "break"
+
+    def _on_crop_escape(self, _event: Any) -> str | None:
+        if not self.crop_mode:
+            return None
+        if self.crop_drag is not None:
+            self.crop_rect = self.crop_drag["rect"]
+            self.crop_drag = None
+            self._set_crop_rect(self.crop_rect)
+            return "break"
+        self.exit_crop_mode(apply=False)
+        return "break"
+
+    def _on_crop_shortcut(self, _event: Any) -> str | None:
+        if not self._shortcut_allowed() or self.render_busy:
+            return None
+        self.toggle_crop_mode()
+        return "break"
 
     def _speed_value(self) -> float:
         return float(self.speed_var.get().rstrip("x"))
@@ -1433,13 +2079,20 @@ class MediaEditorWindow(tk.Toplevel):
         previous = self._applying_history
         self._applying_history = True
         try:
+            if self.crop_mode:
+                self.crop_var.set("Original")
+                self._leave_crop_mode()
             self.crop_var.set("Original")
             self.rotate_var.set("0°")
             self.speed_var.set("1.0x")
             self._speed_changed("1.0x")
-            for entry in self.custom_entries:
-                entry.configure(state="disabled")
-            self.apply_crop_button.configure(state="disabled")
+            self.flip_h_var.set(False)
+            self.flip_v_var.set(False)
+            for variable in (self.brightness_var, self.contrast_var, self.saturation_var):
+                variable.set(0.0)
+            self._update_color_labels()
+            self.resolution_var.set("Original")
+            self._sync_crop_entries()
             if self.info:
                 self.custom_x_var.set("0")
                 self.custom_y_var.set("0")
@@ -1494,6 +2147,8 @@ class MediaEditorWindow(tk.Toplevel):
     def _validated_settings(self) -> dict[str, Any]:
         if not self.info:
             raise RuntimeError("Media is still loading.")
+        if self.crop_mode:
+            self.exit_crop_mode(apply=True)
 
         start = parse_time(self.start_var.get())
         end = parse_time(self.end_var.get())
@@ -1521,6 +2176,7 @@ class MediaEditorWindow(tk.Toplevel):
             "fade_in": fade_in,
             "fade_out": fade_out,
             "quality": self.quality_var.get(),
+            "video": {**self._video_adjustments(), "resolution": self.resolution_var.get()},
         }
 
     def choose_output_folder(self) -> None:
@@ -1582,6 +2238,7 @@ class MediaEditorWindow(tk.Toplevel):
                 volume_percent=settings["volume_percent"],
                 fade_in=settings["fade_in"],
                 fade_out=settings["fade_out"],
+                **settings["video"],
             )
         except Exception as exc:
             messagebox.showerror(APP_TITLE, str(exc), parent=self)
@@ -1670,6 +2327,7 @@ class MediaEditorWindow(tk.Toplevel):
                 fade_in=settings["fade_in"],
                 fade_out=settings["fade_out"],
                 quality=settings["quality"],
+                **settings["video"],
             )
         except Exception as exc:
             messagebox.showerror(APP_TITLE, str(exc), parent=self)
@@ -1809,6 +2467,57 @@ class MediaEditorWindow(tk.Toplevel):
                 _open_path(self.last_export)
             except Exception as exc:
                 messagebox.showerror(APP_TITLE, str(exc), parent=self)
+
+    def save_current_frame(self) -> None:
+        info = self.info
+        if not info or not info.has_video or self.render_busy:
+            return
+        try:
+            settings = self._validated_settings()
+            position = float(self.playhead_var.get())
+            filters = build_video_filters(
+                info,
+                settings["crop_preset"],
+                settings["custom_crop"],
+                settings["rotate"],
+                1.0,
+                include_speed=False,
+                **settings["video"],
+            )
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, str(exc), parent=self)
+            return
+        stamp = format_time(position).replace(":", "-").replace(".", "_")
+        target = filedialog.asksaveasfilename(
+            title="Save current frame",
+            parent=self,
+            initialdir=str(self.output_dir if self.output_dir.exists() else self.source_path.parent),
+            initialfile=f"{safe_export_name(self.source_path.stem)}_frame_{stamp}.png",
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png"), ("JPEG image", "*.jpg *.jpeg")],
+        )
+        if not target:
+            return
+        output = Path(target)
+        command = build_frame_export_command(self.source_path, output, position, filters)
+        self.status_label.configure(text="Saving frame…", text_color=WARNING)
+
+        def worker() -> None:
+            try:
+                result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                        encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW,
+                                        timeout=30)
+                if result.returncode != 0 or not output.exists():
+                    raise RuntimeError((result.stderr or "Could not save the frame.")[-1200:])
+                self._post_ui(lambda: self.status_label.configure(text=f"Frame saved • {output.name}",
+                                                                  text_color=SUCCESS))
+            except Exception as exc:
+                message = str(exc)
+                self._post_ui(lambda: (self.status_label.configure(text="Could not save the frame",
+                                                                   text_color=DANGER),
+                                       messagebox.showerror(APP_TITLE, message, parent=self)))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def open_source(self) -> None:
         try:

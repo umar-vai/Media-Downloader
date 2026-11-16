@@ -66,6 +66,16 @@ It is not technically possible to guarantee every website. DRM-protected media, 
 
 After download, choose **Edit downloaded media**, or use **Edit local media** to open an existing audio/video file. The editor remains fully local.
 
+- **Crop on video**: press **✂ Crop** (or `C`, or double-click the preview) and drag the box drawn on the
+  video. Drag inside to move it, drag a corner or edge to resize it, or drag outside it to draw a new box.
+  Pick a size (16:9, 9:16, 1:1, 4:5, 4:3, 3:4, 3:2, 2:3, 21:9) to lock the shape, or **Custom** for any
+  shape. Arrow keys nudge the box, Enter applies it and Esc cancels. The X/Y/W/H numbers stay available.
+- **Rotate and flip**: rotate in 90° steps and flip horizontally or vertically.
+- **Color**: brightness, contrast and saturation, shown live in the preview.
+- **Speed**: 0.25× to 4×, with audio kept in pitch.
+- **Output size**: export at the source size or scale down to 2160p, 1440p, 1080p, 720p, 480p or 360p.
+- **Save current frame**: save the edited frame under the playhead as PNG or JPG.
+
 ## Build
 
 ```powershell
