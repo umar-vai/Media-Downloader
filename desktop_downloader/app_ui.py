@@ -23,7 +23,6 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any
 
-import customtkinter as ctk
 from PIL import Image, ImageTk
 
 import download_list as dl
