@@ -491,7 +491,14 @@ def extraction_attempts(url: str) -> list[tuple[str, dict]]:
 
     if platform == "youtube":
         base = _base_request_options()
+        # The browser extension sends the tab's YouTube cookies with every lookup. A logged-in
+        # session copied out of a running browser is rotated by YouTube and makes yt-dlp fail
+        # ("could not read this video") while the same link works when pasted into the app.
+        # So try the way the app does first (no per-request cookies), then with them, which
+        # age-restricted or members-only videos need.
+        anonymous = {**base, "_skip_request_cookies": True}
         return [
+            (url, dict(anonymous)),
             (url, dict(base)),
             (url, {**base, "source_address": "0.0.0.0"}),
         ]

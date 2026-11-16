@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from media_core.sources import (
@@ -63,6 +65,28 @@ class SourceFallbackTests(unittest.TestCase):
 
     def test_known_social_sites_do_not_read_browser_sessions_automatically(self):
         self.assertEqual(browser_session_attempts("https://www.youtube.com/watch?v=abc123"), [])
+
+    def test_youtube_tries_without_extension_cookies_first(self):
+        from media_core import options as engine_options
+
+        url = "https://www.youtube.com/watch?v=abc123&list=RDabc123&start_radio=1"
+        attempts = extraction_attempts(url)
+        self.assertGreaterEqual(len(attempts), 2)
+        self.assertTrue(attempts[0][1].get("_skip_request_cookies"))
+        self.assertFalse(attempts[1][1].get("_skip_request_cookies"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            jar = Path(tmp) / "cookies.txt"
+            jar.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+            engine_options.set_request_context(cookiefile=str(jar))
+            try:
+                first = engine_options.apply_request_options(dict(attempts[0][1]))
+                second = engine_options.apply_request_options(dict(attempts[1][1]))
+            finally:
+                engine_options.clear_request_context()
+        self.assertNotIn("_skip_request_cookies", first)
+        self.assertNotEqual(first.get("cookiefile"), str(jar))
+        self.assertEqual(second.get("cookiefile"), str(jar))
 
 
 if __name__ == "__main__":
