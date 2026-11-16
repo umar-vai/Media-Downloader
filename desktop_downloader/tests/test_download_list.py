@@ -182,6 +182,18 @@ class FilterSortTests(unittest.TestCase):
         self.assertTrue({"stop", "resume", "delete"} <= multi)
         self.assertNotIn("properties", multi)
 
+    def test_bulk_actions_on_a_multi_selection(self) -> None:
+        by_key = {row["key"]: row for row in self.rows}
+        picked = [by_key["q:run"], by_key["q:fail"], by_key["h:zip"]]
+        actions = dl.available_actions(picked)
+        self.assertTrue({"stop", "resume", "redownload", "delete", "open_folder"} <= actions)
+        counts = dl.action_counts(picked)
+        self.assertEqual(counts["delete"], 3)
+        self.assertEqual(counts["resume"], 1)
+        self.assertEqual(counts["redownload"], dl.action_counts([by_key["q:fail"]])["redownload"]
+                         + dl.action_counts([by_key["h:zip"]])["redownload"])
+        self.assertEqual(counts["copy_file"], int(bool(by_key["h:zip"]["file_exists"])))
+
     def test_totals(self) -> None:
         rows = [dl.queue_row(snap(id="x", status="running", progress=0.5), {"speed_bps": 1024}),
                 dl.queue_row(snap(id="y", status="running", progress=0.5), {"speed_bps": 1024})] + self.rows

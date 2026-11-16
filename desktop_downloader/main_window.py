@@ -385,9 +385,12 @@ class SearchBox(ttk.Frame):
 class DownloadTable(tk.Frame):
     def __init__(self, master: tk.Misc, icons: IconSet, *, on_select: Callable[[], None],
                  on_open: Callable[[], None], on_context: Callable[[Any, bool], None],
-                 on_sort: Callable[[str], None], on_delete: Callable[[], None]) -> None:
+                 on_sort: Callable[[str], None], on_delete: Callable[[], None],
+                 drag_paths: Callable[[], list[str]] | None = None) -> None:
         super().__init__(master, bg=C["BG"], highlightthickness=0, bd=0)
         self.icons = icons
+        self._drag_paths = drag_paths
+        self._press: dict[str, Any] | None = None
         data_columns = [key for key in dl.COLUMN_KEYS if key != "name"]
         self.tree = ttk.Treeview(self, columns=data_columns, style="MD.Treeview", selectmode="extended")
         ysb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview, style="MD.Vertical.TScrollbar")
@@ -425,6 +428,106 @@ class DownloadTable(tk.Frame):
         self.tree.bind("<Control-a>", lambda _e: (self.tree.selection_set(self.tree.get_children()), "break")[1])
         self.tree.bind("<Button-3>", lambda e: self._context(e, on_context))
         self.tree.bind("<App>", lambda e: on_context(e, True))
+        # Explorer-style mouse: Ctrl+click / Shift+click pick rows, dragging over rows or from the
+        # empty area selects them, and dragging selected finished files drops them in other apps.
+        self.tree.bind("<ButtonPress-1>", self._mouse_press, add="+")
+        self.tree.bind("<B1-Motion>", self._mouse_drag, add="+")
+        self.tree.bind("<ButtonRelease-1>", self._mouse_release, add="+")
+
+    # mouse -------------------------------------------------------------------
+    DRAG_DISTANCE = 5
+
+    def _mouse_press(self, event: Any) -> str | None:
+        tree = self.tree
+        self._press = None
+        if tree.identify_region(event.x, event.y) in {"heading", "separator"}:
+            return None
+        row = tree.identify_row(event.y)
+        modifiers = int(getattr(event, "state", 0) or 0)
+        ctrl, shift = bool(modifiers & 0x0004), bool(modifiers & 0x0001)
+        selection = tree.selection()
+        self._press = {"x": event.x, "y": event.y, "row": row, "mode": None, "ctrl": ctrl,
+                       "base": tuple(selection), "deferred": False}
+        if ctrl or shift:
+            return None  # the Treeview's own toggle / range selection
+        if row and row in selection and len(selection) > 1:
+            # Keep the whole selection so it can be dragged; a plain click (no drag) picks
+            # this row alone when the button is released, exactly like Explorer.
+            self._press["deferred"] = True
+            tree.focus(row)
+            tree.focus_set()
+            return "break"
+        if not row:
+            tree.focus_set()
+            tree.selection_set(())  # a click on the empty area clears the selection
+        return None
+
+    def _mouse_drag(self, event: Any) -> str | None:
+        press = self._press
+        if press is None:
+            return None
+        if press["mode"] is None:
+            distance = px(self.DRAG_DISTANCE)
+            if abs(event.x - press["x"]) < distance and abs(event.y - press["y"]) < distance:
+                return "break"
+            if press["row"]:
+                paths = self._drag_paths() if self._drag_paths is not None else []
+                if paths:
+                    self._press = None
+                    self._drag_out(paths)
+                    return "break"
+            press["mode"] = "select"
+        self._band_select(event.y, press)
+        return "break"
+
+    def _mouse_release(self, _event: Any) -> None:
+        press, self._press = self._press, None
+        if press and press["deferred"] and press["mode"] is None and self.tree.exists(press["row"]):
+            self.tree.selection_set(press["row"])
+            self.tree.focus(press["row"])
+
+    def _drag_out(self, paths: list[str]) -> None:
+        import file_drag
+
+        try:
+            file_drag.drag_files(self.tree.winfo_id(), paths)
+        except Exception:
+            pass
+
+    def _index_at(self, y: int, rows: tuple[str, ...]) -> int:
+        """Row index under ``y``; len(rows) below the last row, the first visible row above."""
+        row = self.tree.identify_row(y)
+        if row:
+            return rows.index(row)
+        visible = [index for index, key in enumerate(rows) if self.tree.bbox(key)]
+        if not visible:
+            return len(rows)
+        first_box = self.tree.bbox(rows[visible[0]])
+        if first_box and y < first_box[1]:
+            return visible[0]
+        return len(rows)
+
+    def _band_select(self, y: int, press: dict[str, Any]) -> None:
+        tree = self.tree
+        height = tree.winfo_height()
+        if y > height - px(4):
+            tree.yview_scroll(1, "units")
+        elif y < px(24):
+            tree.yview_scroll(-1, "units")
+        rows = tuple(tree.get_children())
+        if not rows:
+            return
+        if "anchor" not in press:
+            press["anchor"] = rows.index(press["row"]) if press["row"] in rows else self._index_at(press["y"], rows)
+        anchor, current = press["anchor"], self._index_at(y, rows)
+        low, high = sorted((anchor, current))
+        picked = list(rows[low:min(high, len(rows) - 1) + 1]) if low < len(rows) else []
+        if press["ctrl"]:
+            picked = list(dict.fromkeys([*press["base"], *picked]))
+        if tuple(picked) != tuple(tree.selection()):
+            tree.selection_set(picked)
+        if picked and 0 <= current < len(rows):
+            tree.focus(rows[current])
 
     def _context(self, event: Any, callback: Callable[[Any, bool], None]) -> None:
         row = self.tree.identify_row(event.y)

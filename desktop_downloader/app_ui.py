@@ -286,13 +286,14 @@ class UIMixin:
         self.details.pack(side="bottom", fill="x")
         self.table = DownloadTable(right, self.icons, on_select=self._update_selection_ui, on_open=self._open_default,
                                    on_context=self._show_context_menu, on_sort=self._sort_by,
-                                   on_delete=self.delete_selected)
+                                   on_delete=self.delete_selected, drag_paths=self._selected_file_paths)
         self.table.pack(side="top", fill="both", expand=True)
         self.table.set_widths(self.settings.get("list_widths") or {})
         self.table.tree.bind("<ButtonPress-1>", self._heading_press, add="+")
         self.table.tree.bind("<ButtonRelease-1>", self._heading_release, add="+")
         self.table.tree.bind("<Alt-Return>", lambda _e: self.properties_selected())
         self.table.tree.bind("<Control-c>", lambda _e: self.copy_selected_links())
+        self.table.tree.bind("<Control-C>", lambda _e: self.copy_selected_files())  # Ctrl+Shift+C
         self._apply_columns(save=False)
         self._apply_panes(save=False)
 
@@ -833,9 +834,17 @@ class UIMixin:
             self._open_row(rows[0])
 
     def open_selected_folder(self) -> None:
-        rows = self._selected_rows()
-        if rows:
-            self._open_folder_row(rows[0])
+        # One Explorer window per folder (at most a few), not one per selected file.
+        seen: set[str] = set()
+        for row in self._selected_rows():
+            folder = str(Path(row["path"]).parent) if row["path"] else row["save_to"] or str(self.download_dir)
+            key = os.path.normcase(folder)
+            if key in seen:
+                continue
+            seen.add(key)
+            self._open_folder_row(row)
+            if len(seen) >= 5:
+                break
 
     def edit_selected(self) -> None:
         rows = self._selected_rows()
@@ -875,6 +884,24 @@ class UIMixin:
             self.clipboard_clear()
             self.clipboard_append("\n".join(links))
             self._set_status(f"Copied {len(links)} link{'s' if len(links) != 1 else ''}", "ready")
+
+    def _selected_file_paths(self) -> list[str]:
+        """Finished files of the selected rows that are still on the disk (for drag and copy)."""
+        return [row["path"] for row in self._selected_rows()
+                if row["status"] == "complete" and row["file_exists"] and row["path"] and Path(row["path"]).is_file()]
+
+    def copy_selected_files(self) -> None:
+        import file_drag
+
+        paths = self._selected_file_paths()
+        if not paths:
+            return
+        count = file_drag.copy_files(paths)
+        if count:
+            self._set_status(f"Copied {count} file{'s' if count != 1 else ''}. Paste with Ctrl+V in Telegram, "
+                             "WhatsApp or a folder", "ready")
+        else:
+            self._set_status("Could not copy the files", "error")
 
     def _copy_text(self, text: str, what: str) -> None:
         if text:
@@ -996,10 +1023,18 @@ class UIMixin:
             row = rows[0]
             actions = dl.available_actions(rows)
 
+            counts = dl.action_counts(rows) if len(rows) > 1 else {}
+
             def add(label: str, command: Any, key: str | None = None, accelerator: str = "") -> None:
+                # With several rows selected, say how many each command will act on.
+                if key is not None and counts.get(key, 0) > 1:
+                    label = f"{label} ({counts[key]})"
                 menu.add_command(label=label, command=command, accelerator=accelerator,
                                  state="normal" if key is None or key in actions else "disabled")
 
+            if len(rows) > 1:
+                menu.add_command(label=f"{len(rows)} items selected", state="disabled")
+                menu.add_separator()
             add("Open", self.open_selected, "open", "Enter")
             add("Open folder", self.open_selected_folder, "open_folder")
             add("Open in media editor", self.edit_selected, "edit")
@@ -1009,6 +1044,7 @@ class UIMixin:
             add("Cancel download", self.cancel_selected, "cancel")
             add("Download again", self.redownload_selected, "redownload")
             menu.add_separator()
+            add("Copy file", self.copy_selected_files, "copy_file", "Ctrl+Shift+C")
             add("Copy download link", self.copy_selected_links, "copy_link", "Ctrl+C")
             add("Copy web page link", lambda: self._copy_text(row["page_url"], "web page link"), "open_page")
             add("Open web page", lambda: webbrowser.open(row["page_url"]), "open_page")

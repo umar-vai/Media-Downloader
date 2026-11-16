@@ -32,7 +32,7 @@ from app_ui import UIMixin
 import power
 from tray import TrayController
 import startup as win_startup
-from single_instance import cleanup_stale_updater_copies
+from single_instance import bring_to_front, cleanup_stale_updater_copies, listen_for_show_requests
 import theme
 import ui_kit as ui
 import download_list
@@ -414,6 +414,8 @@ class DownloaderApp(UIMixin, tk.Tk):
         if self._start_minimized:
             self.withdraw()  # launched by Windows at sign-in: go straight to the tray
         self.after(400, self._init_tray)
+        # A second launch from the taskbar / Start menu brings this window back from the tray.
+        listen_for_show_requests(lambda: self._run_on_ui(self.show_from_tray))
         ui.init(self)  # display scaling, before any size below
         width, height = _fit_screen(self, 1180, 780)
         self.geometry(f"{width}x{height}")
@@ -550,9 +552,14 @@ class DownloaderApp(UIMixin, tk.Tk):
     def show_from_tray(self) -> None:
         try:
             self.deiconify()
-            self.state("normal")
+            if self.state() == "iconic":
+                self.state("normal")
             self.lift()
             self.focus_force()
+        except Exception:
+            pass
+        try:
+            bring_to_front(int(self.wm_frame(), 16))
         except Exception:
             pass
 

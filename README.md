@@ -13,6 +13,11 @@ Location: `desktop_downloader/`
 - Classic download-manager main window: menu bar, icon toolbar (Add URL, Resume, Stop, Start/Stop All, Delete,
   Delete Completed, Options, Browsers, Editor), a category tree (All Downloads by file type, Unfinished, Finished,
   Queues) and one sortable, multi-select download table with live percent, speed and time left
+- Drag finished files straight out of the list into Telegram, WhatsApp, a browser upload box or a folder
+  (like IDM / NDM); Ctrl+Shift+C copies the files so Ctrl+V pastes them anywhere
+- Explorer-style selection: Ctrl+click picks single rows, Shift+click picks a range, dragging over rows (or
+  from the empty area) selects them; Resume, Stop, Download again, Copy and Delete act on every selected row
+- Launching the app again while it sits in the system tray brings the open window to the front
 - Right-click menu, double-click to open, keyboard shortcuts (Ctrl+N, Ctrl+B, Del, Enter, Alt+Enter, F5, Ctrl+F),
   details pane and status bar; columns can be shown/hidden and resized
 - Light theme by default, dark theme in View > Theme or Settings; icons drawn at the screen's real DPI

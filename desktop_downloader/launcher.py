@@ -20,10 +20,12 @@ class MediaDownloaderApp(DownloaderApp):
 
 
 if __name__ == "__main__":
-    from single_instance import alert_existing_instance, claim_single_instance
+    from single_instance import alert_existing_instance, claim_single_instance, signal_existing_instance
 
     if not claim_single_instance():
-        alert_existing_instance()
+        # Already running (maybe only in the tray): bring that window forward, like other apps.
+        if not signal_existing_instance():
+            alert_existing_instance()
         raise SystemExit(0)
 
     MediaDownloaderApp().mainloop()
