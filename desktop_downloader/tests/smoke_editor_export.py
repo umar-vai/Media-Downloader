@@ -78,6 +78,32 @@ def main() -> int:
                 f"Slow-motion export duration is {slow_info.duration:.3f}s; expected about {expected_duration:.3f}s"
             )
 
+        # Blade cut list: one ripple-deleted part and one black gap, joined with concat.
+        cut_video = root / "cuts.mp4"
+        command, expected_duration = build_export_command(
+            source_video,
+            cut_video,
+            source_info,
+            start=0.0,
+            end=2.0,
+            crop_preset="Original",
+            custom_crop=None,
+            rotate="0°",
+            speed=1.0,
+            mute=False,
+            volume_percent=100,
+            fade_in=0,
+            fade_out=0,
+            quality="Balanced",
+            pieces=[(0.0, 0.5, "keep"), (1.0, 1.5, "gap"), (1.5, 2.0, "keep")],
+        )
+        run(command)
+        cut_info = probe_media(cut_video)
+        if not cut_info.has_audio or not 1.35 <= cut_info.duration <= 1.65:
+            raise AssertionError(
+                f"Cut-list export duration is {cut_info.duration:.3f}s; expected about {expected_duration:.3f}s"
+            )
+
         source_audio = root / "source.wav"
         run(
             [

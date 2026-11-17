@@ -107,6 +107,13 @@ class EmbeddedMediaPlayer:
             "--osd-bar=no",
             "--terminal=no",
             "--msg-level=all=no",
+            # The editor owns the keyboard and mouse. Without these, mpv's built-in key
+            # bindings (Space = pause, arrows = seek, q = quit) act on their own when its
+            # window has focus, and the editor's play/pause state drifts out of sync.
+            "--input-default-bindings=no",
+            "--input-vo-keyboard=no",
+            "--input-cursor=no",
+            "--cursor-autohide=no",
             f"--input-ipc-server={self._ipc_path}",
         ]
 

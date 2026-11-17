@@ -274,3 +274,33 @@ class Progress(ttk.Progressbar):
 
     def set(self, value: float) -> None:  # type: ignore[override]
         self.configure(value=max(0.0, min(1.0, float(value))) * 1000)
+
+
+def disable_child_windows(parent_hwnd: int) -> int:
+    """Disable input on every child window of ``parent_hwnd`` (Windows only).
+
+    Used for the embedded mpv video window: a disabled child window still draws, but mouse
+    clicks fall through to the parent Tk frame and it never takes the keyboard focus, so the
+    editor's shortcuts (Space for play/pause) keep working after the video is clicked.
+    Returns the number of windows changed.
+    """
+    if os.name != "nt" or not parent_hwnd:
+        return 0
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    changed = 0
+    children: list[int] = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def collect(hwnd: int, _lparam: int) -> bool:
+        children.append(hwnd)
+        return True
+
+    user32.EnumChildWindows(wintypes.HWND(parent_hwnd), callback_type(collect), 0)
+    for hwnd in children:
+        if user32.IsWindowEnabled(hwnd):
+            user32.EnableWindow(hwnd, False)
+            changed += 1
+    return changed
