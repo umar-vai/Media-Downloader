@@ -30,3 +30,14 @@ class PartialFilesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScanTests(unittest.TestCase):
+    def test_scan_finds_leftovers_and_honours_keep(self) -> None:
+        from partial_files import scan_partial_files
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            for name in ["a.mp4.part", "b.mp4.ytdl", "c.f137.mp4", "d.mp4.part-Frag3", "keep.mp4.part", "ok.mp4", "x.final.mp4"]:
+                (root / name).write_bytes(b"x")
+            found = {p.name for p in scan_partial_files([root, root], {root / "keep.mp4.part"})}
+            self.assertEqual(found, {"a.mp4.part", "b.mp4.ytdl", "c.f137.mp4", "d.mp4.part-Frag3"})

@@ -32,7 +32,7 @@ import ui_kit as ui
 from batch_page import BatchSection
 from history_window import PropertiesDialog
 from icons import IconSet
-from partial_files import delete_partial_files
+from partial_files import delete_partial_files, find_partial_files, scan_partial_files
 from main_window import (CategoryTree, ConfirmDelete, DetailsPane, DownloadTable, SearchBox, StatusBar,
                          Toolbar, UpdateBadge, setup_style, sysfont)
 from theme import C
@@ -170,6 +170,7 @@ class UIMixin:
         downloads.add_command(label="Delete…", accelerator="Del", command=self.delete_selected)
         downloads.add_command(label="Delete completed…", command=self.delete_completed)
         downloads.add_command(label="Remove missing files from list", command=self.remove_missing)
+        downloads.add_command(label="Clean up partial files…", command=self.clean_partial_files)
         downloads.add_separator()
         downloads.add_command(label="Copy download link", accelerator="Ctrl+C", command=self.copy_selected_links)
         downloads.add_command(label="Error details…", command=self.details_selected)
@@ -981,6 +982,45 @@ class UIMixin:
         removed = self.history_store.prune_missing()
         self._invalidate_history()
         self._set_status(f"Removed {removed} missing file{'s' if removed != 1 else ''} from the list", "ready")
+
+    def clean_partial_files(self) -> None:
+        """Delete leftover .part/fragment files in every download folder, except those of live downloads."""
+        folders: list[str] = [str(self.download_dir)]
+        keep: set[Path] = set()
+        for row in self._rows:
+            folder = str(Path(row["path"]).parent) if row["path"] else str(row["save_to"] or "")
+            if folder:
+                folders.append(folder)
+            if row["source"] == "queue" and row["status"] in dl.STOPPABLE | {"paused", "stopping"}:
+                # Unfinished but still in the list: the user may resume it, so its files stay.
+                keep.update(path.resolve() for path in find_partial_files(folder, row["name"]))
+        files = scan_partial_files(folders, keep)
+        if not files:
+            messagebox.showinfo("Media Downloader", "No partial files found.", parent=self)
+            return
+        total = 0
+        for path in files:
+            try:
+                total += path.stat().st_size
+            except OSError:
+                pass
+        if not messagebox.askyesno(
+                "Clean up partial files",
+                f"Delete {len(files)} partial file{'s' if len(files) != 1 else ''} ({dl.format_size(total)}) left "
+                "by cancelled or failed downloads?\n\nDownloads still in the list that can be resumed are not "
+                "touched. This cannot be undone.", parent=self):
+            return
+        problems: list[str] = []
+        for path in files:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                problems.append(f"{path.name}: {exc}")
+        self._set_status(f"Deleted {len(files) - len(problems)} partial file"
+                         f"{'s' if len(files) - len(problems) != 1 else ''}", "ready")
+        if problems:
+            messagebox.showerror("Media Downloader", "Some files could not be deleted:\n\n" + "\n".join(problems[:12]),
+                                 parent=self)
 
     def _delete_partials(self, folder: str, name: str) -> list[str]:
         """Remove the half-downloaded files (.part, fragments, per-stream pieces) of one download.

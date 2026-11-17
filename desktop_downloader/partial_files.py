@@ -66,3 +66,28 @@ def delete_partial_files(directory: str | Path, name: str) -> tuple[int, list[st
         except OSError as exc:
             problems.append(f"{path.name}: {exc}")
     return removed, problems
+
+
+# Leftovers recognised without knowing the download's name (for the "clean up" command). Stricter
+# than ``_is_leftover``: it scans whole folders, so it only matches yt-dlp's own patterns.
+_ANY_LEFTOVER = re.compile(
+    r"(?:\.(?:part|ytdl)(?:-frag\d+)?|-frag\d+|\.f\d+(?:-\d+)?\.(?:mp4|m4a|webm|mkv|mp3|opus))$", re.I)
+
+
+def scan_partial_files(directories: list[str | Path], keep: set[Path] | None = None) -> list[Path]:
+    """Every yt-dlp leftover in the given folders (not subfolders), except the paths in ``keep``."""
+    keep = keep or set()
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for directory in directories:
+        try:
+            folder = Path(directory).resolve()
+            if folder in seen or not folder.is_dir():
+                continue
+            seen.add(folder)
+            for path in folder.iterdir():
+                if _ANY_LEFTOVER.search(path.name) and path.is_file() and path not in keep:
+                    found.append(path)
+        except OSError:
+            continue
+    return found
