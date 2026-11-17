@@ -1,37 +1,69 @@
 from __future__ import annotations
 
+import math
 import tkinter as tk
 import time
 from typing import Callable
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageEnhance, ImageTk
 
-from edit_timeline import GAP, KEEP, REMOVED, EditTimeline, snap
-from theme import C, IS_DARK
+from edit_timeline import (GAP, KEEP, REMOVED, Clip, EditTimeline, clip_at, seq_from_source, sequence_duration,
+                           sequence_layout, snap, source_from_seq)
 
-# Classic Windows colours: a white track, the system highlight blue for the selection and its
-# handles, and a plain black (white in the dark theme) playhead.
-BG = C["SURFACE"]
-SURFACE_2 = C["SURFACE_2"]
-SURFACE_3 = C["SURFACE_3"]
-BORDER = C["BORDER"]
-TEXT = C["TEXT"]
-MUTED = C["MUTED"]
-CYAN = C["TEXT"]                                   # playhead
-PURPLE = C["ACCENT"] if IS_DARK else C["SELECT"]   # selection handles
-CUT_LINE = "#FFD400"        # blade cuts
-BLADE = "#E81123"           # blade preview line
-SELECTED = "#FF8C00"        # selected segment outline
-REMOVED_FILL = "#5A0B12"    # ripple-deleted segment
-GAP_FILL = "#000000"        # deleted segment that leaves a black gap
+# A dark, professional timeline (Premiere / Resolve / CapCut style) in every app theme.
+BG = "#16171B"              # canvas
+RULER_BG = "#1E1F24"
+TRACK_BG = "#202127"        # empty track
+BORDER = "#34363F"
+TEXT = "#E6E8EE"
+MUTED = "#8C90A0"
+CLIP_EDGE = "#5B8CFF"       # clip outline
+CLIP_HEAD = "#2F4C8F"       # clip title strip
+AUDIO_CLIP = "#1D6E5A"      # audio-only clip background
+CYAN = "#FF4D4D"            # playhead (red, like most editors)
+PURPLE = "#F5C542"          # In / Out handles
+SELECTED = "#FFB020"        # selected clip outline
+CUT_LINE = "#FFFFFF"        # an editable cut between two clips
+BLADE = "#FF4D4D"           # blade preview line
+GAP_FILL = "#0B0B0D"        # deleted part that leaves a black gap
+GAP_HATCH = "#26272D"
+REMOVED_FILL = "#5A0B12"    # kept for callers; ripple-deleted parts are not drawn at all
+SURFACE_2 = TRACK_BG
+SURFACE_3 = BORDER
 
 TOOL_SELECT = "select"
 TOOL_BLADE = "blade"
 SNAP_PX = 8
 CUT_GRAB_PX = 6
 
+RULER_H = 24
+TRACK_TOP = 30
+TRACK_BOTTOM = 104
+HEAD_H = 14
+TICK_STEPS = (0.04, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200)
+
+
+def _label(seconds: float, step: float) -> str:
+    seconds = max(0.0, seconds)
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    if step < 1:
+        text = f"{minutes}:{secs:04.1f}"
+    else:
+        text = f"{minutes}:{int(secs):02d}"
+    return f"{hours}:{text.zfill(5)}" if hours else text
+
 
 class TimelineCanvas(tk.Canvas):
+    """Magnetic timeline.
+
+    Everything the caller passes in (playhead, In/Out, cuts) is *source* time. The canvas
+    shows the *sequence*: the parts left after a ripple delete are packed together with no
+    hole, the way Premiere's ripple delete or CapCut's magnetic main track work. A deleted
+    part that leaves a gap shows as empty black space of the same length.
+    """
+
     def __init__(
         self,
         master,
@@ -47,10 +79,9 @@ class TimelineCanvas(tk.Canvas):
         super().__init__(
             master,
             bg=BG,
-            highlightthickness=1,
-            highlightbackground=BORDER,
+            highlightthickness=0,
             bd=0,
-            height=124,
+            height=132,
             cursor="hand2",
             **kwargs,
         )
@@ -58,8 +89,10 @@ class TimelineCanvas(tk.Canvas):
         self.start = 0.0
         self.end = 1.0
         self.playhead = 0.0
+        # The view is in sequence (timeline) seconds.
         self.view_start = 0.0
         self.view_end = 1.0
+        self._fit = True
         self.on_seek = on_seek
         self.on_range_change = on_range_change
         self.drag_target: str | None = None
@@ -68,10 +101,12 @@ class TimelineCanvas(tk.Canvas):
         self.thumbnail_refs: list[ImageTk.PhotoImage] = []
         self.waveform_pil: Image.Image | None = None
         self.waveform_ref: ImageTk.PhotoImage | None = None
+        self._dim_cache: dict[int, Image.Image] = {}
         self._last_scrub_notify = 0.0
 
         # Blade editing: the cut list, the active tool and the selected segments.
         self.edit: EditTimeline | None = None
+        self.layout: list[Clip] = sequence_layout(None, self.duration)
         self.tool = TOOL_SELECT
         self.snap_enabled = True
         self.selected: set[int] = set()
@@ -96,6 +131,29 @@ class TimelineCanvas(tk.Canvas):
         self.bind("<Button-3>", self._on_right_click)
         self.bind("<MouseWheel>", self._on_wheel)
         self.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
+        self.bind("<Button-4>", lambda event: self._on_wheel(event, delta=120))
+        self.bind("<Button-5>", lambda event: self._on_wheel(event, delta=-120))
+
+    # ------------------------------------------------------------------ sequence mapping
+    def _relayout(self) -> None:
+        self.layout = sequence_layout(self.edit, self.duration)
+        total = self.seq_total
+        if self._fit or self.view_end - self.view_start >= total - 1e-6:
+            self.view_start, self.view_end = 0.0, total
+            return
+        span = min(self.view_end - self.view_start, total)
+        start = max(0.0, min(self.view_start, total - span))
+        self.view_start, self.view_end = start, start + span
+
+    @property
+    def seq_total(self) -> float:
+        return max(0.001, sequence_duration(self.layout))
+
+    def to_seq(self, value: float) -> float:
+        return seq_from_source(self.layout, value)
+
+    def to_source(self, value: float) -> float:
+        return source_from_seq(self.layout, value)
 
     # ------------------------------------------------------------------ blade editing API
     def set_edit(self, edit: EditTimeline | None) -> None:
@@ -118,12 +176,25 @@ class TimelineCanvas(tk.Canvas):
 
     def select_all(self) -> None:
         if self.edit:
-            self.set_selection(set(range(len(self.edit.states))))
+            self.set_selection({clip.index for clip in self.layout})
+
+    def _editable_cuts(self) -> list[tuple[int, float]]:
+        """Cuts between two clips that touch in the source too (a roll edit can move them)."""
+        if not self.edit:
+            return []
+        result = []
+        for left, right in zip(self.layout, self.layout[1:]):
+            if right.index == left.index + 1 and left.index < len(self.edit.cuts):
+                result.append((left.index, self.edit.cuts[left.index]))
+        return result
 
     def _snap_targets(self, exclude_cut: int | None = None) -> list[float]:
-        targets = [self.playhead, self.start, self.end, 0.0, self.duration]
-        if self.edit:
-            targets += [cut for index, cut in enumerate(self.edit.cuts) if index != exclude_cut]
+        """Snap targets in sequence seconds: playhead, In/Out, ends and clip edges."""
+        targets = [self.to_seq(self.playhead), self.to_seq(self.start), self.to_seq(self.end), 0.0, self.seq_total]
+        for clip in self.layout:
+            if exclude_cut is not None and clip.index in (exclude_cut, exclude_cut + 1):
+                continue
+            targets += [clip.seq_start, clip.seq_end]
         return targets
 
     def _seconds_per_px(self) -> float:
@@ -131,34 +202,37 @@ class TimelineCanvas(tk.Canvas):
         return (self.view_end - self.view_start) / max(1.0, right - left)
 
     def snapped_time(self, x: float, *, exclude_cut: int | None = None, include_playhead: bool = True) -> float:
-        value = self._x_to_time(x)
-        if not self.snap_enabled:
-            return value
-        targets = self._snap_targets(exclude_cut)
-        if not include_playhead:
-            targets = targets[1:]
-        return snap(value, targets, SNAP_PX * self._seconds_per_px())
+        value = self._x_to_seq(x)
+        if self.snap_enabled:
+            targets = self._snap_targets(exclude_cut)
+            if not include_playhead:
+                targets = targets[1:]
+            value = snap(value, targets, SNAP_PX * self._seconds_per_px())
+        return self.to_source(value)
 
     def _cut_near(self, x: float) -> int | None:
-        if not self.edit or not self.edit.cuts:
-            return None
         best: int | None = None
         best_distance = float(CUT_GRAB_PX)
-        for index, cut in enumerate(self.edit.cuts):
-            if not self.view_start <= cut <= self.view_end:
+        for index, cut in self._editable_cuts():
+            position = self.to_seq(cut)
+            if not self.view_start <= position <= self.view_end:
                 continue
-            distance = abs(x - self._time_to_x(cut))
+            distance = abs(x - self._seq_to_x(position))
             if distance <= best_distance:
                 best, best_distance = index, distance
         return best
 
+    def clip_index_at(self, x: float) -> int | None:
+        clip = clip_at(self.layout, self._x_to_seq(x))
+        return clip.index if clip else None
+
+    # ------------------------------------------------------------------ media / range / playhead
     def set_media(self, duration: float, start: float, end: float, playhead: float) -> None:
         self.duration = max(0.001, float(duration))
         self.start = max(0.0, min(float(start), self.duration))
         self.end = max(self.start + 0.001, min(float(end), self.duration))
         self.playhead = max(0.0, min(float(playhead), self.duration))
-        self.view_start = 0.0
-        self.view_end = self.duration
+        self._fit = True
         self.redraw()
 
     def set_range(self, start: float, end: float, *, notify: bool = False) -> None:
@@ -176,11 +250,11 @@ class TimelineCanvas(tk.Canvas):
 
     def set_playhead(self, value: float, *, notify: bool = False) -> None:
         self.playhead = max(0.0, min(float(value), self.duration))
-        if self.view_end - self.view_start < self.duration - 0.001:
+        if not self._fit:
             span = self.view_end - self.view_start
-            if self.playhead < self.view_start or self.playhead > self.view_end:
-                center = self.playhead
-                self.view_start = max(0.0, min(center - span / 2, self.duration - span))
+            position = self.to_seq(self.playhead)
+            if position < self.view_start or position > self.view_end:
+                self.view_start = max(0.0, min(position - span * 0.1, self.seq_total - span))
                 self.view_end = self.view_start + span
         self.redraw()
         if notify and self.on_seek:
@@ -199,45 +273,55 @@ class TimelineCanvas(tk.Canvas):
         else:
             self.thumbnail_times = []
         self.waveform_pil = None
+        self._dim_cache = {}
         self.redraw()
 
     def set_waveform(self, image: Image.Image) -> None:
         self.waveform_pil = image.copy()
         self.thumbnail_pils = []
+        self._dim_cache = {}
         self.redraw()
 
+    # ------------------------------------------------------------------ coordinates
     def _x_bounds(self) -> tuple[float, float]:
         width = max(10, self.winfo_width())
-        return 18.0, float(width - 18)
+        return 12.0, float(width - 12)
 
-    def _time_to_x(self, value: float) -> float:
+    def _seq_to_x(self, value: float) -> float:
         left, right = self._x_bounds()
         span = max(0.001, self.view_end - self.view_start)
-        clipped = max(self.view_start, min(float(value), self.view_end))
-        return left + ((clipped - self.view_start) / span) * (right - left)
+        return left + ((float(value) - self.view_start) / span) * (right - left)
 
-    def _x_to_time(self, x: float) -> float:
+    def _x_to_seq(self, x: float) -> float:
         left, right = self._x_bounds()
         if right <= left:
             return self.view_start
         fraction = (max(left, min(float(x), right)) - left) / (right - left)
         return self.view_start + fraction * (self.view_end - self.view_start)
 
+    def _time_to_x(self, value: float) -> float:
+        """Source time to x (clamped to the view)."""
+        position = max(self.view_start, min(self.to_seq(value), self.view_end))
+        return self._seq_to_x(position)
+
+    def _x_to_time(self, x: float) -> float:
+        """x to source time."""
+        return self.to_source(self._x_to_seq(x))
+
     def fit_view(self) -> None:
-        self.view_start = 0.0
-        self.view_end = self.duration
+        self._fit = True
         self.redraw()
 
     def zoom(self, factor: float) -> None:
         factor = max(0.1, float(factor))
+        total = self.seq_total
         current = max(0.001, self.view_end - self.view_start)
-        min_span = min(self.duration, max(1.0, self.duration / 240.0))
-        target = max(min_span, min(self.duration, current / factor))
-        center = max(self.view_start, min(self.playhead, self.view_end))
-        start = center - target / 2
-        start = max(0.0, min(start, self.duration - target))
-        self.view_start = start
-        self.view_end = start + target
+        min_span = min(total, max(0.5, total / 400.0))
+        target = max(min_span, min(total, current / factor))
+        center = max(self.view_start, min(self.to_seq(self.playhead), self.view_end))
+        start = max(0.0, min(center - target / 2, total - target))
+        self.view_start, self.view_end = start, start + target
+        self._fit = target >= total - 1e-6
         self.redraw()
 
     def zoom_in(self) -> None:
@@ -246,207 +330,197 @@ class TimelineCanvas(tk.Canvas):
     def zoom_out(self) -> None:
         self.zoom(1 / 1.6)
 
+    # ------------------------------------------------------------------ drawing
     def redraw(self) -> None:
+        self._relayout()
         self.delete("all")
         width = max(20, self.winfo_width())
+        height = max(60, self.winfo_height())
         left, right = self._x_bounds()
-        strip_top = 10
-        strip_bottom = 74
-        ruler_y = 94
-        visible_span = max(0.001, self.view_end - self.view_start)
+        top, bottom = TRACK_TOP, TRACK_BOTTOM
 
-        self.create_rectangle(left, strip_top, right, strip_bottom, fill=SURFACE_2, outline=BORDER)
+        self.create_rectangle(0, 0, width, RULER_H, fill=RULER_BG, outline="")
+        self.create_line(0, RULER_H, width, RULER_H, fill=BORDER)
+        self.create_rectangle(left, top, right, bottom, fill=TRACK_BG, outline="")
+        self._draw_ruler(left, right)
 
         self.thumbnail_refs = []
         self.waveform_ref = None
-        if self.waveform_pil is not None:
-            available = max(1, int(right - left))
-            tile_h = strip_bottom - strip_top
-            source = self.waveform_pil
-            source_w, source_h = source.size
-            crop_left = int((self.view_start / self.duration) * source_w)
-            crop_right = int((self.view_end / self.duration) * source_w)
-            crop_left = max(0, min(crop_left, source_w - 1))
-            crop_right = max(crop_left + 1, min(crop_right, source_w))
-            waveform = source.crop((crop_left, 0, crop_right, source_h)).resize((available, tile_h))
-            self.waveform_ref = ImageTk.PhotoImage(waveform)
-            self.create_image(left, strip_top, anchor="nw", image=self.waveform_ref)
-        elif self.thumbnail_pils:
-            tile_h = strip_bottom - strip_top
-            samples = list(zip(self.thumbnail_times, self.thumbnail_pils))
-            if not samples:
-                samples = [
-                    (
-                        0.0 if len(self.thumbnail_pils) == 1 else self.duration * index / (len(self.thumbnail_pils) - 1),
-                        image,
-                    )
-                    for index, image in enumerate(self.thumbnail_pils)
-                ]
-            for index, (sample_time, source) in enumerate(samples):
-                previous_time = samples[index - 1][0] if index > 0 else 0.0
-                next_time = samples[index + 1][0] if index + 1 < len(samples) else self.duration
-                interval_start = 0.0 if index == 0 else (previous_time + sample_time) / 2
-                interval_end = self.duration if index == len(samples) - 1 else (sample_time + next_time) / 2
-                visible_start = max(interval_start, self.view_start)
-                visible_end = min(interval_end, self.view_end)
-                if visible_end <= visible_start:
-                    continue
-                x1 = self._time_to_x(visible_start)
-                x2 = self._time_to_x(visible_end)
-                tile_w = max(1, int(x2 - x1) + 1)
-                image = source.copy().resize((tile_w, tile_h))
-                canvas_image = ImageTk.PhotoImage(image)
-                self.thumbnail_refs.append(canvas_image)
-                self.create_image(x1, strip_top, anchor="nw", image=canvas_image)
-
-        visible_selection_start = max(self.start, self.view_start)
-        visible_selection_end = min(self.end, self.view_end)
-        if visible_selection_end > visible_selection_start:
-            start_x = self._time_to_x(visible_selection_start)
-            end_x = self._time_to_x(visible_selection_end)
-            if self.start > self.view_start:
-                self.create_rectangle(left, strip_top, start_x, strip_bottom, fill="#020712", stipple="gray50", outline="")
-            if self.end < self.view_end:
-                self.create_rectangle(end_x, strip_top, right, strip_bottom, fill="#020712", stipple="gray50", outline="")
-            self.create_rectangle(start_x, strip_top, end_x, strip_bottom, outline=PURPLE, width=2)
-        else:
-            self.create_rectangle(left, strip_top, right, strip_bottom, fill="#020712", stipple="gray50", outline="")
-            start_x = self._time_to_x(self.start)
-            end_x = self._time_to_x(self.end)
-
-        self._draw_segments(strip_top, strip_bottom)
-
-        if self.view_start <= self.start <= self.view_end:
-            start_x = self._time_to_x(self.start)
-            self.create_line(start_x, strip_top - 2, start_x, strip_bottom + 9, fill=PURPLE, width=4)
-            self.create_polygon(
-                start_x - 7,
-                strip_top - 2,
-                start_x + 7,
-                strip_top - 2,
-                start_x,
-                strip_top + 8,
-                fill=PURPLE,
-                outline=PURPLE,
-            )
-        if self.view_start <= self.end <= self.view_end:
-            end_x = self._time_to_x(self.end)
-            self.create_line(end_x, strip_top - 2, end_x, strip_bottom + 9, fill=PURPLE, width=4)
-            self.create_polygon(
-                end_x - 7,
-                strip_top - 2,
-                end_x + 7,
-                strip_top - 2,
-                end_x,
-                strip_top + 8,
-                fill=PURPLE,
-                outline=PURPLE,
-            )
-
-        if self.view_start <= self.playhead <= self.view_end:
-            play_x = self._time_to_x(self.playhead)
-            self.create_line(play_x, strip_top - 6, play_x, ruler_y + 12, fill=CYAN, width=2)
-            self.create_polygon(
-                play_x - 6,
-                strip_top - 6,
-                play_x + 6,
-                strip_top - 6,
-                play_x,
-                strip_top + 2,
-                fill=CYAN,
-                outline=CYAN,
-            )
-
-        tick_count = 6
-        for index in range(tick_count + 1):
-            fraction = index / tick_count
-            x = left + fraction * (right - left)
-            seconds = self.view_start + fraction * visible_span
-            hours = int(seconds // 3600)
-            minutes = int((seconds % 3600) // 60)
-            secs = int(seconds % 60)
-            label = f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
-            self.create_line(x, ruler_y - 3, x, ruler_y + 3, fill=BORDER)
-            self.create_text(x, ruler_y + 15, text=label, fill=MUTED, font=("Segoe UI", 8))
+        self._draw_clips(top, bottom)
+        self._draw_range(top, bottom)
 
         if self.tool == TOOL_BLADE and self._hover_x is not None:
             blade_time = self.snapped_time(self._hover_x)
-            if self.view_start <= blade_time <= self.view_end:
-                blade_x = self._time_to_x(blade_time)
-                self.create_line(blade_x, strip_top - 8, blade_x, strip_bottom + 8, fill=BLADE, width=2, dash=(4, 2))
-                self.create_text(blade_x + 3, strip_top - 1, text="✂", fill=BLADE, anchor="sw",
-                                 font=("Segoe UI Symbol", 11, "bold"))
+            blade_x = self._time_to_x(blade_time)
+            self.create_line(blade_x, top - 4, blade_x, bottom + 4, fill=BLADE, width=2, dash=(4, 2))
+            self.create_text(blade_x + 4, top + 1, text="✂", fill=BLADE, anchor="nw",
+                             font=("Segoe UI Symbol", 11, "bold"))
 
-        zoomed = visible_span < self.duration - 0.001
+        position = self.to_seq(self.playhead)
+        if self.view_start <= position <= self.view_end:
+            play_x = self._seq_to_x(position)
+            self.create_line(play_x, 2, play_x, bottom + 6, fill=CYAN, width=2)
+            self.create_polygon(play_x - 7, 2, play_x + 7, 2, play_x + 7, 12, play_x, 19, play_x - 7, 12,
+                                fill=CYAN, outline=CYAN)
+
+        if self.edit is not None and not self.layout:
+            self.create_text(width / 2, (top + bottom) / 2, text="Everything was deleted • Ctrl+Z to undo",
+                             fill=MUTED, font=("Segoe UI", 9, "bold"))
+
         if self.tool == TOOL_BLADE:
-            hint = "Blade (B): click to cut • V = select tool • Ctrl+K cuts at the playhead"
+            hint = "Blade (B): click a clip to cut it • V = selection tool • Ctrl+K cuts at the playhead"
         elif self.edit is not None and self.edit.cuts:
-            hint = "Click a part to select • Delete removes it • drag a yellow cut to move it • right-click for more"
-        elif zoomed:
-            hint = "Zoomed timeline • drag the playhead to scrub"
+            hint = ("Click a clip to select (Ctrl/Shift for more) • Delete removes it and the rest snaps together • "
+                    "drag a white cut to trim • right-click for more")
         else:
-            hint = "Drag the blue handles to trim • B = blade tool to cut • Space = play/pause"
-        self.create_text(
-            width / 2,
-            strip_bottom + 9,
-            text=hint,
-            fill=MUTED,
-            font=("Segoe UI", 8),
-            anchor="n",
-        )
+            hint = "B = blade to cut • drag the yellow In/Out handles to trim • Space = play/pause • Ctrl+wheel = zoom"
+        self.create_text(width / 2, min(height - 8, bottom + 15), text=hint, fill=MUTED, font=("Segoe UI", 8))
 
-    def _draw_segments(self, strip_top: float, strip_bottom: float) -> None:
-        edit = self.edit
-        if edit is None:
-            return
-        for segment in edit.segments():
-            a = max(segment.start, self.view_start)
-            b = min(segment.end, self.view_end)
+    def _draw_ruler(self, left: float, right: float) -> None:
+        span = max(0.001, self.view_end - self.view_start)
+        px_per_second = (right - left) / span
+        step = next((value for value in TICK_STEPS if value * px_per_second >= 80), TICK_STEPS[-1])
+        minor = step / 5
+        first = math.floor(self.view_start / minor) * minor
+        count = int(span / minor) + 2
+        for index in range(count):
+            value = first + index * minor
+            if value < self.view_start - 1e-9 or value > self.view_end + 1e-9:
+                continue
+            x = self._seq_to_x(value)
+            major = abs(value / step - round(value / step)) < 1e-6
+            self.create_line(x, RULER_H - (10 if major else 4), x, RULER_H, fill=MUTED if major else BORDER)
+            if major:
+                self.create_text(x + 3, 3, text=_label(value, step), fill=MUTED, anchor="nw",
+                                 font=("Segoe UI", 8))
+
+    def _strip_image(self, source: float, end: float, width: int, height: int) -> list[tuple[float, Image.Image]]:
+        """Thumbnail tiles (x offset in px, image) for source time ``source``..``end``."""
+        tiles: list[tuple[float, Image.Image]] = []
+        if width <= 0:
+            return tiles
+        span = max(1e-6, end - source)
+        if self.waveform_pil is not None:
+            image = self.waveform_pil
+            image_w, image_h = image.size
+            a = int(source / self.duration * image_w)
+            b = int(end / self.duration * image_w)
+            a = max(0, min(a, image_w - 1))
+            b = max(a + 1, min(b, image_w))
+            tiles.append((0.0, image.crop((a, 0, b, image_h)).resize((width, height))))
+            return tiles
+        samples = list(zip(self.thumbnail_times, self.thumbnail_pils))
+        for index, (sample_time, image) in enumerate(samples):
+            before = samples[index - 1][0] if index > 0 else 0.0
+            after = samples[index + 1][0] if index + 1 < len(samples) else self.duration
+            a = 0.0 if index == 0 else (before + sample_time) / 2
+            b = self.duration if index == len(samples) - 1 else (sample_time + after) / 2
+            a, b = max(a, source), min(b, end)
             if b <= a:
                 continue
-            x1 = self._time_to_x(a)
-            x2 = self._time_to_x(b)
-            middle = (x1 + x2) / 2
-            if segment.state == REMOVED:
-                self.create_rectangle(x1, strip_top, x2, strip_bottom, fill=REMOVED_FILL, stipple="gray75",
-                                      outline="")
-                self.create_line(x1, strip_top, x2, strip_bottom, fill=BLADE, width=1)
-                self.create_line(x1, strip_bottom, x2, strip_top, fill=BLADE, width=1)
-                if x2 - x1 > 54:
-                    self.create_text(middle, (strip_top + strip_bottom) / 2, text="Removed", fill="#FFFFFF",
-                                     font=("Segoe UI", 8, "bold"))
-            elif segment.state == GAP:
-                self.create_rectangle(x1, strip_top, x2, strip_bottom, fill=GAP_FILL, outline="")
-                if x2 - x1 > 40:
-                    self.create_text(middle, (strip_top + strip_bottom) / 2, text="Gap", fill="#C0C0C0",
-                                     font=("Segoe UI", 8, "bold"))
-            if segment.index in self.selected:
-                self.create_rectangle(x1 + 1, strip_top + 1, x2 - 1, strip_bottom - 1, outline=SELECTED, width=3)
-        for cut in edit.cuts:
-            if not self.view_start <= cut <= self.view_end:
-                continue
-            x = self._time_to_x(cut)
-            self.create_line(x, strip_top, x, strip_bottom, fill=CUT_LINE, width=2)
-            self.create_polygon(x - 4, strip_bottom, x + 4, strip_bottom, x, strip_bottom - 6,
-                                fill=CUT_LINE, outline=CUT_LINE)
+            x1 = (a - source) / span * width
+            x2 = (b - source) / span * width
+            tile_w = max(1, int(round(x2 - x1)) + 1)
+            # Keep the frame's shape: crop the middle instead of squeezing it.
+            iw, ih = image.size
+            target_ratio = tile_w / max(1, height)
+            if iw / max(1, ih) > target_ratio:
+                crop_w = max(1, int(ih * target_ratio))
+                box = ((iw - crop_w) // 2, 0, (iw - crop_w) // 2 + crop_w, ih)
+            else:
+                crop_h = max(1, int(iw / max(target_ratio, 1e-6)))
+                box = (0, (ih - crop_h) // 2, iw, (ih - crop_h) // 2 + crop_h)
+            tiles.append((x1, image.crop(box).resize((tile_w, height))))
+        return tiles
 
+    def _draw_clips(self, top: float, bottom: float) -> None:
+        body_top = top + HEAD_H
+        body_h = int(bottom - body_top)
+        cut_xs = {index for index, _cut in self._editable_cuts()}
+        for clip in self.layout:
+            a = max(clip.seq_start, self.view_start)
+            b = min(clip.seq_end, self.view_end)
+            if b <= a:
+                continue
+            x1, x2 = self._seq_to_x(a), self._seq_to_x(b)
+            # A 1 px gap between clips so each one reads as its own block.
+            gx1 = x1 + (1 if clip.seq_start >= self.view_start and clip.seq_start > 0 else 0)
+            if clip.state == GAP:
+                self.create_rectangle(gx1, top, x2, bottom, fill=GAP_FILL, outline="")
+                step = 10
+                x = gx1 - (bottom - top)
+                while x < x2:
+                    xa, ya, xb, yb = x, bottom, x + (bottom - top), top
+                    if xa < gx1:
+                        ya, xa = bottom - (gx1 - xa), gx1
+                    if xb > x2:
+                        yb, xb = top + (xb - x2), x2
+                    if xb > xa:
+                        self.create_line(xa, ya, xb, yb, fill=GAP_HATCH)
+                    x += step
+                if x2 - gx1 > 50:
+                    self.create_text((gx1 + x2) / 2, (top + bottom) / 2, text="Gap", fill=MUTED,
+                                     font=("Segoe UI", 8, "bold"))
+            else:
+                base = AUDIO_CLIP if self.waveform_pil is not None else "#111318"
+                self.create_rectangle(gx1, top, x2, bottom, fill=base, outline="")
+                source_a = clip.start + (a - clip.seq_start)
+                source_b = clip.start + (b - clip.seq_start)
+                for offset, tile in self._strip_image(source_a, source_b, int(round(x2 - gx1)), body_h):
+                    photo = ImageTk.PhotoImage(tile)
+                    self.thumbnail_refs.append(photo)
+                    self.create_image(gx1 + offset, body_top, anchor="nw", image=photo)
+                self.create_rectangle(gx1, top, x2, body_top, fill=CLIP_HEAD, outline="")
+                if x2 - gx1 > 46:
+                    self.create_text(gx1 + 5, top + HEAD_H / 2, text=f"Clip {clip.index + 1}  ·  "
+                                     f"{_label(clip.duration, 0.5 if clip.duration < 60 else 1)}",
+                                     fill=TEXT, anchor="w", font=("Segoe UI", 8))
+                self.create_rectangle(gx1, top, x2, bottom, outline=CLIP_EDGE, width=1)
+            if clip.index in self.selected:
+                self.create_rectangle(gx1 + 1, top + 1, x2 - 1, bottom - 1, outline=SELECTED, width=3)
+            # The cut after this clip, when it can be dragged (roll edit).
+            if clip.index in cut_xs and self.view_start <= clip.seq_end <= self.view_end:
+                x = self._seq_to_x(clip.seq_end)
+                self.create_line(x, top - 2, x, bottom + 2, fill=CUT_LINE, width=2)
+                self.create_polygon(x - 4, bottom + 2, x + 4, bottom + 2, x, bottom - 4, fill=CUT_LINE,
+                                    outline=CUT_LINE)
+
+    def _draw_range(self, top: float, bottom: float) -> None:
+        """Darken what is outside In/Out and draw the two yellow handles."""
+        left, right = self._x_bounds()
+        start = self.to_seq(self.start)
+        end = self.to_seq(self.end)
+        for a, b in ((self.view_start, start), (end, self.view_end)):
+            a, b = max(a, self.view_start), min(b, self.view_end)
+            if b > a:
+                self.create_rectangle(self._seq_to_x(a), top, self._seq_to_x(b), bottom, fill="#000000",
+                                      stipple="gray50", outline="")
+        for value, side in ((start, -1), (end, 1)):
+            if not self.view_start <= value <= self.view_end:
+                continue
+            x = self._seq_to_x(value)
+            self.create_line(x, top - 3, x, bottom + 3, fill=PURPLE, width=3)
+            self.create_polygon(x, top - 3, x - 8 * side, top - 3, x, top + 7, fill=PURPLE, outline=PURPLE)
+            self.create_polygon(x, bottom + 3, x - 8 * side, bottom + 3, x, bottom - 7, fill=PURPLE,
+                                outline=PURPLE)
+
+    # ------------------------------------------------------------------ mouse
     def _closest_target(self, x: float) -> str:
         distances: dict[str, float] = {}
-        if self.view_start <= self.start <= self.view_end:
-            distances["start"] = abs(x - self._time_to_x(self.start))
-        if self.view_start <= self.end <= self.view_end:
-            distances["end"] = abs(x - self._time_to_x(self.end))
-        if self.view_start <= self.playhead <= self.view_end:
-            distances["playhead"] = abs(x - self._time_to_x(self.playhead))
+        # The playhead comes first, so it wins a tie with an In/Out handle under it.
+        for name, value in (("playhead", self.playhead), ("start", self.start), ("end", self.end)):
+            position = self.to_seq(value)
+            if self.view_start <= position <= self.view_end:
+                distances[name] = abs(x - self._seq_to_x(position))
         if distances:
             target, distance = min(distances.items(), key=lambda item: item[1])
-            if distance <= 14:
+            if distance <= 10:
                 return target
         return "playhead"
 
     @staticmethod
     def _in_strip(y: float) -> bool:
-        return 8 <= y <= 76
+        return TRACK_TOP - 2 <= y <= TRACK_BOTTOM + 2
 
     def _on_press(self, event, *, toggle: bool = False, extend: bool = False) -> str | None:
         if not self.enabled:
@@ -459,28 +533,30 @@ class TimelineCanvas(tk.Canvas):
             self.drag_target = None
             return "break"
 
-        target = self._closest_target(event.x)
+        target = self._closest_target(event.x) if in_strip else "playhead"
         if target == "playhead" and in_strip:
             cut = self._cut_near(event.x)
-            if cut is not None:
+            if cut is not None and self.edit is not None:
                 self.drag_target = "cut"
                 self._drag_cut = cut
-                self._drag_cut_origin = self.edit.cuts[cut] if self.edit else None
+                self._drag_cut_origin = self.edit.cuts[cut]
                 return "break"
 
         if in_strip and self.edit is not None and target == "playhead":
-            index = self.edit.index_at(self._x_to_time(event.x))
-            if toggle:
-                selection = set(self.selected)
-                selection.symmetric_difference_update({index})
-                self._anchor = index
-            elif extend and self._anchor is not None:
-                low, high = sorted((self._anchor, index))
-                selection = set(range(low, high + 1))
-            else:
-                selection = {index}
-                self._anchor = index
-            self.set_selection(selection)
+            index = self.clip_index_at(event.x)
+            if index is not None:
+                if toggle:
+                    selection = set(self.selected)
+                    selection.symmetric_difference_update({index})
+                    self._anchor = index
+                elif extend and self._anchor is not None:
+                    low, high = sorted((self._anchor, index))
+                    visible = {clip.index for clip in self.layout}
+                    selection = {i for i in range(low, high + 1) if i in visible}
+                else:
+                    selection = {index}
+                    self._anchor = index
+                self.set_selection(selection)
 
         self.drag_target = target
         self._apply_drag(event.x, notify=False)
@@ -539,20 +615,25 @@ class TimelineCanvas(tk.Canvas):
     def _on_right_click(self, event) -> str | None:
         if not self.enabled or self.edit is None or not self.on_context_menu:
             return None
-        index = self.edit.index_at(self._x_to_time(event.x))
+        index = self.clip_index_at(event.x)
+        if index is None:
+            return "break"
         if index not in self.selected:
             self._anchor = index
             self.set_selection({index})
         self.on_context_menu(event, index)
         return "break"
 
-    def _on_wheel(self, event) -> str:
+    def _on_wheel(self, event, delta: int | None = None) -> str:
+        delta = event.delta if delta is None else delta
         span = self.view_end - self.view_start
-        if span >= self.duration - 0.001:
+        total = self.seq_total
+        if span >= total - 0.001:
             return "break"
-        shift = -span * 0.1 if event.delta > 0 else span * 0.1
-        start = max(0.0, min(self.view_start + shift, self.duration - span))
+        shift = -span * 0.1 if delta > 0 else span * 0.1
+        start = max(0.0, min(self.view_start + shift, total - span))
         self.view_start, self.view_end = start, start + span
+        self._fit = False
         self.redraw()
         return "break"
 
@@ -564,12 +645,13 @@ class TimelineCanvas(tk.Canvas):
         return "break"
 
     def _apply_drag(self, x: float, *, notify: bool) -> None:
-        value = self._x_to_time(x)
-        minimum_gap = min(0.1, self.duration / 100)
-
+        position = self._x_to_seq(x)
         if self.drag_target in {"start", "end"} and self.snap_enabled:
-            value = snap(value, [cut for cut in (self.edit.cuts if self.edit else [])] + [self.playhead],
-                         SNAP_PX * self._seconds_per_px())
+            position = snap(position, [clip.seq_start for clip in self.layout] +
+                            [clip.seq_end for clip in self.layout] + [self.to_seq(self.playhead)],
+                            SNAP_PX * self._seconds_per_px())
+        value = self.to_source(position)
+        minimum_gap = min(0.1, self.duration / 100)
 
         if self.drag_target == "start":
             self.start = max(0.0, min(value, self.end - minimum_gap))

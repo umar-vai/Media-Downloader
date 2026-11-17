@@ -35,11 +35,21 @@ COUNTDOWNS = ["Off", "3 s", "5 s", "10 s"]
 CAPTURE_ENGINES = {"Auto": "auto", "GDI (compatible)": "gdigrab", "Desktop Duplication (fast, games)": "ddagrab"}
 RING_COLORS = {"left": "#FFC400", "right": "#FF3B30"}
 BORDER_COLOR = "#E81123"
+KEY_COLOR = "#FF00FE"          # painted inside the chosen area; Windows shows it as see-through
+BAR_BG = "#1C1C1E"
+BAR_BUTTON = "#3A3A3C"
+REC_RED = "#D92D20"
+UI_FONT = ("Segoe UI", 9)
+UI_FONT_BOLD = ("Segoe UI", 9, "bold")
+# Aspect ratios the area can be locked to (width / height).
+RATIOS: dict[str, float | None] = {"Free": None, "16:9": 16 / 9, "9:16": 9 / 16, "4:3": 4 / 3, "3:4": 3 / 4,
+                                   "1:1": 1.0, "21:9": 21 / 9, "4:5": 4 / 5}
 DEFAULTS: dict[str, Any] = {
     "mode": "fullscreen",            # fullscreen, region, fixed
     "monitor": 0,
     "region": None,                  # [x, y, w, h]
     "fixed_size": FIXED_SIZES[1],
+    "ratio": "Free",
     "fps": 30,
     "quality": "High",
     "resolution": "Original",
@@ -171,72 +181,222 @@ def _open_folder(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path.parent)])
 
 
+# --------------------------------------------------------------------------- small widgets
+def _shade(color: str, factor: float) -> str:
+    color = color.lstrip("#")
+    r, g, b = (int(color[i:i + 2], 16) for i in (0, 2, 4))
+    if factor >= 1:
+        r, g, b = (int(v + (255 - v) * (factor - 1)) for v in (r, g, b))
+    else:
+        r, g, b = (int(v * factor) for v in (r, g, b))
+    return f"#{max(0, min(255, r)):02X}{max(0, min(255, g)):02X}{max(0, min(255, b)):02X}"
+
+
+class FlatButton(tk.Label):
+    """A flat, coloured button that looks the same on every Windows version."""
+
+    def __init__(self, master: tk.Misc, text: str, command: Callable[[], Any] | None, *, bg: str = BAR_BUTTON,
+                 fg: str = "white", font: tuple[Any, ...] | None = None, padx: int = 10, pady: int = 4) -> None:
+        super().__init__(master, text=text, bg=bg, fg=fg, font=font or UI_FONT_BOLD, padx=px(padx), pady=px(pady),
+                         cursor="hand2", bd=0)
+        self.command = command
+        self.base_bg = bg
+        self.enabled = True
+        self.bind("<Enter>", lambda _e: self._paint(_shade(self.base_bg, 1.22)))
+        self.bind("<Leave>", lambda _e: self._paint(self.base_bg))
+        self.bind("<ButtonPress-1>", lambda _e: self._paint(_shade(self.base_bg, 0.8)))
+        self.bind("<ButtonRelease-1>", self._release)
+
+    def _paint(self, color: str) -> None:
+        if self.enabled:
+            self.configure(bg=color)
+
+    def _release(self, event: Any) -> None:
+        inside = 0 <= event.x < self.winfo_width() and 0 <= event.y < self.winfo_height()
+        self._paint(_shade(self.base_bg, 1.22) if inside else self.base_bg)
+        if inside and self.enabled and self.command is not None:
+            self.command()
+
+    def set_enabled(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self.configure(fg="white" if enabled else "#8A8A8A", bg=self.base_bg if enabled else _shade(self.base_bg, 0.7),
+                       cursor="hand2" if enabled else "arrow")
+
+    def set_color(self, bg: str) -> None:
+        self.base_bg = bg
+        self.configure(bg=bg)
+
+
+class LevelMeter(tk.Canvas):
+    """A segmented sound level meter (green, yellow, red) with a falling peak marker."""
+
+    SEGMENTS = 16
+
+    def __init__(self, master: tk.Misc, *, width: int = 90, height: int = 10, bg: str = BAR_BG) -> None:
+        super().__init__(master, width=px(width), height=px(height), bg=bg, highlightthickness=0, bd=0)
+        self.value = 0.0
+        self.peak = 0.0
+        self._peak_time = 0.0
+        self._drawn: tuple[int, int] | None = None
+        self.bind("<Configure>", lambda _e: self._draw(force=True))
+
+    def set(self, level: float) -> None:
+        """``level`` is the raw peak (0..1); it is shown on a dB scale."""
+        fill = engine.level_fraction(level)
+        # Fast attack, slower release, so speech looks like a real meter and not flicker.
+        self.value = fill if fill > self.value else max(fill, self.value - 0.06)
+        now = time.monotonic()
+        if fill >= self.peak or now - self._peak_time > 1.2:
+            self.peak, self._peak_time = fill, now
+        self._draw()
+
+    def _draw(self, force: bool = False) -> None:
+        count = self.SEGMENTS
+        lit = int(round(self.value * count))
+        peak = min(count - 1, int(self.peak * count)) if self.peak > 0.02 else -1
+        if not force and self._drawn == (lit, peak):
+            return
+        self._drawn = (lit, peak)
+        self.delete("all")
+        width, height = max(10, self.winfo_width()), max(4, self.winfo_height())
+        gap = 1
+        seg_w = (width - gap * (count - 1)) / count
+        for index in range(count):
+            x = index * (seg_w + gap)
+            zone = "#2BD46A" if index < count * 0.65 else "#FFC400" if index < count * 0.87 else "#FF3B30"
+            on = index < lit or index == peak
+            self.create_rectangle(x, 0, x + seg_w, height, outline="", fill=zone if on else "#3A3A3A")
+
+
 # --------------------------------------------------------------------------- overlays
 class RegionSelector(tk.Toplevel):
-    """Dimmed full-desktop overlay: drag a box, move or resize it, Enter to confirm.
+    """Area picker: the desktop is dimmed, the chosen box stays clear.
 
-    A click without dragging picks the whole screen under the mouse.
+    Drag to draw a box (a ratio can be locked), drag its edges or corners to resize, drag
+    the middle grip or the toolbar's grip to move it, or type an exact width × height. As
+    soon as a box exists a toolbar sits on its top corner with Record, OK and Cancel, so a
+    recording starts with one click. A click without dragging picks the screen under it.
     """
 
     def __init__(self, master: tk.Misc, bounds: tuple[int, int, int, int], monitors: list[engine.Monitor],
-                 initial: tuple[int, int, int, int] | None, on_done: Callable[[tuple[int, int, int, int] | None],
-                                                                              None],
-                 *, fixed_size: tuple[int, int] | None = None) -> None:
+                 initial: tuple[int, int, int, int] | None,
+                 on_done: Callable[[tuple[int, int, int, int] | None, str], None],
+                 *, fixed_size: tuple[int, int] | None = None, ratio: str = "Free",
+                 on_ratio_change: Callable[[str], None] | None = None) -> None:
         super().__init__(master)
         self.bounds = bounds
         self.monitors = monitors
         self.on_done = on_done
         self.fixed_size = fixed_size
+        self.ratio_name = ratio if ratio in RATIOS else "Free"
+        self.on_ratio_change = on_ratio_change
+        self._done = False
         bx, by, bw, bh = bounds
         self.overrideredirect(True)
         self.geometry(f"{bw}x{bh}+{bx}+{by}")
         self.attributes("-topmost", True)
         try:
-            self.attributes("-alpha", 0.55)
+            self.attributes("-alpha", 0.6)
         except tk.TclError:
             pass
+        # The inside of the box is painted in a key colour that Windows makes fully
+        # transparent, so what will be recorded is seen clearly (and stays usable).
+        self.clear_inside = False
+        if IS_WINDOWS:
+            try:
+                self.attributes("-transparentcolor", KEY_COLOR)
+                self.clear_inside = True
+            except tk.TclError:
+                pass
         self.configure(bg="black", cursor="crosshair")
-        self.canvas = tk.Canvas(self, bg="#101010", highlightthickness=0, bd=0, cursor="crosshair")
+        self.canvas = tk.Canvas(self, bg="#0A0A0A", highlightthickness=0, bd=0, cursor="crosshair")
         self.canvas.pack(fill="both", expand=True)
         self.rect: cg.Rect | None = None
-        if initial:
-            x, y, w, h = initial
-            self.rect = (x - bx, y - by, w, h)
-        elif fixed_size:
+        if fixed_size:
             w, h = fixed_size
-            self.rect = ((bw - w) / 2, (bh - h) / 2, w, h)
+            if initial and (initial[2], initial[3]) == (engine.even(w), engine.even(h)):
+                self.rect = (initial[0] - bx, initial[1] - by, w, h)
+            else:
+                self.rect = cg.keep_inside(((bw - w) / 2, (bh - h) / 2, w, h), bw, bh)
+        elif initial:
+            x, y, w, h = initial
+            self.rect = cg.keep_inside((x - bx, y - by, w, h), bw, bh)
         self.drag: dict[str, Any] | None = None
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._motion)
         self.canvas.bind("<ButtonRelease-1>", self._release)
         self.canvas.bind("<Motion>", self._hover)
-        self.canvas.bind("<Double-Button-1>", lambda _e: self._finish(True))
-        self.bind("<Return>", lambda _e: self._finish(True))
-        self.bind("<KP_Enter>", lambda _e: self._finish(True))
-        self.bind("<Escape>", lambda _e: self._finish(False))
-        self.bind("<Button-3>", lambda _e: self._finish(False))
+        self.canvas.bind("<Double-Button-1>", lambda _e: self._finish("record") if self.rect else None)
+        self.bind("<Return>", lambda _e: self._finish("record"))
+        self.bind("<KP_Enter>", lambda _e: self._finish("record"))
+        self.bind("<Escape>", lambda _e: self._finish("cancel"))
+        self.canvas.bind("<Button-3>", lambda _e: self._finish("cancel"))
         for key, (dx, dy) in {"<Left>": (-1, 0), "<Right>": (1, 0), "<Up>": (0, -1), "<Down>": (0, 1)}.items():
             self.bind(key, lambda _e, dx=dx, dy=dy: self._nudge(dx, dy))
             self.bind(f"<Shift-{key[1:]}", lambda _e, dx=dx, dy=dy: self._nudge(dx * 10, dy * 10))
-        self.after(30, self._grab)
+        self.toolbar = SelectionToolbar(self)
+        self.update_idletasks()
+        self.after(30, self._take_focus)
         self._draw()
 
-    def _grab(self) -> None:
+    # ------------------------------------------------------------------ helpers
+    def _take_focus(self) -> None:
         try:
             self.focus_force()
-            self.grab_set()
         except tk.TclError:
             pass
+        self.toolbar.lift_above()
 
     @property
     def frame_size(self) -> tuple[int, int]:
         return self.bounds[2], self.bounds[3]
 
+    @property
+    def ratio(self) -> float | None:
+        return None if self.fixed_size else RATIOS.get(self.ratio_name)
+
+    def _grip_hit(self, x: float, y: float) -> bool:
+        if not self.rect:
+            return False
+        rx, ry, rw, rh = self.rect
+        if rw < 90 or rh < 90:
+            return False
+        cx, cy = rx + rw / 2, ry + rh / 2
+        return abs(x - cx) <= px(22) and abs(y - cy) <= px(22)
+
+    def _handle_at(self, x: float, y: float) -> str | None:
+        if not self.rect:
+            return None
+        if self._grip_hit(x, y):
+            return "move"
+        handle = cg.hit_test(self.rect, x, y, px(10))
+        if self.fixed_size and handle:
+            handle = "move"
+        return handle
+
+    def set_rect(self, rect: cg.Rect) -> None:
+        self.rect = cg.keep_inside(rect, *self.frame_size)
+        self._draw()
+
+    def set_ratio(self, name: str) -> None:
+        self.ratio_name = name if name in RATIOS else "Free"
+        if self.on_ratio_change is not None:
+            self.on_ratio_change(self.ratio_name)
+        if self.rect and self.ratio:
+            self.rect = cg.fit_ratio(self.rect, self.ratio, *self.frame_size)
+        self._draw()
+
+    def screen_rect(self) -> tuple[int, int, int, int] | None:
+        if not self.rect:
+            return None
+        bx, by, _bw, _bh = self.bounds
+        x, y, w, h = self.rect
+        return engine.normalize_region((x + bx, y + by, w, h), self.bounds)
+
+    # ------------------------------------------------------------------ mouse
     def _press(self, event: Any) -> None:
         fw, fh = self.frame_size
-        handle = cg.hit_test(self.rect, event.x, event.y, 10) if self.rect else None
-        if self.fixed_size and handle not in (None, "move"):
-            handle = "move"
+        handle = self._handle_at(event.x, event.y)
         if handle:
             self.drag = {"mode": handle, "x": event.x, "y": event.y, "rect": self.rect, "moved": False}
         elif self.fixed_size:
@@ -245,6 +405,7 @@ class RegionSelector(tk.Toplevel):
             self.drag = {"mode": "move", "x": event.x, "y": event.y, "rect": self.rect, "moved": True}
         else:
             self.drag = {"mode": "new", "x": event.x, "y": event.y, "rect": self.rect, "moved": False}
+        self.toolbar.hide()
         self._draw()
 
     def _motion(self, event: Any) -> None:
@@ -256,11 +417,11 @@ class RegionSelector(tk.Toplevel):
             self.drag["moved"] = True
         if self.drag["mode"] == "new":
             if self.drag["moved"]:
-                self.rect = cg.from_points(self.drag["x"], self.drag["y"], event.x, event.y, fw, fh)
+                self.rect = cg.from_points(self.drag["x"], self.drag["y"], event.x, event.y, fw, fh, self.ratio)
         else:
-            self.rect = cg.resize(self.drag["rect"], self.drag["mode"], dx, dy, fw, fh,
+            self.rect = cg.resize(self.drag["rect"], self.drag["mode"], dx, dy, fw, fh, ratio=self.ratio,
                                   min_size=engine.MIN_REGION)
-        self._draw()
+        self._draw(show_toolbar=False)
 
     def _release(self, event: Any) -> None:
         drag, self.drag = self.drag, None
@@ -274,17 +435,17 @@ class RegionSelector(tk.Toplevel):
                     break
             else:
                 self.rect = (0, 0, *self.frame_size)
+            if self.ratio:
+                self.rect = cg.fit_ratio(self.rect, self.ratio, *self.frame_size)
         if self.rect and (self.rect[2] < engine.MIN_REGION or self.rect[3] < engine.MIN_REGION):
-            self.rect = None
+            self.rect = drag["rect"] if drag else None
         self._draw()
 
     def _hover(self, event: Any) -> None:
-        handle = cg.hit_test(self.rect, event.x, event.y, 10) if self.rect else None
+        handle = self._handle_at(event.x, event.y)
         cursors = {"move": "fleur", "n": "top_side", "s": "bottom_side", "e": "right_side", "w": "left_side",
                    "nw": "top_left_corner", "ne": "top_right_corner", "sw": "bottom_left_corner",
                    "se": "bottom_right_corner"}
-        if self.fixed_size and handle:
-            handle = "move"
         self.canvas.configure(cursor=cursors.get(handle or "", "crosshair"))
 
     def _nudge(self, dx: int, dy: int) -> None:
@@ -292,41 +453,218 @@ class RegionSelector(tk.Toplevel):
             self.rect = cg.move(self.rect, dx, dy, *self.frame_size)
             self._draw()
 
-    def _draw(self) -> None:
+    # ------------------------------------------------------------------ drawing
+    def _draw(self, show_toolbar: bool = True) -> None:
         canvas = self.canvas
         canvas.delete("all")
         fw, fh = self.frame_size
-        text = ("Drag to select the area to record • click a screen for all of it\n"
-                "Enter or double-click = OK • Esc or right-click = cancel • arrows move the box")
         if self.fixed_size:
-            text = "Move the box to the area to record • Enter or double-click = OK • Esc = cancel"
+            text = "Drag the box to the part of the screen to record, then press ● REC (or Enter). Esc = cancel"
+        elif self.rect:
+            text = ("Drag the edges or corners to resize • drag ✥ or the toolbar grip to move • "
+                    "type an exact size in the toolbar • ● REC starts • Esc = cancel")
+        else:
+            text = "Drag to select the area to record  •  click a screen to take all of it  •  Esc = cancel"
         if self.rect:
             x, y, w, h = self.rect
-            # A light dotted tint shows the chosen area (Tk on Windows draws no stipple: border only).
-            tint = {} if IS_WINDOWS else {"fill": "#FFFFFF", "stipple": "gray12"}
-            canvas.create_rectangle(x, y, x + w, y + h, outline=BORDER_COLOR, width=3, **tint)
-            for hx, hy in ((x, y), (x + w / 2, y), (x + w, y), (x + w, y + h / 2), (x + w, y + h),
-                           (x + w / 2, y + h), (x, y + h), (x, y + h / 2)):
-                canvas.create_rectangle(hx - 5, hy - 5, hx + 5, hy + 5, fill=BORDER_COLOR, outline="white")
-            ex, ey, ew, eh = engine.normalize_region((x, y, w, h))
+            inside = KEY_COLOR if self.clear_inside else ""
+            canvas.create_rectangle(x, y, x + w, y + h, outline=BORDER_COLOR, width=2, fill=inside)
+            # Rule-of-thirds guides help line things up (thin, only on a big enough box).
+            if w > 240 and h > 160:
+                for i in (1, 2):
+                    canvas.create_line(x + w * i / 3, y, x + w * i / 3, y + 6, fill=BORDER_COLOR)
+                    canvas.create_line(x, y + h * i / 3, x + 6, y + h * i / 3, fill=BORDER_COLOR)
+            if not self.fixed_size:
+                size = px(5)
+                for hx, hy in ((x, y), (x + w / 2, y), (x + w, y), (x + w, y + h / 2), (x + w, y + h),
+                               (x + w / 2, y + h), (x, y + h), (x, y + h / 2)):
+                    canvas.create_rectangle(hx - size, hy - size, hx + size, hy + size, fill=BORDER_COLOR,
+                                            outline="white")
+            if w >= 90 and h >= 90:
+                cx, cy, r = x + w / 2, y + h / 2, px(18)
+                canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#202020", outline="white", width=1)
+                canvas.create_text(cx, cy, text="✥", fill="white", font=("Segoe UI Symbol", 14))
+            _ex, _ey, ew, eh = engine.normalize_region((x, y, w, h))
             label = f"{ew} × {eh}"
-            ly = y - 26 if y > 40 else y + h + 8
-            canvas.create_rectangle(x, ly, x + 12 + 9 * len(label), ly + 22, fill="black", outline=BORDER_COLOR)
-            canvas.create_text(x + 6, ly + 11, text=label, fill="white", anchor="w", font=("Segoe UI", 11, "bold"))
-        canvas.create_text(fw / 2, 40, text=text, fill="white", font=("Segoe UI", 13, "bold"), justify="center")
+            ly = y - px(24) if y > px(30) else y + h + px(4)
+            canvas.create_rectangle(x, ly, x + px(14) + px(8) * len(label), ly + px(20), fill="#111111",
+                                    outline=BORDER_COLOR)
+            canvas.create_text(x + px(7), ly + px(10), text=label, fill="white", anchor="w", font=UI_FONT_BOLD)
+        hint_y = px(34)
+        if self.rect and self.rect[1] < px(70):
+            hint_y = fh - px(34)
+        canvas.create_rectangle(fw / 2 - px(430), hint_y - px(16), fw / 2 + px(430), hint_y + px(16), fill="#111111",
+                                outline="")
+        canvas.create_text(fw / 2, hint_y, text=text, fill="white", font=UI_FONT, justify="center")
+        if self.rect and show_toolbar and not self.drag:
+            self.toolbar.show_for(self.rect)
+        elif not self.rect:
+            self.toolbar.hide()
 
-    def _finish(self, accept: bool) -> None:
-        result = None
-        if accept and self.rect:
-            bx, by, _bw, _bh = self.bounds
-            x, y, w, h = self.rect
-            result = engine.normalize_region((x + bx, y + by, w, h), self.bounds)
+    # ------------------------------------------------------------------ result
+    def _finish(self, action: str) -> None:
+        if self._done:
+            return
+        if action != "cancel" and not self.rect:
+            return
+        self._done = True
+        result = self.screen_rect() if action != "cancel" else None
         try:
-            self.grab_release()
+            self.toolbar.destroy()
         except tk.TclError:
             pass
         self.destroy()
-        self.on_done(result)
+        self.on_done(result, action)
+
+
+class SelectionToolbar(tk.Toplevel):
+    """Record / OK / Cancel, the exact size and the ratio, on the corner of the chosen box."""
+
+    def __init__(self, selector: RegionSelector) -> None:
+        super().__init__(selector)
+        self.selector = selector
+        self.withdraw()
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(bg=BAR_BG, highlightthickness=1, highlightbackground="#4A4A4A")
+        pad = {"padx": px(3), "pady": px(4)}
+        grip = tk.Label(self, text="⠿", fg="#9A9A9A", bg=BAR_BG, cursor="fleur", font=UI_FONT_BOLD)
+        grip.pack(side="left", padx=(px(6), px(2)))
+        grip.bind("<ButtonPress-1>", self._grip_press)
+        grip.bind("<B1-Motion>", self._grip_move)
+        self.w_var = tk.StringVar(self)
+        self.h_var = tk.StringVar(self)
+        fixed = selector.fixed_size is not None
+        self.entries: dict[str, tk.Entry] = {}
+        for var, name in ((self.w_var, "W"), (self.h_var, "H")):
+            tk.Label(self, text=name, fg="#9A9A9A", bg=BAR_BG, font=UI_FONT).pack(side="left", padx=(px(4), 0))
+            entry = tk.Entry(self, textvariable=var, width=5, bg="#2B2B2B", fg="white", insertbackground="white",
+                             relief="flat", font=UI_FONT_BOLD, justify="center",
+                             disabledbackground="#2B2B2B", disabledforeground="#9A9A9A")
+            entry.pack(side="left", ipady=px(2), **pad)
+            self.entries[name] = entry
+            entry.bind("<Return>", self._apply_size)
+            entry.bind("<KP_Enter>", self._apply_size)
+            entry.bind("<FocusOut>", self._apply_size)
+            entry.bind("<Button-1>", lambda e: e.widget.focus_force())
+            if fixed:
+                entry.configure(state="disabled")
+        self.ratio_button = FlatButton(self, "", self._ratio_menu, bg=BAR_BUTTON, font=UI_FONT)
+        self.ratio_button.pack(side="left", **pad)
+        if fixed:
+            self.ratio_button.set_enabled(False)
+        self.full_button = FlatButton(self, "⛶", self._whole_screen, bg=BAR_BUTTON, font=UI_FONT_BOLD, padx=7)
+        self.full_button.pack(side="left", **pad)
+        tk.Frame(self, width=1, bg="#4A4A4A").pack(side="left", fill="y", pady=px(5), padx=px(3))
+        FlatButton(self, "● REC", lambda: selector._finish("record"), bg=REC_RED).pack(side="left", **pad)
+        FlatButton(self, "✓ OK", lambda: selector._finish("ok"), bg=BAR_BUTTON).pack(side="left", **pad)
+        FlatButton(self, "✕", lambda: selector._finish("cancel"), bg=BAR_BUTTON, padx=8).pack(
+            side="left", padx=(px(3), px(6)), pady=px(4))
+        self._menu = tk.Menu(self, tearoff=0)
+        for name in RATIOS:
+            self._menu.add_command(label=name if name != "Free" else "Free (any size)",
+                                   command=lambda name=name: self._set_ratio(name))
+        self._grip_origin: tuple[int, int, cg.Rect] | None = None
+        self.update_idletasks()
+        exclude_from_capture(self)
+
+    def lift_above(self) -> None:
+        try:
+            if self.winfo_viewable():
+                self.lift()
+                self.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+
+    def hide(self) -> None:
+        try:
+            self.withdraw()
+        except tk.TclError:
+            pass
+
+    def show_for(self, rect: cg.Rect) -> None:
+        x, y, w, h = rect
+        _ex, _ey, ew, eh = engine.normalize_region((x, y, w, h))
+        focused = self.focus_get()
+        if not isinstance(focused, tk.Entry):
+            self.w_var.set(str(ew))
+            self.h_var.set(str(eh))
+        self.ratio_button.configure(text=f"Ratio {self.selector.ratio_name} ▾")
+        self.update_idletasks()
+        tw, th = self.winfo_reqwidth(), self.winfo_reqheight()
+        bx, by, bw, bh = self.selector.bounds
+        gap = px(6)
+        left = max(0, min(int(x + w - tw), bw - tw))
+        if y - th - gap >= 0:
+            top = y - th - gap
+        elif y + h + gap + th <= bh:
+            top = y + h + gap
+        else:
+            top = y + gap
+        self.geometry(f"+{int(bx + left)}+{int(by + top)}")
+        if not self.winfo_viewable():
+            self.deiconify()
+        self.lift_above()
+
+    def _apply_size(self, _event: Any = None) -> str | None:
+        selector = self.selector
+        if selector.fixed_size or not selector.rect:
+            return None
+        try:
+            w = int(float(self.w_var.get()))
+            h = int(float(self.h_var.get()))
+        except ValueError:
+            selector._draw()
+            return "break"
+        fw, fh = selector.frame_size
+        ratio = selector.ratio
+        if ratio:
+            # The field just typed in decides; the other one follows the ratio.
+            if _event is not None and getattr(_event, "widget", None) is self.entries.get("H"):
+                w = round(h * ratio)
+            else:
+                h = round(w / ratio)
+        w = max(engine.MIN_REGION, min(w, fw))
+        h = max(engine.MIN_REGION, min(h, fh))
+        x, y, _w, _h = selector.rect
+        selector.set_rect((x, y, w, h))
+        if _event is not None and getattr(_event, "keysym", "") in {"Return", "KP_Enter"}:
+            selector.focus_force()
+        return "break"
+
+    def _ratio_menu(self) -> None:
+        try:
+            self._menu.tk_popup(self.ratio_button.winfo_rootx(),
+                                self.ratio_button.winfo_rooty() + self.ratio_button.winfo_height())
+        finally:
+            self._menu.grab_release()
+
+    def _set_ratio(self, name: str) -> None:
+        self.selector.set_ratio(name)
+
+    def _whole_screen(self) -> None:
+        selector = self.selector
+        rect = selector.rect or (0, 0, *selector.frame_size)
+        bx, by, _bw, _bh = selector.bounds
+        cx, cy = rect[0] + rect[2] / 2 + bx, rect[1] + rect[3] / 2 + by
+        target: cg.Rect = (0, 0, *selector.frame_size)
+        for monitor in selector.monitors:
+            if monitor.left <= cx < monitor.left + monitor.width and monitor.top <= cy < monitor.top + monitor.height:
+                target = (monitor.left - bx, monitor.top - by, monitor.width, monitor.height)
+                break
+        if selector.ratio:
+            target = cg.fit_ratio(target, selector.ratio, *selector.frame_size)
+        selector.set_rect(target)
+
+    def _grip_press(self, event: Any) -> None:
+        if self.selector.rect:
+            self._grip_origin = (event.x_root, event.y_root, self.selector.rect)
+
+    def _grip_move(self, event: Any) -> None:
+        if not self._grip_origin:
+            return
+        x0, y0, rect = self._grip_origin
+        self.selector.set_rect(cg.move(rect, event.x_root - x0, event.y_root - y0, *self.selector.frame_size))
 
 
 class RegionBorder:
@@ -505,34 +843,47 @@ class Countdown(tk.Toplevel):
 
 
 class ControlBar(tk.Toplevel):
-    """Small always-on-top bar while recording: time, size, pause, stop."""
+    """Always-on-top bar on the corner of the recorded area (kept out of the video).
+
+    Shows the time, the file size and live sound meters (microphone and system sound), with
+    Pause/Resume and Stop. The grip on the left moves it.
+    """
 
     def __init__(self, master: "ScreenRecorderWindow", region: tuple[int, int, int, int],
-                 screen: tuple[int, int, int, int]) -> None:
+                 screen: tuple[int, int, int, int], *, show_mic: bool, show_system: bool) -> None:
         super().__init__(master)
         self.recorder = master
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.configure(bg="#202020")
-        pad = {"padx": px(4), "pady": px(4)}
-        self.dot = tk.Label(self, text="●", fg="#FF3B30", bg="#202020", font=("Segoe UI", 12, "bold"))
-        self.dot.pack(side="left", **pad)
-        self.time_label = tk.Label(self, text="00:00:00", fg="white", bg="#202020", font=("Consolas", 12, "bold"))
-        self.time_label.pack(side="left", **pad)
-        self.size_label = tk.Label(self, text="0 KB", fg="#BBBBBB", bg="#202020", font=("Segoe UI", 9))
-        self.size_label.pack(side="left", **pad)
-        self.pause_button = tk.Button(self, text="❚❚ Pause", command=master.toggle_pause, relief="flat",
-                                      bg="#3A3A3A", fg="white", activebackground="#555555", activeforeground="white",
-                                      bd=0, padx=px(8))
-        self.pause_button.pack(side="left", **pad)
-        self.stop_button = tk.Button(self, text="■ Stop", command=master.stop_recording, relief="flat",
-                                     bg="#C42B1C", fg="white", activebackground="#E81123", activeforeground="white",
-                                     bd=0, padx=px(8))
-        self.stop_button.pack(side="left", **pad)
-        grip = tk.Label(self, text="⠿", fg="#888888", bg="#202020", cursor="fleur")
-        grip.pack(side="left", padx=(0, px(4)))
+        self.configure(bg=BAR_BG, highlightthickness=1, highlightbackground="#4A4A4A")
+        pad = {"padx": px(3), "pady": px(4)}
+        grip = tk.Label(self, text="⠿", fg="#9A9A9A", bg=BAR_BG, cursor="fleur", font=UI_FONT_BOLD)
+        grip.pack(side="left", padx=(px(6), px(2)))
         grip.bind("<ButtonPress-1>", self._start_move)
         grip.bind("<B1-Motion>", self._move)
+        self.dot = tk.Label(self, text="●", fg=REC_RED, bg=BAR_BG, font=("Segoe UI", 12, "bold"))
+        self.dot.pack(side="left", padx=(px(2), 0))
+        self.state_label = tk.Label(self, text="REC", fg="white", bg=BAR_BG, font=UI_FONT_BOLD)
+        self.state_label.pack(side="left", padx=(px(2), px(4)))
+        self.time_label = tk.Label(self, text="00:00:00", fg="white", bg=BAR_BG, font=("Consolas", 13, "bold"))
+        self.time_label.pack(side="left", **pad)
+        self.size_label = tk.Label(self, text="0 KB", fg="#A8A8A8", bg=BAR_BG, font=UI_FONT, width=8, anchor="w")
+        self.size_label.pack(side="left", **pad)
+        self.meters: dict[str, LevelMeter] = {}
+        for key, icon, shown in (("mic", "🎤", show_mic), ("system", "🔊", show_system)):
+            if not shown:
+                continue
+            box = tk.Frame(self, bg=BAR_BG)
+            box.pack(side="left", padx=px(4))
+            tk.Label(box, text=icon, fg="white", bg=BAR_BG, font=("Segoe UI Emoji", 10)).pack(side="left")
+            meter = LevelMeter(box, width=64, height=9)
+            meter.pack(side="left", padx=(px(2), 0))
+            self.meters[key] = meter
+        tk.Frame(self, width=1, bg="#4A4A4A").pack(side="left", fill="y", pady=px(5), padx=px(3))
+        self.pause_button = FlatButton(self, "❚❚ Pause", master.toggle_pause, bg=BAR_BUTTON)
+        self.pause_button.pack(side="left", **pad)
+        self.stop_button = FlatButton(self, "■ Stop", master.stop_recording, bg=REC_RED)
+        self.stop_button.pack(side="left", padx=(px(3), px(6)), pady=px(4))
         self.update_idletasks()
         self._place(region, screen)
         exclude_from_capture(self)
@@ -542,14 +893,19 @@ class ControlBar(tk.Toplevel):
         width, height = self.winfo_reqwidth(), self.winfo_reqheight()
         x, y, w, h = region
         sx, sy, sw, sh = screen
-        # Above the area if there is room, else below it, else inside the top edge.
-        left = max(sx, min(x + w - width, sx + sw - width))
-        if y - height - 6 >= sy:
-            top = y - height - 6
-        elif y + h + 6 + height <= sy + sh:
-            top = y + h + 6
+        gap = px(6)
+        if (x, y, w, h) == (sx, sy, sw, sh):
+            # Full screen: top centre (the bar is kept out of the video).
+            left, top = sx + (sw - width) // 2, sy + gap
         else:
-            top = y + 6
+            # On the top right corner of the area, outside it if there is room.
+            left = max(sx, min(x + w - width, sx + sw - width))
+            if y - height - gap >= sy:
+                top = y - height - gap
+            elif y + h + gap + height <= sy + sh:
+                top = y + h + gap
+            else:
+                top = y + gap
         self.geometry(f"+{left}+{top}")
 
     def _start_move(self, event: Any) -> None:
@@ -563,14 +919,27 @@ class ControlBar(tk.Toplevel):
         self.time_label.configure(text=engine.format_duration(elapsed))
         self.size_label.configure(text=engine.format_size(size))
         self._blink = not self._blink
-        self.dot.configure(text="❚❚" if paused else "●", fg="#FFC400" if paused else
-                           ("#FF3B30" if self._blink else "#7A1A14"))
-        self.pause_button.configure(text="● Resume" if paused else "❚❚ Pause")
+        if paused:
+            self.dot.configure(text="❚❚", fg="#FFC400")
+            self.state_label.configure(text="PAUSED", fg="#FFC400")
+        else:
+            self.dot.configure(text="●", fg=REC_RED if self._blink else "#7A1A14")
+            self.state_label.configure(text="REC", fg="white")
+        self.pause_button.configure(text="▶ Resume" if paused else "❚❚ Pause")
+        self.pause_button.set_color("#2E7D32" if paused else BAR_BUTTON)
+
+    def update_levels(self, levels: dict[str, float]) -> None:
+        for key, meter in self.meters.items():
+            meter.set(levels.get(key, 0.0))
 
     def set_finishing(self) -> None:
         self.dot.configure(text="…", fg="#BBBBBB")
-        self.pause_button.configure(state="disabled")
-        self.stop_button.configure(state="disabled", text="Saving…")
+        self.state_label.configure(text="SAVING", fg="#BBBBBB")
+        self.pause_button.set_enabled(False)
+        self.stop_button.configure(text="Saving…")
+        self.stop_button.set_enabled(False)
+        for meter in self.meters.values():
+            meter.set(0.0)
 
 
 # --------------------------------------------------------------------------- main window
@@ -599,6 +968,10 @@ class ScreenRecorderWindow(tk.Toplevel):
         self.microphones: list[str] = []
         self._closing = False
         self._tick_id: str | None = None
+        self._meter_id: str | None = None
+        self.selector: RegionSelector | None = None
+        self.monitors_live: dict[str, engine.LevelMonitor] = {}
+        self.audio_error = ""
 
         self.title(APP_TITLE)
         self.configure(bg=native.dialog_bg(self))
@@ -629,6 +1002,7 @@ class ScreenRecorderWindow(tk.Toplevel):
         monitor_index = int(c.get("monitor") or 0)
         self.monitor_var = tk.StringVar(self, value=labels[min(monitor_index, len(labels) - 1)])
         self.fixed_var = tk.StringVar(self, value=c["fixed_size"] if c["fixed_size"] in FIXED_SIZES else FIXED_SIZES[1])
+        self.ratio_var = tk.StringVar(self, value=c.get("ratio") if c.get("ratio") in RATIOS else "Free")
         self.fps_var = tk.StringVar(self, value=str(c["fps"] if int(c["fps"]) in engine.FRAME_RATES else 30))
         self.quality_var = tk.StringVar(self, value=c["quality"] if c["quality"] in engine.QUALITIES else "High")
         self.resolution_var = tk.StringVar(self, value=c["resolution"] if c["resolution"] in engine.RESOLUTIONS
@@ -675,6 +1049,7 @@ class ScreenRecorderWindow(tk.Toplevel):
             "monitor": labels.index(self.monitor_var.get()) if self.monitor_var.get() in labels else 0,
             "region": list(self.region) if self.region else None,
             "fixed_size": self.fixed_var.get(),
+            "ratio": self.ratio_var.get(),
             "fps": int(self.fps_var.get()),
             "quality": self.quality_var.get(),
             "resolution": self.resolution_var.get(),
@@ -728,11 +1103,17 @@ class ScreenRecorderWindow(tk.Toplevel):
         self.monitor_menu = native.combo(area, self.monitor_var, self._monitor_labels(), width=28)
         self.monitor_menu.grid(row=0, column=1, columnspan=2, sticky="w", padx=(native.GAP, 0), pady=2)
         ttk.Radiobutton(area, text="Select area", value="region", variable=self.mode_var,
-                        command=self._sync_mode).grid(row=1, column=0, sticky="w", pady=2)
-        self.select_button = ttk.Button(area, text="Select area…", command=self.select_region)
-        self.select_button.grid(row=1, column=1, sticky="w", padx=(native.GAP, 0), pady=2)
-        self.region_label = native.Text(area, "")
-        self.region_label.grid(row=1, column=2, sticky="w", padx=(native.GAP, 0))
+                        command=self._region_mode_picked).grid(row=1, column=0, sticky="w", pady=2)
+        region_row = ttk.Frame(area)
+        region_row.grid(row=1, column=1, columnspan=2, sticky="w", padx=(native.GAP, 0), pady=2)
+        self.select_button = ttk.Button(region_row, text="Select area…", command=self.select_region)
+        self.select_button.pack(side="left")
+        native.Text(region_row, "Ratio:").pack(side="left", padx=(native.GAP * 2, native.GAP))
+        self.ratio_menu = native.combo(region_row, self.ratio_var, list(RATIOS), width=6)
+        self.ratio_menu.pack(side="left")
+        self.ratio_menu.bind("<<ComboboxSelected>>", lambda _e: self._ratio_changed())
+        self.region_label = native.Text(region_row, "")
+        self.region_label.pack(side="left", padx=(native.GAP * 2, 0))
         ttk.Radiobutton(area, text="Fixed size", value="fixed", variable=self.mode_var,
                         command=self._sync_mode).grid(row=2, column=0, sticky="w", pady=2)
         self.fixed_menu = native.combo(area, self.fixed_var, FIXED_SIZES, width=20)
@@ -760,25 +1141,37 @@ class ScreenRecorderWindow(tk.Toplevel):
         self.encoder_note.configure(foreground=C["MUTED"])
         self.encoder_note.grid(row=len(rows), column=0, columnspan=2, sticky="ew", pady=(2, 0))
 
-        # ---- audio
+        # ---- audio (each source has a live level meter, like Bandicam)
         audio = native.group(body, "Sound", row=1, column=1, sticky="nsew", pady=(native.PAD, 0))
         audio.grid_columnconfigure(1, weight=1)
-        self.system_check = ttk.Checkbutton(audio, text="System sound (what you hear)", variable=self.system_var)
+        meter_bg = native.dialog_bg(self)
+        self.system_check = ttk.Checkbutton(audio, text="System sound (what you hear)", variable=self.system_var,
+                                            command=self._restart_monitors)
         self.system_check.grid(row=0, column=0, columnspan=2, sticky="w", pady=2)
         native.Text(audio, "Volume:").grid(row=1, column=0, sticky="w")
         ttk.Scale(audio, from_=0, to=200, variable=self.system_volume_var, orient="horizontal").grid(
             row=1, column=1, sticky="ew", padx=(native.GAP, 0))
+        native.Text(audio, "Level:").grid(row=2, column=0, sticky="w")
+        self.system_meter = LevelMeter(audio, width=160, height=8, bg=meter_bg)
+        self.system_meter.grid(row=2, column=1, sticky="ew", padx=(native.GAP, 0), pady=2)
         self.mic_check = ttk.Checkbutton(audio, text="Microphone", variable=self.mic_var,
                                          command=self._sync_audio)
-        self.mic_check.grid(row=2, column=0, columnspan=2, sticky="w", pady=(native.GAP, 2))
+        self.mic_check.grid(row=3, column=0, columnspan=2, sticky="w", pady=(native.GAP, 2))
         self.mic_menu = native.combo(audio, self.mic_device_var, [], width=28)
-        self.mic_menu.grid(row=3, column=0, columnspan=2, sticky="ew", pady=2)
-        native.Text(audio, "Volume:").grid(row=4, column=0, sticky="w")
+        self.mic_menu.grid(row=4, column=0, columnspan=2, sticky="ew", pady=2)
+        self.mic_menu.bind("<<ComboboxSelected>>", lambda _e: self._restart_monitors(), add="+")
+        native.Text(audio, "Volume:").grid(row=5, column=0, sticky="w")
         ttk.Scale(audio, from_=0, to=200, variable=self.mic_volume_var, orient="horizontal").grid(
-            row=4, column=1, sticky="ew", padx=(native.GAP, 0))
+            row=5, column=1, sticky="ew", padx=(native.GAP, 0))
+        native.Text(audio, "Level:").grid(row=6, column=0, sticky="w")
+        self.mic_meter = LevelMeter(audio, width=160, height=8, bg=meter_bg)
+        self.mic_meter.grid(row=6, column=1, sticky="ew", padx=(native.GAP, 0), pady=2)
+        self.meter_note = native.Text(audio, "", wrap=px(240))
+        self.meter_note.configure(foreground=C["MUTED"])
+        self.meter_note.grid(row=7, column=0, columnspan=2, sticky="ew")
         self.audio_note = native.Text(audio, "", wrap=px(240))
         self.audio_note.configure(foreground=C["MUTED"])
-        self.audio_note.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+        self.audio_note.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(2, 0))
 
         # ---- webcam and mouse
         extras = native.group(body, "Webcam and mouse", row=2, column=0, sticky="nsew", pady=(native.PAD, 0),
@@ -835,7 +1228,7 @@ class ScreenRecorderWindow(tk.Toplevel):
         self.status_label.grid(row=0, column=0, sticky="ew")
         self.pause_button = ttk.Button(bottom, text="Pause", command=self.toggle_pause, state="disabled")
         self.pause_button.grid(row=0, column=1, padx=(native.GAP, 0))
-        self.record_button = ttk.Button(bottom, text="● Record", command=self.toggle_recording, default="active")
+        self.record_button = ttk.Button(bottom, text="● Record", command=self.record_clicked, default="active")
         self.record_button.grid(row=0, column=2, padx=(native.GAP, 0), ipadx=px(10))
         self._update_region_label()
         self._sync_audio()
@@ -877,6 +1270,78 @@ class ScreenRecorderWindow(tk.Toplevel):
 
     def _sync_audio(self) -> None:
         self.mic_menu.configure(state="readonly" if self.mic_var.get() and self.microphones else "disabled")
+        self._restart_monitors()
+
+    def _region_mode_picked(self) -> None:
+        self._sync_mode()
+        if self.region is None:
+            self.select_region()
+
+    def _ratio_changed(self) -> None:
+        ratio = RATIOS.get(self.ratio_var.get())
+        if ratio and self.region and self.mode_var.get() == "region":
+            bounds = self._screen_bounds()
+            bx, by, bw, bh = bounds
+            x, y, w, h = self.region
+            fitted = cg.fit_ratio((x - bx, y - by, w, h), ratio, bw, bh)
+            self.region = engine.normalize_region((fitted[0] + bx, fitted[1] + by, fitted[2], fitted[3]), bounds)
+            self._update_region_label()
+        self._save()
+
+    # ------------------------------------------------------------------ sound meters
+    def _restart_monitors(self) -> None:
+        """Live meters while the window is open, so the user sees that sound is picked up."""
+        self._stop_monitors()
+        if self._closing or self.state != "idle" or self.audio_error or not IS_WINDOWS:
+            self._ensure_meter_loop()
+            return
+        if self.system_var.get():
+            monitor = engine.LevelMonitor(loopback=True)
+            monitor.start()
+            self.monitors_live["system"] = monitor
+        if self.mic_var.get() and self.microphones:
+            monitor = engine.LevelMonitor(loopback=False, device=self.mic_device_var.get() or None)
+            monitor.start()
+            self.monitors_live["mic"] = monitor
+        self._ensure_meter_loop()
+
+    def _stop_monitors(self) -> None:
+        for monitor in self.monitors_live.values():
+            monitor.stop()
+        self.monitors_live = {}
+
+    def _ensure_meter_loop(self) -> None:
+        if self._meter_id is None and not self._closing:
+            self._meter_id = self.after(60, self._meter_tick)
+
+    def _current_levels(self) -> dict[str, float]:
+        volumes = {"system": self.system_volume_var.get() / 100.0, "mic": self.mic_volume_var.get() / 100.0}
+        if self.session is not None and self.state in {"recording", "paused", "switching"}:
+            raw = self.session.audio_levels() if self.state == "recording" else {}
+        else:
+            raw = {key: monitor.level for key, monitor in self.monitors_live.items()}
+        return {key: min(1.0, value * volumes.get(key, 1.0)) for key, value in raw.items()}
+
+    def _meter_tick(self) -> None:
+        self._meter_id = None
+        if self._closing:
+            return
+        try:
+            levels = self._current_levels()
+            if self.bar is not None:
+                self.bar.update_levels(levels)
+            self.system_meter.set(levels.get("system", 0.0))
+            self.mic_meter.set(levels.get("mic", 0.0))
+            errors = [f"{'Microphone' if key == 'mic' else 'System sound'}: {monitor.error}"
+                      for key, monitor in self.monitors_live.items() if monitor.error]
+            if self.mic_var.get() and "mic" in self.monitors_live and not errors:
+                note = "Speak: the green bar should move." if levels.get("mic", 0.0) < 0.003 else "Microphone is working."
+            else:
+                note = ""
+            self.meter_note.configure(text="\n".join(errors) or note)
+        except tk.TclError:
+            return
+        self._meter_id = self.after(70, self._meter_tick)
 
     def _sync_webcam(self) -> None:
         state = "readonly" if self.webcam_var.get() and self.webcams else "disabled"
@@ -894,6 +1359,7 @@ class ScreenRecorderWindow(tk.Toplevel):
         engine.ddagrab_available()  # cached now, so pressing Record never waits on this check
 
     def _apply_devices(self, audio_error: str, microphones: list[str], webcams: list[str]) -> None:
+        self.audio_error = audio_error
         self.microphones = microphones
         self.webcams = webcams
         self.mic_menu.configure(values=microphones)
@@ -920,6 +1386,7 @@ class ScreenRecorderWindow(tk.Toplevel):
         self._sync_webcam()
         if not IS_WINDOWS:
             self.clicks_check.configure(state="disabled")
+        self._restart_monitors()
 
     def _apply_encoders(self, encoders: list[str]) -> None:
         self.usable_encoders = encoders
@@ -1012,26 +1479,58 @@ class ScreenRecorderWindow(tk.Toplevel):
             return engine.normalize_region(self.region, bounds)
         return None
 
-    def select_region(self, then_record: bool = False) -> None:
-        if self.state != "idle":
+    def select_region(self) -> None:
+        """Show the area picker. Its ● REC button starts recording straight away."""
+        if self.state != "idle" or getattr(self, "selector", None) is not None:
             return
+        if self.mode_var.get() == "fullscreen":
+            self.mode_var.set("region")
+            self._sync_mode()
         fixed = self._fixed_size() if self.mode_var.get() == "fixed" else None
+        self.state = "selecting"
         self.withdraw()
-        self.after(150, lambda: RegionSelector(
-            self, self._screen_bounds(), self.monitors, self._target_region(allow_none=True),
-            lambda region: self._region_chosen(region, then_record), fixed_size=fixed))
 
-    def _region_chosen(self, region: tuple[int, int, int, int] | None, then_record: bool) -> None:
-        self.deiconify()
+        def open_selector() -> None:
+            try:
+                self.selector = RegionSelector(
+                    self, self._screen_bounds(), self.monitors, self._target_region(allow_none=True),
+                    self._region_chosen, fixed_size=fixed, ratio=self.ratio_var.get(),
+                    on_ratio_change=self.ratio_var.set)
+            except Exception:
+                LOGGER.exception("Area picker could not open")
+                self.selector = None
+                self.state = "idle"
+                self.deiconify()
+
+        self.after(150, open_selector)
+
+    def _region_chosen(self, region: tuple[int, int, int, int] | None, action: str) -> None:
+        self.selector = None
+        self.state = "idle"
         if region:
             self.region = region
             self._update_region_label()
             self._save()
-            if then_record:
-                self.toggle_recording()
+        if region and action == "record":
+            # Straight into the recording: the window stays hidden.
+            self.start_recording()
+            return
+        self.deiconify()
+        self.lift()
 
     # ------------------------------------------------------------------ recording
+    def record_clicked(self) -> None:
+        """The Record button: full screen starts at once; an area is shown first so it can
+        be checked or changed, with ● REC on its corner."""
+        if self.state == "idle" and self.mode_var.get() in {"region", "fixed"}:
+            self.select_region()
+            return
+        self.toggle_recording()
+
     def toggle_recording(self) -> None:
+        if self.state == "selecting" and self.selector is not None:
+            self.selector._finish("record")
+            return
         if self.state == "idle":
             self.start_recording()
         elif self.state in {"recording", "paused"}:
@@ -1044,9 +1543,10 @@ class ScreenRecorderWindow(tk.Toplevel):
             return
         region = self._target_region()
         if region is None:
-            self.select_region(then_record=True)
+            self.select_region()
             return
         self._save()
+        self._stop_monitors()
         self.region_to_record = region
         previous = foreground_window()
         self.previous_foreground = previous if previous != _wrapper_hwnd(self) else 0
@@ -1064,6 +1564,7 @@ class ScreenRecorderWindow(tk.Toplevel):
             self.state = "idle"
             self.deiconify()
             self.status_label.configure(text="Recording cancelled")
+            self._restart_monitors()
             return
         region = self.region_to_record
         monitor = engine.monitor_for_region(self.monitors, region)
@@ -1120,7 +1621,11 @@ class ScreenRecorderWindow(tk.Toplevel):
         if region != engine.normalize_region(bounds, bounds) and not self._is_full_monitor(region):
             self.border = RegionBorder(self, region)
         monitor = engine.monitor_for_region(self.monitors, region)
-        self.bar = ControlBar(self, region, monitor.rect if monitor else bounds)
+        self.bar = ControlBar(self, region, monitor.rect if monitor else bounds,
+                              show_mic=any(not rec.loopback for rec, _v in session.parts[-1].audio) if session.parts
+                              else False,
+                              show_system=any(rec.loopback for rec, _v in session.parts[-1].audio) if session.parts
+                              else False)
         if self.clicks_var.get():
             self.highlighter = ClickHighlighter(self)
             self.highlighter.start()
@@ -1132,6 +1637,7 @@ class ScreenRecorderWindow(tk.Toplevel):
         for warning in session.warnings:
             self.status_label.configure(text=warning)
         self._tick()
+        self._ensure_meter_loop()
 
     def _is_full_monitor(self, region: tuple[int, int, int, int]) -> bool:
         return any(region == engine.normalize_region(m.rect) for m in self.monitors)
@@ -1247,6 +1753,7 @@ class ScreenRecorderWindow(tk.Toplevel):
         self.pause_button.configure(state="disabled", text="Pause")
         self.deiconify()
         self.lift()
+        self._restart_monitors()
 
     def _recording_saved(self, session: engine.RecordingSession, output: Path) -> None:
         LOGGER.info("Recording saved output=%s duration=%.1f", output, session.elapsed)
@@ -1357,6 +1864,7 @@ class ScreenRecorderWindow(tk.Toplevel):
         if event.widget is not self:
             return
         self._closing = True
+        self._stop_monitors()
         for hotkey in self.hotkeys:
             try:
                 hotkey.stop()
@@ -1375,6 +1883,7 @@ class ScreenRecorderWindow(tk.Toplevel):
 
     def _destroy(self) -> None:
         self._closing = True
+        self._stop_monitors()
         self._save()
         for hotkey in self.hotkeys:
             try:

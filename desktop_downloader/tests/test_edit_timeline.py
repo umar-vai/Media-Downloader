@@ -8,7 +8,8 @@ DESKTOP_DIR = Path(__file__).resolve().parents[1]
 if str(DESKTOP_DIR) not in sys.path:
     sys.path.insert(0, str(DESKTOP_DIR))
 
-from edit_timeline import GAP, KEEP, REMOVED, EditTimeline, snap
+from edit_timeline import (GAP, KEEP, REMOVED, EditTimeline, clip_at, seq_from_source, sequence_duration,
+                           sequence_layout, snap, source_from_seq)
 
 
 class EditTimelineTests(unittest.TestCase):
@@ -108,6 +109,57 @@ class EditTimelineTests(unittest.TestCase):
     def test_snap(self) -> None:
         self.assertEqual(snap(5.05, [5.0, 6.0], 0.1), 5.0)
         self.assertEqual(snap(5.5, [5.0, 6.0], 0.1), 5.5)
+
+
+class MagneticTimelineTests(unittest.TestCase):
+    """A ripple delete takes the part off the timeline and the rest closes up."""
+
+    def make(self) -> EditTimeline:
+        edit = EditTimeline(10.0)
+        for cut in (2.0, 5.0, 7.0):
+            edit.split_at(cut)
+        return edit
+
+    def test_ripple_deleted_part_disappears_and_the_rest_moves_up(self) -> None:
+        edit = self.make()
+        edit.delete([1], ripple=True)  # 2..5 removed
+        layout = sequence_layout(edit, 10.0)
+        self.assertEqual([clip.index for clip in layout], [0, 2, 3])
+        self.assertEqual([clip.seq_start for clip in layout], [0.0, 2.0, 4.0])
+        self.assertAlmostEqual(sequence_duration(layout), 7.0)
+
+    def test_gap_keeps_its_space(self) -> None:
+        edit = self.make()
+        edit.delete([1], ripple=False)
+        layout = sequence_layout(edit, 10.0)
+        self.assertEqual([clip.state for clip in layout], [KEEP, GAP, KEEP, KEEP])
+        self.assertAlmostEqual(sequence_duration(layout), 10.0)
+
+    def test_mapping_both_ways(self) -> None:
+        edit = self.make()
+        edit.delete([1], ripple=True)
+        layout = sequence_layout(edit, 10.0)
+        self.assertAlmostEqual(seq_from_source(layout, 1.0), 1.0)
+        self.assertAlmostEqual(seq_from_source(layout, 3.0), 2.0)  # inside the removed part
+        self.assertAlmostEqual(seq_from_source(layout, 6.0), 3.0)
+        self.assertAlmostEqual(seq_from_source(layout, 10.0), 7.0)
+        self.assertAlmostEqual(source_from_seq(layout, 2.5), 5.5)
+        self.assertAlmostEqual(source_from_seq(layout, 7.0), 10.0)
+        self.assertEqual(clip_at(layout, 2.5).index, 2)
+        self.assertEqual(clip_at(layout, 7.0).index, 3)
+
+    def test_everything_removed(self) -> None:
+        edit = self.make()
+        edit.delete(range(4), ripple=True)
+        layout = sequence_layout(edit, 10.0)
+        self.assertEqual(layout, [])
+        self.assertEqual(seq_from_source(layout, 4.0), 0.0)
+        self.assertEqual(source_from_seq(layout, 1.0), 0.0)
+
+    def test_no_edit_is_one_clip(self) -> None:
+        layout = sequence_layout(None, 12.0)
+        self.assertEqual(len(layout), 1)
+        self.assertAlmostEqual(sequence_duration(layout), 12.0)
 
 
 if __name__ == "__main__":

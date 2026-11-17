@@ -96,6 +96,7 @@ jobs:
           python -m py_compile media_core/options.py
           python -m py_compile desktop_downloader/partial_files.py
           python -m py_compile desktop_downloader/edit_timeline.py
+          python -m py_compile desktop_downloader/editor_theme.py
           python -m py_compile desktop_downloader/screen_recorder.py
           python -m py_compile desktop_downloader/screen_recorder_engine.py
           python -m py_compile desktop_downloader/version.py

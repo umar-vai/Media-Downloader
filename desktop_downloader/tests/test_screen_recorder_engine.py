@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,7 +12,15 @@ if str(DESKTOP_DIR) not in sys.path:
     sys.path.insert(0, str(DESKTOP_DIR))
 
 import screen_recorder_engine as engine
+from media_editor_engine import ffmpeg_exe
 from screen_recorder_engine import AudioTrack, Monitor, RecordSettings
+
+
+def _ffmpeg_available() -> bool:
+    try:
+        return bool(ffmpeg_exe()) and Path(ffmpeg_exe()).exists()
+    except Exception:
+        return False
 
 
 def settings(**overrides) -> RecordSettings:
@@ -109,9 +120,62 @@ class MuxTests(unittest.TestCase):
         self.assertIn("[1:a]adelay=250:all=1", graph)
         self.assertIn("[2:a]atrim=start=0.100", graph)
         self.assertIn("volume=1.500", graph)
-        self.assertIn("amix=inputs=2:duration=longest:normalize=0,apad[aout]", graph)
-        self.assertIn("-shortest", command)
+        # No length known: no padding at all (apad without an end never finishes).
+        self.assertIn("amix=inputs=2:duration=longest:normalize=0[aout]", graph)
+        self.assertNotIn("apad", graph)
+        self.assertNotIn("-shortest", command)
         self.assertEqual(command[command.index("-c:v") + 1], "copy")
+
+    def test_padding_always_has_an_end(self) -> None:
+        command = engine.build_part_mux_command(
+            Path("v.mkv"), [AudioTrack(Path("s.wav"), 0.25)], Path("o.mkv"), duration=12.5)
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("apad=whole_dur=12.500[aout]", graph)
+        self.assertEqual(command[command.index("-t") + 1], "12.500")
+        self.assertNotIn("-shortest", command)
+
+    def test_part_length_uses_the_earlier_end(self) -> None:
+        self.assertEqual(engine.part_length(10.0, 9.4), 9.4)
+        self.assertEqual(engine.part_length(None, 9.4), 9.4)
+        self.assertEqual(engine.part_length(10.0, None), 10.0)
+        self.assertIsNone(engine.part_length(None, None))
+        self.assertIsNone(engine.part_length(0.0, -1.0))
+
+    def test_duration_parsing(self) -> None:
+        self.assertAlmostEqual(engine.parse_duration("  Duration: 00:01:02.50, start: 0.0"), 62.5)
+        self.assertIsNone(engine.parse_duration("  Duration: N/A, start: 0.0"))
+        log = "frame=1 time=00:00:01.00 bitrate\nframe=9 time=00:00:04.20 bitrate"
+        self.assertAlmostEqual(engine.parse_last_time(log), 4.2)
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") or _ffmpeg_available(), "ffmpeg is not available")
+class RealMuxTests(unittest.TestCase):
+    """Runs the real ffmpeg: the part with sound must finish (it used to run forever)."""
+
+    def _make(self, folder: Path) -> tuple[Path, Path]:
+        video, audio = folder / "v.mkv", folder / "a.wav"
+        ff = ffmpeg_exe()
+        subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                        "testsrc=s=160x120:r=15:d=3", "-c:v", "libx264", "-f", "matroska", str(video)], check=True,
+                       timeout=60)
+        subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=d=1.5",
+                        "-ar", "48000", "-ac", "2", str(audio)], check=True, timeout=60)
+        return video, audio
+
+    def test_mux_finishes_and_keeps_the_video_length(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            video, audio = self._make(folder)
+            length = engine.probe_duration(video)
+            self.assertIsNotNone(length)
+            self.assertAlmostEqual(length, 3.0, delta=0.3)
+            for duration in (length, None):
+                output = folder / f"o{duration}.mkv"
+                command = engine.build_part_mux_command(
+                    video, [AudioTrack(audio, 0.4), AudioTrack(audio, -0.2, 0.5)], output, duration)
+                result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertAlmostEqual(engine.probe_duration(output), 3.0, delta=0.35)
 
     def test_concat_list_escapes(self) -> None:
         text = engine.concat_list_text([Path("C:/Rec/it's.mkv")])
