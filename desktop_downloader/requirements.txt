@@ -4,3 +4,6 @@ Pillow>=10.4,<13.0
 pyinstaller>=6.16,<7.0
 websocket-client>=1.8,<2.0
 pystray>=0.19,<1.0
+# Screen recorder: system sound (WASAPI loopback) and microphone capture
+soundcard>=0.4.3,<0.5
+numpy>=1.26,<3.0

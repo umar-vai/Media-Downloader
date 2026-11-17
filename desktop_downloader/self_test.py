@@ -161,6 +161,18 @@ def run_self_test(progress_path: Path | None = None) -> dict[str, Any]:
     except Exception as exc:
         record(CheckResult("desktop_startup_imports", False, f"{type(exc).__name__}: {exc}"))
 
+    try:
+        # The screen recorder is imported on demand, so check that it (and the sound
+        # capture packages it needs) made it into the build.
+        import screen_recorder  # noqa: F401
+        import screen_recorder_engine
+
+        audio_error = screen_recorder_engine.audio_backend_error()
+        record(CheckResult("screen_recorder", not audio_error,
+                           audio_error or "Screen recorder and sound capture modules import successfully."))
+    except Exception as exc:
+        record(CheckResult("screen_recorder", False, f"{type(exc).__name__}: {exc}"))
+
     config_dir = Path(os.getenv("APPDATA") or Path.home()) / "MediaDownloader"
     local_dir = Path(os.getenv("LOCALAPPDATA") or config_dir) / "MediaDownloader"
     download_dir = Path.home() / "Downloads" / "Media Downloader"

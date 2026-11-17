@@ -101,6 +101,14 @@ jobs:
           python desktop_downloader/tests/smoke_editor_export.py
           python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from yt_dlp import YoutubeDL; from yt_dlp.networking.impersonate import ImpersonateTarget; y=YoutubeDL({'quiet': True}); assert y._impersonate_target_available(ImpersonateTarget('chrome')), 'Chrome impersonation target unavailable'"
 
+      - name: Screen recorder smoke test (real screen capture)
+        # Captures the runner's desktop with gdigrab. Kept non-blocking because hosted
+        # runners do not always expose an interactive desktop.
+        continue-on-error: true
+        shell: pwsh
+        timeout-minutes: 3
+        run: python desktop_downloader/tests/smoke_screen_recorder.py
+
       - name: Verify release tag matches APP_VERSION
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -161,6 +169,7 @@ jobs:
             --collect-all websocket `
             --collect-all pystray `
             --hidden-import pystray._win32 `
+            --collect-all soundcard `
             --collect-all PIL `
             --add-binary "dist/MediaDownloaderUpdater.exe;." `
             --add-binary "dist/mpv.exe;." `
@@ -195,6 +204,7 @@ jobs:
             --collect-all imageio_ffmpeg `
             --collect-all pystray `
             --hidden-import pystray._win32 `
+            --collect-all soundcard `
             --collect-all PIL `
             --add-binary "$updater;." `
             --add-binary "$mpv;." `

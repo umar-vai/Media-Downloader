@@ -172,6 +172,12 @@ def _tool_painter(name: str, ink: str) -> Painter:
                 _rrect(d, u, fx - 0.06, 0.24, fx + 0.06, 0.32, 0.01, WHITE)
                 _rrect(d, u, fx - 0.06, 0.68, fx + 0.06, 0.76, 0.01, WHITE)
             _rrect(d, u, 0.12, 0.38, 0.88, 0.62, 0.02, "#D7E6F5")
+        elif name == "record":
+            _rrect(d, u, 0.04, 0.10, 0.96, 0.74, 0.06, ink)
+            _rrect(d, u, 0.11, 0.17, 0.89, 0.67, 0.02, WHITE)
+            _rrect(d, u, 0.40, 0.74, 0.60, 0.86, 0.0, ink)
+            _rrect(d, u, 0.26, 0.86, 0.74, 0.94, 0.03, ink)
+            _circle(d, u, 0.5, 0.42, 0.17, TOOL_RED)
         elif name == "folder":
             _folder(d, u, BLUE)
         elif name == "update":

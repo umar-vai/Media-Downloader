@@ -429,6 +429,7 @@ class DownloaderApp(UIMixin, tk.Tk):
         self.thumbnail_image: Any = None
         self.last_file: Path | None = None
         self.editor_window: MediaEditorWindow | None = None
+        self.recorder_window: Any = None
         self.diagnostics_window: DiagnosticsWindow | None = None
         self.settings_panel: OptionsDialog | None = None
         self.settings_window: Any = None
@@ -536,6 +537,7 @@ class DownloaderApp(UIMixin, tk.Tk):
             on_show=self.show_from_tray,
             on_pause_all=self.pause_all_downloads,
             on_resume_all=self.resume_all_downloads,
+            on_record=self.open_screen_recorder,
             on_quit=self.quit_from_tray,
             run_on_ui=lambda fn: self._run_on_ui(fn),
         )
@@ -1588,6 +1590,41 @@ class DownloaderApp(UIMixin, tk.Tk):
             self.editor_window = None
             messagebox.showerror(APP_NAME, f"Could not open Media Editor.\n\n{exc}")
 
+    def open_screen_recorder(self) -> None:
+        """Bandicam-style screen recorder (full screen or an area, sound, webcam, hotkeys)."""
+        window = self.recorder_window
+        try:
+            if window is not None and window.winfo_exists():
+                window.show()
+                return
+        except Exception:
+            self.recorder_window = None
+        try:
+            from screen_recorder import ScreenRecorderWindow
+
+            stored = self.settings.get("recorder")
+            self.recorder_window = ScreenRecorderWindow(
+                self,
+                output_dir=self.download_dir / "Recordings",
+                settings=stored if isinstance(stored, dict) else None,
+                save_settings=self._save_recorder_settings,
+                open_in_editor=lambda path: self.open_editor(path),
+            )
+            self.recorder_window.bind("<Destroy>", self._recorder_destroyed, add="+")
+            LOGGER.info("Screen recorder opened")
+        except Exception as exc:
+            LOGGER.exception("Could not open the screen recorder")
+            self.recorder_window = None
+            messagebox.showerror(APP_NAME, f"Could not open the screen recorder.\n\n{exc}")
+
+    def _save_recorder_settings(self, values: dict[str, Any]) -> None:
+        self.settings["recorder"] = values
+        save_settings(self.settings)
+
+    def _recorder_destroyed(self, event: Any) -> None:
+        if event.widget is self.recorder_window:
+            self.recorder_window = None
+
     def _editor_destroyed(self, event: Any) -> None:
         window = self.editor_window
         if window is not None and event.widget is window:
@@ -2251,6 +2288,7 @@ class DownloaderApp(UIMixin, tk.Tk):
             ("Cancel all downloads", self.cancel_all_downloads),
             ("Open download folder", self.open_download_folder),
             ("Open media editor", self.open_editor),
+            ("Open screen recorder", self.open_screen_recorder),
             ("Delete completed downloads…", self.delete_completed),
             ("Open settings", self.open_settings),
             ("Export browser extension", self.export_browser_extension),
