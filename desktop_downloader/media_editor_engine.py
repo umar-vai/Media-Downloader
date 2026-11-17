@@ -483,7 +483,21 @@ def build_export_command(
     contrast: float = 0,
     saturation: float = 0,
     resolution: str = "Original",
+    pieces: list[tuple[float, float, str]] | None = None,
 ) -> tuple[list[str], float]:
+    """ffmpeg command for the export. ``pieces`` (source start, end, "keep" or "gap") comes
+    from the blade cut list; with more than one piece, or with a gap, the parts are cut out
+    and joined with the concat filter before the other edits are applied."""
+    if pieces is not None and _needs_concat(pieces, start, end):
+        return _build_concat_export_command(
+            path, output, info, pieces,
+            crop_preset=crop_preset, custom_crop=custom_crop, rotate=rotate, speed=speed, mute=mute,
+            volume_percent=volume_percent, fade_in=fade_in, fade_out=fade_out, quality=quality,
+            flip_h=flip_h, flip_v=flip_v, brightness=brightness, contrast=contrast,
+            saturation=saturation, resolution=resolution,
+        )
+    if pieces:
+        start, end = pieces[0][0], pieces[0][1]
     clip_duration = max(0.001, end - start)
     output_duration = clip_duration / max(0.01, speed)
 
@@ -519,12 +533,7 @@ def build_export_command(
         )
         command += ["-map", "0:v:0", "-vf", ",".join(video_filters)]
 
-        crf = {
-            "High": "18",
-            "Balanced": "23",
-            "Small": "28",
-        }.get(quality, "18")
-        command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
+        command += _video_codec_args(quality)
 
         if info.has_audio and not mute:
             audio_filters = build_audio_filters(
@@ -553,13 +562,142 @@ def build_export_command(
         )
         if audio_filters:
             command += ["-af", ",".join(audio_filters)]
-        suffix = output.suffix.lower()
-        if suffix == ".mp3":
-            command += ["-c:a", "libmp3lame", "-b:a", "192k"]
-        elif suffix == ".m4a":
-            command += ["-c:a", "aac", "-b:a", "192k"]
-        elif suffix == ".wav":
-            command += ["-c:a", "pcm_s16le"]
+        command += _audio_only_codec_args(output)
+
+    command += ["-progress", "pipe:1", "-nostats", str(output)]
+    return command, output_duration
+
+
+def _video_codec_args(quality: str) -> list[str]:
+    crf = {
+        "High": "18",
+        "Balanced": "23",
+        "Small": "28",
+    }.get(quality, "18")
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-pix_fmt", "yuv420p"]
+
+
+def _audio_only_codec_args(output: Path) -> list[str]:
+    suffix = output.suffix.lower()
+    if suffix == ".mp3":
+        return ["-c:a", "libmp3lame", "-b:a", "192k"]
+    if suffix == ".m4a":
+        return ["-c:a", "aac", "-b:a", "192k"]
+    if suffix == ".wav":
+        return ["-c:a", "pcm_s16le"]
+    return []
+
+
+def _needs_concat(pieces: list[tuple[float, float, str]], start: float, end: float) -> bool:
+    if not pieces:
+        raise ValueError("Nothing is left to export: every part of the selection was deleted.")
+    if len(pieces) > 1:
+        return True
+    return pieces[0][2] != "keep"
+
+
+def _build_concat_export_command(
+    path: Path,
+    output: Path,
+    info: MediaInfo,
+    pieces: list[tuple[float, float, str]],
+    *,
+    crop_preset: str,
+    custom_crop: tuple[int, int, int, int] | None,
+    rotate: str,
+    speed: float,
+    mute: bool,
+    volume_percent: float,
+    fade_in: float,
+    fade_out: float,
+    quality: str,
+    flip_h: bool,
+    flip_v: bool,
+    brightness: float,
+    contrast: float,
+    saturation: float,
+    resolution: str,
+) -> tuple[list[str], float]:
+    """Cut list export: trim every piece out of one decoded input and join them.
+
+    The input is opened once with a fast seek to the first piece, so a short edit near the
+    end of a long file does not decode the whole file. Gap pieces keep the source frames'
+    size and timing but are painted black and silenced, so concat always sees matching
+    streams.
+    """
+    first = min(piece[0] for piece in pieces)
+    last = max(piece[1] for piece in pieces)
+    joined_duration = sum(b - a for a, b, _state in pieces)
+    output_duration = joined_duration / max(0.01, speed)
+
+    command = [
+        ffmpeg_exe(),
+        "-y",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{first:.3f}",
+        "-t",
+        f"{max(0.001, last - first):.3f}",
+        "-i",
+        str(path),
+    ]
+
+    use_video = info.has_video
+    use_audio = info.has_audio and not (mute and use_video)
+    graph: list[str] = []
+    labels: list[str] = []
+    for index, (a, b, state) in enumerate(pieces):
+        rel_a = max(0.0, a - first)
+        rel_b = max(rel_a + 0.001, b - first)
+        if use_video:
+            chain = f"[0:v:0]trim=start={rel_a:.3f}:end={rel_b:.3f},setpts=PTS-STARTPTS"
+            if state == "gap":
+                chain += ",drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill"
+            graph.append(f"{chain}[v{index}]")
+            labels.append(f"[v{index}]")
+        if use_audio:
+            chain = f"[0:a:0]atrim=start={rel_a:.3f}:end={rel_b:.3f},asetpts=PTS-STARTPTS"
+            if state == "gap":
+                chain += ",volume=0"
+            graph.append(f"{chain}[a{index}]")
+            labels.append(f"[a{index}]")
+
+    outputs = ""
+    if use_video:
+        outputs += "[vj]"
+    if use_audio:
+        outputs += "[aj]"
+    graph.append(
+        f"{''.join(labels)}concat=n={len(pieces)}:v={1 if use_video else 0}:a={1 if use_audio else 0}{outputs}"
+    )
+
+    if use_video:
+        video_filters = build_video_filters(
+            info, crop_preset, custom_crop, rotate, speed, include_speed=True,
+            flip_h=flip_h, flip_v=flip_v, brightness=brightness, contrast=contrast,
+            saturation=saturation, resolution=resolution,
+        )
+        graph.append(f"[vj]{','.join(video_filters)}[vout]")
+    if use_audio:
+        audio_filters = build_audio_filters(
+            speed, 0.0 if (mute and not use_video) else volume_percent, fade_in, fade_out, output_duration,
+        )
+        graph.append(f"[aj]{','.join(audio_filters) or 'anull'}[aout]")
+
+    command += ["-filter_complex", ";".join(graph)]
+    if use_video:
+        command += ["-map", "[vout]", *_video_codec_args(quality)]
+        if use_audio:
+            command += ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]
+        else:
+            command += ["-an"]
+        if output.suffix.lower() in {".mp4", ".mov"}:
+            command += ["-movflags", "+faststart"]
+    else:
+        command += ["-map", "[aout]", *_audio_only_codec_args(output)]
 
     command += ["-progress", "pipe:1", "-nostats", str(output)]
     return command, output_duration
@@ -580,6 +718,7 @@ def build_preview_clip_command(
     volume_percent: float,
     fade_in: float,
     fade_out: float,
+    pieces: list[tuple[float, float, str]] | None = None,
     **video: Any,
 ) -> list[str]:
     end = min(info.duration, start + max(0.5, duration))
@@ -598,6 +737,7 @@ def build_preview_clip_command(
         fade_in=fade_in,
         fade_out=fade_out,
         quality="Balanced",
+        pieces=pieces,
         **video,
     )
     # Preview generation is not parsed for progress, so remove progress output.

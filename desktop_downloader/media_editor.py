@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,6 +18,7 @@ from tkinter import filedialog, messagebox, ttk
 import crop_geometry as cg
 import native
 from app_logging import get_logger
+from edit_timeline import GAP, KEEP, REMOVED, EditTimeline
 from editor_history import EditorHistory, EditorSnapshot
 from media_editor_engine import (
     CROP_PRESETS,
@@ -38,7 +40,7 @@ from media_editor_engine import (
     probe_media,
     safe_export_name,
 )
-from media_editor_widgets import TimelineCanvas
+from media_editor_widgets import TOOL_BLADE, TOOL_SELECT, TimelineCanvas
 from media_player import EmbeddedMediaPlayer, PlayerUnavailableError
 from theme import C
 from ui_kit import px
@@ -77,6 +79,30 @@ CROP_CURSORS = {
 }
 
 LOGGER = get_logger("editor")
+
+# Widgets where the keyboard types text. Space and the letter shortcuts are left alone in
+# these; everywhere else in the editor Space plays and pauses.
+TEXT_INPUT_CLASSES = {"Entry", "TEntry", "Text", "Spinbox", "TSpinbox"}
+
+
+def is_text_input(widget: Any) -> bool:
+    if widget is None:
+        return False
+    try:
+        widget_class = widget.winfo_class()
+    except Exception:
+        return False
+    if widget_class in TEXT_INPUT_CLASSES:
+        try:
+            return str(widget.cget("state")) not in {"disabled", "readonly"}
+        except Exception:
+            return True
+    if widget_class == "TCombobox":
+        try:
+            return str(widget.cget("state")) == "normal"  # an editable combobox takes typing
+        except Exception:
+            return False
+    return False
 
 
 def _open_path(path: Path) -> None:
@@ -190,6 +216,12 @@ class MediaEditorWindow(tk.Toplevel):
         self.history = EditorHistory(limit=60)
         self._applying_history = False
 
+        # Blade cuts and deleted parts (see edit_timeline.py).
+        self.edit_timeline: EditTimeline | None = None
+        self._player_muted_for_gap = False
+        self._last_play_command = 0.0
+        self._last_input_release = 0.0
+
         self.temp_dir = Path(tempfile.gettempdir()) / "MediaDownloaderEditor"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -227,6 +259,10 @@ class MediaEditorWindow(tk.Toplevel):
         self.crop_view: tuple[float, float, float] | None = None  # offset x, offset y, scale
         self.color_after_id: str | None = None
 
+        self.tool_var = tk.StringVar(self, value=TOOL_SELECT)
+        self.ripple_var = tk.BooleanVar(self, value=True)
+        self.snap_var = tk.BooleanVar(self, value=True)
+
         self.mute_var = tk.BooleanVar(self, value=False)
         self.volume_var = tk.DoubleVar(self, value=100.0)
         self.fade_in_var = tk.StringVar(self, value="0")
@@ -252,25 +288,89 @@ class MediaEditorWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._close)
 
         self._build_ui()
-        self.bind("<space>", self._on_space)
-        self.bind("<KeyPress-i>", lambda event: self._on_mark_shortcut(event, "in"))
-        self.bind("<KeyPress-o>", lambda event: self._on_mark_shortcut(event, "out"))
-        self.bind("<Left>", lambda event: self._on_arrow_shortcut(event, -1, False))
-        self.bind("<Right>", lambda event: self._on_arrow_shortcut(event, 1, False))
-        self.bind("<Shift-Left>", lambda event: self._on_arrow_shortcut(event, -1, True))
-        self.bind("<Shift-Right>", lambda event: self._on_arrow_shortcut(event, 1, True))
-        self.bind("<Control-z>", lambda event: self._on_history_shortcut(event, "undo"))
-        self.bind("<Control-y>", lambda event: self._on_history_shortcut(event, "redo"))
-        self.bind("<Control-Shift-Z>", lambda event: self._on_history_shortcut(event, "redo"))
-        self.bind("<Up>", lambda event: self._on_vertical_arrow(event, -1, False))
-        self.bind("<Down>", lambda event: self._on_vertical_arrow(event, 1, False))
-        self.bind("<Shift-Up>", lambda event: self._on_vertical_arrow(event, -1, True))
-        self.bind("<Shift-Down>", lambda event: self._on_vertical_arrow(event, 1, True))
-        self.bind("<Return>", self._on_crop_return)
-        self.bind("<Escape>", self._on_crop_escape)
-        self.bind("<KeyPress-c>", self._on_crop_shortcut)
+        self._install_shortcuts()
         self.after(40, self._drain_ui_queue)
         self.after(80, self._start_load)
+
+    # ------------------------------------------------------------------ keyboard
+    def _install_shortcuts(self) -> None:
+        """Editor shortcuts that work wherever the focus is, except in text boxes.
+
+        The bindings live on a bind tag of their own, put *first* on every widget of the
+        window. That way they run before a focused button or check box handles Space itself
+        (which used to toggle playback twice, or toggle "Mute"), and the handler stops the
+        event with "break". In a text box the handlers return None, so typing still works.
+        """
+        tag = f"MediaEditorKeys{id(self)}"
+        self._shortcut_tag = tag
+        bindings: list[tuple[str, Callable[[Any], Any]]] = [
+            ("<KeyPress-space>", self._on_space),
+            ("<KeyPress-i>", lambda event: self._on_mark_shortcut(event, "in")),
+            ("<KeyPress-o>", lambda event: self._on_mark_shortcut(event, "out")),
+            ("<Left>", lambda event: self._on_arrow_shortcut(event, -1, False)),
+            ("<Right>", lambda event: self._on_arrow_shortcut(event, 1, False)),
+            ("<Shift-Left>", lambda event: self._on_arrow_shortcut(event, -1, True)),
+            ("<Shift-Right>", lambda event: self._on_arrow_shortcut(event, 1, True)),
+            ("<Control-z>", lambda event: self._on_history_shortcut(event, "undo")),
+            ("<Control-y>", lambda event: self._on_history_shortcut(event, "redo")),
+            ("<Control-Shift-Z>", lambda event: self._on_history_shortcut(event, "redo")),
+            ("<Up>", lambda event: self._on_vertical_arrow(event, -1, False)),
+            ("<Down>", lambda event: self._on_vertical_arrow(event, 1, False)),
+            ("<Shift-Up>", lambda event: self._on_vertical_arrow(event, -1, True)),
+            ("<Shift-Down>", lambda event: self._on_vertical_arrow(event, 1, True)),
+            ("<Return>", self._on_crop_return),
+            ("<Escape>", self._on_escape),
+            ("<KeyPress-c>", self._on_crop_shortcut),
+            # Blade editing (DaVinci Resolve / Premiere Pro keys)
+            ("<KeyPress-b>", lambda event: self._on_tool_shortcut(event, TOOL_BLADE)),
+            ("<KeyPress-v>", lambda event: self._on_tool_shortcut(event, TOOL_SELECT)),
+            ("<KeyPress-a>", lambda event: self._on_tool_shortcut(event, TOOL_SELECT)),
+            ("<Control-k>", self._on_split_shortcut),
+            ("<Control-b>", self._on_split_shortcut),
+            ("<KeyPress-s>", self._on_split_shortcut),
+            ("<Delete>", lambda event: self._on_delete_shortcut(event, invert=False)),
+            ("<BackSpace>", lambda event: self._on_delete_shortcut(event, invert=False)),
+            ("<Shift-Delete>", lambda event: self._on_delete_shortcut(event, invert=True)),
+            ("<Shift-BackSpace>", lambda event: self._on_delete_shortcut(event, invert=True)),
+            ("<Control-a>", self._on_select_all_shortcut),
+            ("<KeyPress-r>", self._on_ripple_shortcut),
+            ("<KeyPress-n>", self._on_snap_shortcut),
+        ]
+        for sequence, handler in bindings:
+            self.bind_class(tag, sequence, handler)
+        # A click anywhere that is not a text box takes the focus out of the text boxes, so
+        # Space plays again right away.
+        self.bind_class(tag, "<ButtonPress-1>", self._on_any_click, add="+")
+        self._tag_widget_tree(self)
+
+    def _tag_widget_tree(self, widget: tk.Misc) -> None:
+        tag = getattr(self, "_shortcut_tag", "")
+        if not tag:
+            return
+        try:
+            tags = widget.bindtags()
+            if tag not in tags:
+                widget.bindtags((tag, *tags))
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            if isinstance(child, tk.Menu):
+                continue
+            self._tag_widget_tree(child)
+
+    def _focus_editor(self) -> None:
+        try:
+            self.focus_force()
+        except Exception:
+            pass
+
+    def _on_any_click(self, event: Any) -> None:
+        widget = event.widget
+        if not is_text_input(widget) and is_text_input(self.focus_get()):
+            try:
+                self.focus_set()
+            except Exception:
+                pass
 
     def _post_ui(self, callback: Any, *args: Any) -> None:
         if not self._closing:
@@ -348,6 +448,22 @@ class MediaEditorWindow(tk.Toplevel):
         edit_menu.add_separator()
         edit_menu.add_command(label="Crop on video", accelerator="C", command=self.toggle_crop_mode)
         edit_menu.add_separator()
+        edit_menu.add_command(label="Selection tool", accelerator="V", command=lambda: self.set_tool(TOOL_SELECT))
+        edit_menu.add_command(label="Blade tool", accelerator="B", command=lambda: self.set_tool(TOOL_BLADE))
+        edit_menu.add_command(label="Cut at playhead", accelerator="Ctrl+K", command=self.split_at_playhead)
+        edit_menu.add_command(label="Delete selected parts", accelerator="Delete",
+                              command=lambda: self.delete_selected())
+        edit_menu.add_command(label="Delete with the other mode", accelerator="Shift+Delete",
+                              command=lambda: self.delete_selected(ripple=not self.ripple_var.get()))
+        edit_menu.add_command(label="Restore selected parts", command=self.restore_selected)
+        edit_menu.add_command(label="Select all parts", accelerator="Ctrl+A", command=self.timeline_select_all)
+        edit_menu.add_checkbutton(label="Ripple delete", accelerator="R", variable=self.ripple_var,
+                                  command=self._ripple_changed)
+        edit_menu.add_checkbutton(label="Snapping", accelerator="N", variable=self.snap_var,
+                                  command=self._snap_changed)
+        edit_menu.add_command(label="Close all gaps", command=self.close_all_gaps)
+        edit_menu.add_command(label="Clear all cuts", command=self.clear_cuts)
+        edit_menu.add_separator()
         edit_menu.add_command(label="Reset edits", command=self.reset_edits)
         edit_menu.add_command(label="Reset range", command=self.reset_range)
         bar.add_cascade(label="Edit", menu=edit_menu, underline=0)
@@ -408,6 +524,9 @@ class MediaEditorWindow(tk.Toplevel):
         # The embedded player draws into this frame, which sits over the canvas. Hiding it
         # uncovers the canvas, where the crop box is drawn (nothing can be drawn over mpv).
         self.video_host = tk.Frame(area, bg=PREVIEW_BG, bd=0, highlightthickness=0)
+        # Clicks on the video (mpv's window lets them through) give the keyboard back to the
+        # editor, so Space works right after clicking the picture.
+        self.video_host.bind("<Button-1>", lambda _event: self._focus_editor())
         self.preview_canvas.create_text(
             px(12),
             px(12),
@@ -429,7 +548,8 @@ class MediaEditorWindow(tk.Toplevel):
         self.current_time_label = self._label(transport, "00:00.000 / --:--")
         self.current_time_label.grid(row=0, column=3, padx=native.GAP)
         self._button(transport, "Set Out", self.set_out_here, width=6).grid(row=0, column=4)
-        self.preview_status_label = self._label(transport, "Space Play/Pause • I/O In/Out • ←/→ Frame", muted=True)
+        self.preview_status_label = self._label(transport, "Space Play/Pause • I/O In/Out • B Blade • ←/→ Frame",
+                                                muted=True)
         self.preview_status_label.grid(row=0, column=5, sticky="w", padx=(native.GAP, native.GAP))
         self._button(transport, "5s ▶", lambda: self.step_playhead(5.0), width=4).grid(row=0, column=6)
         self.crop_video_button = self._button(transport, "✂ Crop", self.toggle_crop_mode, state="disabled", width=6)
@@ -626,19 +746,43 @@ class MediaEditorWindow(tk.Toplevel):
 
         header = ttk.Frame(card)
         header.grid(row=0, column=0, sticky="ew", pady=(0, native.GAP))
-        header.grid_columnconfigure(1, weight=1)
-        self.selection_label = self._label(header, "Selection: --")
-        self.selection_label.grid(row=0, column=0, sticky="w")
-        self._button(header, "Fit", self.timeline_fit, width=5).grid(row=0, column=2, padx=(0, native.GAP))
-        self._button(header, "−", self.timeline_zoom_out, width=3).grid(row=0, column=3, padx=(0, native.GAP))
-        self._button(header, "+", self.timeline_zoom_in, width=3).grid(row=0, column=4)
+        header.grid_columnconfigure(9, weight=1)
+
+        # Edit tools, as in DaVinci Resolve / Premiere Pro: Selection (V) and Blade (B).
+        self.select_tool_button = ttk.Radiobutton(header, text="⬉ Select (V)", value=TOOL_SELECT,
+                                                  variable=self.tool_var, style="Toolbutton",
+                                                  command=lambda: self.set_tool(self.tool_var.get()))
+        self.select_tool_button.grid(row=0, column=0, padx=(0, 2))
+        self.blade_tool_button = ttk.Radiobutton(header, text="✂ Blade (B)", value=TOOL_BLADE,
+                                                 variable=self.tool_var, style="Toolbutton",
+                                                 command=lambda: self.set_tool(self.tool_var.get()))
+        self.blade_tool_button.grid(row=0, column=1, padx=(0, native.GAP))
+        self.split_button = self._button(header, "Cut at playhead", self.split_at_playhead)
+        self.split_button.grid(row=0, column=2, padx=(0, native.GAP))
+        self.delete_segment_button = self._button(header, "Delete", lambda: self.delete_selected(), state="disabled")
+        self.delete_segment_button.grid(row=0, column=3, padx=(0, native.GAP))
+        self.restore_segment_button = self._button(header, "Restore", self.restore_selected, state="disabled")
+        self.restore_segment_button.grid(row=0, column=4, padx=(0, native.GAP))
+        self.ripple_check = ttk.Checkbutton(header, text="Ripple delete", variable=self.ripple_var,
+                                            command=self._ripple_changed)
+        self.ripple_check.grid(row=0, column=5, padx=(0, native.GAP))
+        self.snap_check = ttk.Checkbutton(header, text="Snap", variable=self.snap_var, command=self._snap_changed)
+        self.snap_check.grid(row=0, column=6, padx=(0, native.GAP))
+        self._button(header, "Fit", self.timeline_fit, width=5).grid(row=0, column=10, padx=(0, native.GAP))
+        self._button(header, "−", self.timeline_zoom_out, width=3).grid(row=0, column=11, padx=(0, native.GAP))
+        self._button(header, "+", self.timeline_zoom_in, width=3).grid(row=0, column=12)
 
         self.timeline = TimelineCanvas(
             card,
             on_seek=self._on_timeline_seek,
             on_range_change=self._on_range_change,
+            on_split=self.split_at,
+            on_cut_moved=self._on_cut_moved,
+            on_selection_change=self._on_segment_selection,
+            on_context_menu=self._show_segment_menu,
         )
         self.timeline.grid(row=1, column=0, sticky="ew")
+        self.segment_menu = tk.Menu(self, tearoff=0)
 
         range_row = ttk.Frame(card)
         range_row.grid(row=2, column=0, sticky="ew", pady=(native.GAP, 0))
@@ -653,6 +797,12 @@ class MediaEditorWindow(tk.Toplevel):
         self.end_entry.bind("<Return>", lambda _event: self.apply_range_entries())
         self.end_entry.bind("<FocusOut>", lambda _event: self.apply_range_entries(silent=True))
         self._button(range_row, "Reset range", self.reset_range).grid(row=0, column=4, padx=(native.PAD, 0))
+        self.selection_label = self._label(range_row, "Selection: --")
+        self.selection_label.grid(row=0, column=5, sticky="w", padx=(native.PAD, 0))
+
+    def timeline_select_all(self) -> None:
+        if not self.render_busy:
+            self.timeline.select_all()
 
     def timeline_fit(self) -> None:
         if not self.render_busy:
@@ -665,6 +815,199 @@ class MediaEditorWindow(tk.Toplevel):
     def timeline_zoom_out(self) -> None:
         if not self.render_busy:
             self.timeline.zoom_out()
+
+    # ------------------------------------------------------------------ blade cuts
+    def set_tool(self, tool: str) -> None:
+        tool = TOOL_BLADE if tool == TOOL_BLADE else TOOL_SELECT
+        self.tool_var.set(tool)
+        self.timeline.set_tool(tool)
+        if tool == TOOL_BLADE:
+            self.status_label.configure(text="Blade tool: click the timeline to cut. Press V to select parts.",
+                                        text_color=MUTED)
+        else:
+            self.status_label.configure(text="Selection tool: click a part to select it, then press Delete.",
+                                        text_color=MUTED)
+
+    def _ripple_changed(self) -> None:
+        if self.ripple_var.get():
+            text = "Ripple delete on: deleted parts are taken out and the rest closes up."
+        else:
+            text = "Ripple delete off: deleted parts leave a black, silent gap of the same length."
+        self.status_label.configure(text=text, text_color=MUTED)
+
+    def _snap_changed(self) -> None:
+        self.timeline.snap_enabled = bool(self.snap_var.get())
+        self.status_label.configure(text=f"Snapping {'on' if self.snap_var.get() else 'off'}", text_color=MUTED)
+
+    def split_at(self, value: float) -> None:
+        edit = self.edit_timeline
+        if edit is None or self.render_busy:
+            return
+        if self.crop_mode:
+            self.exit_crop_mode(apply=True)
+        if not edit.split_at(value):
+            self.status_label.configure(text="Cannot cut there (too close to another cut or to the end).",
+                                        text_color=WARNING)
+            return
+        index = edit.index_at(value)
+        self.timeline.set_selection(set(), notify=False)
+        self._edit_changed(f"Cut at {format_time(value)} • {len(edit.cuts) + 1} parts")
+        LOGGER.info("Blade cut source=%s at=%.3f index=%s", self.source_path, value, index)
+
+    def split_at_playhead(self) -> None:
+        self.split_at(float(self.playhead_var.get()))
+
+    def _selected_segments(self) -> list[int]:
+        return sorted(self.timeline.selected)
+
+    def delete_selected(self, ripple: bool | None = None) -> None:
+        edit = self.edit_timeline
+        if edit is None or self.render_busy:
+            return
+        indices = self._selected_segments()
+        if not indices:
+            # Nothing selected: delete the part under the playhead, like Resolve does.
+            indices = [edit.index_at(float(self.playhead_var.get()))]
+        if ripple is None:
+            ripple = bool(self.ripple_var.get())
+        if edit.delete(indices, ripple=ripple):
+            what = "Ripple deleted" if ripple else "Deleted (gap left)"
+            self.timeline.set_selection(set(), notify=False)
+            self._edit_changed(f"{what} {len(indices)} part{'s' if len(indices) != 1 else ''}")
+            self._skip_removed_at_playhead()
+
+    def restore_selected(self) -> None:
+        edit = self.edit_timeline
+        if edit is None or self.render_busy:
+            return
+        indices = self._selected_segments() or [edit.index_at(float(self.playhead_var.get()))]
+        if edit.restore(indices):
+            self._edit_changed(f"Restored {len(indices)} part{'s' if len(indices) != 1 else ''}")
+
+    def join_with_next(self, index: int) -> None:
+        edit = self.edit_timeline
+        if edit is None or self.render_busy:
+            return
+        if edit.join(index):
+            self.timeline.set_selection(set(), notify=False)
+            self._edit_changed("Cut removed (parts joined)")
+
+    def close_all_gaps(self) -> None:
+        edit = self.edit_timeline
+        if edit is not None and edit.close_gaps():
+            self._edit_changed("All gaps closed (ripple)")
+
+    def clear_cuts(self) -> None:
+        edit = self.edit_timeline
+        if edit is None or self.render_busy or edit.is_trivial:
+            return
+        edit.reset()
+        self.timeline.set_selection(set(), notify=False)
+        self._edit_changed("All cuts cleared")
+
+    def _on_cut_moved(self) -> None:
+        self._edit_changed("Cut moved")
+
+    def _on_segment_selection(self) -> None:
+        self._update_segment_buttons()
+        edit = self.edit_timeline
+        indices = self._selected_segments()
+        if edit is None or not indices:
+            return
+        total = sum(edit.segment(index).duration for index in indices)
+        self.status_label.configure(
+            text=f"{len(indices)} part{'s' if len(indices) != 1 else ''} selected • {format_time(total)} • "
+                 "Delete = remove, Shift+Delete = the other delete mode",
+            text_color=MUTED,
+        )
+
+    def _update_segment_buttons(self) -> None:
+        if not hasattr(self, "delete_segment_button"):
+            return
+        edit = self.edit_timeline
+        busy = self.render_busy or edit is None
+        indices = self._selected_segments()
+        can_delete = not busy and any(edit.states[i] == KEEP for i in indices) if indices and edit else False
+        can_restore = not busy and any(edit.states[i] != KEEP for i in indices) if indices and edit else False
+        self.delete_segment_button.configure(state="normal" if can_delete else "disabled")
+        self.restore_segment_button.configure(state="normal" if can_restore else "disabled")
+        self.split_button.configure(state="disabled" if busy else "normal")
+
+    def _show_segment_menu(self, event: Any, index: int) -> None:
+        edit = self.edit_timeline
+        if edit is None or self.render_busy:
+            return
+        menu = self.segment_menu
+        menu.delete(0, "end")
+        selected = self._selected_segments() or [index]
+        has_keep = any(edit.states[i] == KEEP for i in selected)
+        has_deleted = any(edit.states[i] != KEEP for i in selected)
+        cut_time = self.timeline._x_to_time(event.x)
+        menu.add_command(label="Cut here", command=lambda: self.split_at(self.timeline.snapped_time(event.x)),
+                         state="normal" if edit.can_split(cut_time) else "disabled")
+        menu.add_command(label="Cut at playhead", accelerator="Ctrl+K", command=self.split_at_playhead)
+        menu.add_separator()
+        menu.add_command(label="Ripple delete", accelerator="Delete" if self.ripple_var.get() else "Shift+Delete",
+                         command=lambda: self.delete_selected(ripple=True), state="normal" if has_keep else "disabled")
+        menu.add_command(label="Delete, leave gap",
+                         accelerator="Shift+Delete" if self.ripple_var.get() else "Delete",
+                         command=lambda: self.delete_selected(ripple=False),
+                         state="normal" if has_keep or any(edit.states[i] == REMOVED for i in selected) else "disabled")
+        menu.add_command(label="Restore", command=self.restore_selected,
+                         state="normal" if has_deleted else "disabled")
+        menu.add_separator()
+        menu.add_command(label="Join with next part", command=lambda: self.join_with_next(index),
+                         state="normal" if index < len(edit.cuts) else "disabled")
+        menu.add_command(label="Set In/Out to this part", command=lambda: self.range_to_segment(index))
+        menu.add_command(label="Close all gaps", command=self.close_all_gaps,
+                         state="normal" if GAP in edit.states else "disabled")
+        menu.add_command(label="Clear all cuts", command=self.clear_cuts,
+                         state="disabled" if edit.is_trivial else "normal")
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def range_to_segment(self, index: int) -> None:
+        edit = self.edit_timeline
+        if edit is None:
+            return
+        segment = edit.segment(index)
+        self.start_var.set(format_time(segment.start))
+        self.end_var.set(format_time(segment.end))
+        self.apply_range_entries(silent=True)
+
+    def _edit_changed(self, message: str) -> None:
+        self.timeline.redraw()
+        self._update_segment_buttons()
+        self._update_range_labels()
+        self._update_export_summary()
+        self.status_label.configure(text=message, text_color=MUTED)
+        self._record_history_snapshot()
+
+    def _edit_pieces(self, start: float, end: float) -> list[tuple[float, float, str]] | None:
+        """Export pieces for the cut list, or None when there are no cuts (plain trim)."""
+        edit = self.edit_timeline
+        if edit is None or edit.is_trivial:
+            return None
+        return edit.pieces(start, end)
+
+    def _skip_removed_at_playhead(self) -> None:
+        """Keep the playhead off ripple-deleted parts while playing."""
+        edit = self.edit_timeline
+        if edit is None or not self.playing:
+            return
+        position = float(self.playhead_var.get())
+        if edit.state_at(position) == REMOVED:
+            try:
+                end = parse_time(self.end_var.get())
+            except Exception:
+                end = edit.duration
+            target = edit.next_playable(position, end)
+            if target is None:
+                self.pause_playback()
+            else:
+                self._seek_player(target)
 
     def _build_bottom_bar(self) -> None:
         actions = ttk.Frame(self, padding=(native.PAD, native.PAD, native.PAD, native.PAD))
@@ -724,6 +1067,9 @@ class MediaEditorWindow(tk.Toplevel):
         self.media_info_label.configure(text=meta)
 
         self.timeline.set_media(info.duration, 0.0, info.duration, self.playhead_var.get())
+        self.edit_timeline = EditTimeline(info.duration)
+        self.timeline.set_edit(self.edit_timeline)
+        self._update_segment_buttons()
         self._update_range_labels()
         self._update_current_time_label()
         self._init_embedded_player()
@@ -943,6 +1289,7 @@ class MediaEditorWindow(tk.Toplevel):
         if self._closing or self.player is None:
             return
         try:
+            self._sync_play_state()
             position = self.player.position()
             if position is not None:
                 position = max(0.0, min(float(position), self.info.duration if self.info else float(position)))
@@ -951,21 +1298,85 @@ class MediaEditorWindow(tk.Toplevel):
                         selection_end = parse_time(self.end_var.get())
                     except Exception:
                         selection_end = self.info.duration
-                    if position >= selection_end - 0.02:
+                    edit = self.edit_timeline
+                    if edit is not None and edit.state_at(position) == REMOVED:
+                        # Ripple-deleted part: jump over it, as the export will.
+                        target = edit.next_playable(position, selection_end)
+                        if target is None:
+                            self.pause_playback()
+                            position = selection_end
+                        else:
+                            self.player.seek(target)
+                            position = target
+                    elif position >= selection_end - 0.02:
                         self.pause_playback()
                         position = selection_end
+                self._show_gap_preview(self.playing and self.edit_timeline is not None
+                                       and self.edit_timeline.state_at(position) == GAP)
                 self.playhead_var.set(position)
                 self.timeline.set_playhead(position)
                 self._update_current_time_label()
 
+            self._release_player_input()
             self._schedule_player_tick(24 if self.playing else 100)
         except Exception as exc:
             self.pause_playback()
             failed_player = self.player
             self._player_failed(failed_player, str(exc))
 
+    def _sync_play_state(self) -> None:
+        """Follow mpv if it paused or played by itself (end of file, a stray key)."""
+        player = self.player
+        if player is None or not player.ready:
+            return
+        if time.monotonic() - self._last_play_command < 0.6:
+            return  # mpv has not reported the last command yet
+        paused = player.is_paused()
+        if self.playing and paused:
+            self.pause_playback()
+        elif not self.playing and not paused:
+            try:
+                player.pause()
+            except Exception:
+                pass
+
+    def _show_gap_preview(self, in_gap: bool) -> None:
+        """Inside a gap the export is black and silent: show and play it that way."""
+        if in_gap == self._player_muted_for_gap:
+            return
+        self._player_muted_for_gap = in_gap
+        if self.player is not None:
+            try:
+                self.player.set_mute(True if in_gap else bool(self.mute_var.get()))
+            except Exception:
+                pass
+        if self.info and self.info.has_video and not self.crop_mode:
+            self._show_video_host(not in_gap)
+            if in_gap:
+                self.preview_canvas.delete("all")
+
+    def _release_player_input(self) -> None:
+        """Stop mpv's window from taking clicks and keys, so Space reaches the editor.
+
+        Clicking the video used to give the keyboard focus to mpv's own window, and Space
+        then went to mpv instead of the editor. Disabled child windows let clicks through to
+        the editor's frame. mpv may recreate its window, so this runs now and then.
+        """
+        if os.name != "nt" or self.player is None or not self.info or not self.info.has_video:
+            return
+        now = time.monotonic()
+        if now - self._last_input_release < 1.0:
+            return
+        self._last_input_release = now
+        try:
+            native.disable_child_windows(self.video_host.winfo_id())
+        except Exception:
+            pass
+
     def _set_render_busy(self, busy: bool) -> None:
         self.render_busy = busy
+        self.timeline.enabled = not busy
+        self._update_segment_buttons()
         state = "disabled" if busy else "normal"
         controls = [
             *self._video_only_controls(),
@@ -1043,6 +1454,17 @@ class MediaEditorWindow(tk.Toplevel):
             position = float(self.playhead_var.get())
             if position < start or position >= end - 0.02:
                 position = start
+            edit = self.edit_timeline
+            if edit is not None:
+                playable = edit.next_playable(position, end)
+                if playable is None:
+                    playable = edit.next_playable(start, end)
+                if playable is None:
+                    self.status_label.configure(text="Everything in the selection is deleted: nothing to play.",
+                                                text_color=WARNING)
+                    return
+                position = playable
+            if abs(position - float(self.playhead_var.get())) > 1e-3:
                 self.player.seek(position)
                 self.playhead_var.set(position)
                 self.timeline.set_playhead(position)
@@ -1050,6 +1472,7 @@ class MediaEditorWindow(tk.Toplevel):
             self.player.set_mute(self.mute_var.get())
             self.player_rate_supported = self.player.set_rate(self._speed_value())
             self.player.play()
+            self._last_play_command = time.monotonic()
             self.playing = True
             self.play_button.configure(text="Ⅱ Pause", fg_color=CYAN, hover_color=CYAN_HOVER, text_color="#031018")
             rate_note = "" if self.player_rate_supported else " • speed applies on export"
@@ -1066,7 +1489,10 @@ class MediaEditorWindow(tk.Toplevel):
                 self.player.pause()
             except Exception:
                 pass
+        self._last_play_command = time.monotonic()
         self.playing = False
+        if self._player_muted_for_gap:
+            self._show_gap_preview(False)
         if hasattr(self, "play_button"):
             self.play_button.configure(text="▶ Play", fg_color=PURPLE, hover_color=PURPLE_HOVER, text_color=TEXT)
         if hasattr(self, "preview_status_label"):
@@ -1099,13 +1525,11 @@ class MediaEditorWindow(tk.Toplevel):
         self.schedule_preview(delay=40)
 
     def _shortcut_allowed(self) -> bool:
-        focus = self.focus_get()
         try:
-            if focus is not None and focus.winfo_class() in {"Entry", "TEntry", "Text"}:
-                return False
+            focus = self.focus_get()
         except Exception:
-            pass
-        return True
+            focus = None
+        return not is_text_input(focus)
 
     def _capture_history_snapshot(self) -> EditorSnapshot:
         return EditorSnapshot(
@@ -1128,6 +1552,8 @@ class MediaEditorWindow(tk.Toplevel):
             contrast=float(self.contrast_var.get()),
             saturation=float(self.saturation_var.get()),
             resolution=self.resolution_var.get(),
+            cuts=self.edit_timeline.snapshot()[0] if self.edit_timeline else (),
+            segment_states=self.edit_timeline.snapshot()[1] if self.edit_timeline else ("keep",),
         )
 
     def _record_history_snapshot(self) -> None:
@@ -1167,6 +1593,10 @@ class MediaEditorWindow(tk.Toplevel):
             self.saturation_var.set(snapshot.saturation)
             self.resolution_var.set(snapshot.resolution)
             self._update_color_labels()
+            if self.edit_timeline is not None:
+                self.edit_timeline.load(snapshot.cuts, snapshot.segment_states)
+                self.timeline.set_selection(set(), notify=False)
+                self._update_segment_buttons()
 
             start = max(0.0, min(parse_time(snapshot.start), self.info.duration))
             end = max(start + 0.001, min(parse_time(snapshot.end), self.info.duration))
@@ -1238,14 +1668,64 @@ class MediaEditorWindow(tk.Toplevel):
         self.step_playhead(delta)
         return "break"
 
-    def _on_space(self, _event: Any) -> str | None:
-        focus = self.focus_get()
-        try:
-            if focus is not None and focus.winfo_class() in {"Entry", "TEntry", "Text"}:
-                return None
-        except Exception:
-            pass
+    def _on_space(self, event: Any) -> str | None:
+        if is_text_input(getattr(event, "widget", None)) or not self._shortcut_allowed():
+            return None
+        if self.render_busy:
+            return "break"
         self.toggle_playback()
+        return "break"
+
+    def _on_escape(self, event: Any) -> str | None:
+        if self.crop_mode:
+            return self._on_crop_escape(event)
+        if not self._shortcut_allowed():
+            return None
+        if self.tool_var.get() == TOOL_BLADE:
+            self.set_tool(TOOL_SELECT)
+            return "break"
+        if self.timeline.selected:
+            self.timeline.set_selection(set())
+            return "break"
+        return None
+
+    def _on_tool_shortcut(self, _event: Any, tool: str) -> str | None:
+        if not self._shortcut_allowed() or self.render_busy or self.crop_mode:
+            return None
+        self.set_tool(tool)
+        return "break"
+
+    def _on_split_shortcut(self, _event: Any) -> str | None:
+        if not self._shortcut_allowed() or self.render_busy or self.crop_mode:
+            return None
+        self.split_at_playhead()
+        return "break"
+
+    def _on_delete_shortcut(self, _event: Any, *, invert: bool) -> str | None:
+        if not self._shortcut_allowed() or self.render_busy or self.crop_mode:
+            return None
+        ripple = bool(self.ripple_var.get())
+        self.delete_selected(ripple=not ripple if invert else ripple)
+        return "break"
+
+    def _on_select_all_shortcut(self, _event: Any) -> str | None:
+        if not self._shortcut_allowed() or self.render_busy:
+            return None
+        self.timeline.select_all()
+        return "break"
+
+    def _on_ripple_shortcut(self, _event: Any) -> str | None:
+        if not self._shortcut_allowed() or self.render_busy:
+            return None
+        self.ripple_var.set(not self.ripple_var.get())
+        self._ripple_changed()
+        return "break"
+
+    def _on_snap_shortcut(self, _event: Any) -> str | None:
+        if not self._shortcut_allowed():
+            return None
+        self.snap_var.set(not self.snap_var.get())
+        self._snap_changed()
         return "break"
 
     def schedule_preview(self, delay: int = 140) -> None:
@@ -1394,9 +1874,11 @@ class MediaEditorWindow(tk.Toplevel):
             start = parse_time(self.start_var.get())
             end = parse_time(self.end_var.get())
             duration = max(0.0, end - start)
-            self.selection_label.configure(
-                text=f"Selection: {format_time(duration)}  •  {format_time(start)} → {format_time(end)}"
-            )
+            text = f"Selection: {format_time(duration)}  •  {format_time(start)} → {format_time(end)}"
+            edit = self.edit_timeline
+            if edit is not None and not edit.is_trivial:
+                text += f"  •  {len(edit.cuts) + 1} parts, output {format_time(edit.output_duration(start, end))}"
+            self.selection_label.configure(text=text)
         except Exception:
             self.selection_label.configure(text="Selection: invalid range")
 
@@ -1407,6 +1889,9 @@ class MediaEditorWindow(tk.Toplevel):
             start = max(0.0, min(parse_time(self.start_var.get()), self.info.duration))
             end = max(start, min(parse_time(self.end_var.get()), self.info.duration))
             selected = max(0.0, end - start)
+            edit = self.edit_timeline
+            if edit is not None and not edit.is_trivial:
+                selected = edit.output_duration(start, end)
             speed = max(0.01, self._speed_value())
             output_duration = selected / speed
             fmt = self.format_var.get()
@@ -2135,6 +2620,10 @@ class MediaEditorWindow(tk.Toplevel):
             self.reset_video_edits()
             self.reset_audio_edits()
             self.reset_range()
+            if self.edit_timeline is not None:
+                self.edit_timeline.reset()
+                self.timeline.set_selection(set(), notify=False)
+                self._update_segment_buttons()
         finally:
             self._applying_history = previous
         if not previous:
@@ -2157,6 +2646,11 @@ class MediaEditorWindow(tk.Toplevel):
         if end <= start:
             raise ValueError("OUT must be after IN.")
 
+        pieces = self._edit_pieces(start, end)
+        if pieces is not None and not pieces:
+            raise ValueError("Nothing is left to export: every part of the selection was deleted.\n\n"
+                             "Select a part and choose Restore, or press Ctrl+Z.")
+
         speed = self._speed_value()
         fade_in = max(0.0, float(self.fade_in_var.get() or 0))
         fade_out = max(0.0, float(self.fade_out_var.get() or 0))
@@ -2167,6 +2661,7 @@ class MediaEditorWindow(tk.Toplevel):
         return {
             "start": start,
             "end": end,
+            "pieces": pieces,
             "crop_preset": self.crop_var.get(),
             "custom_crop": custom_crop,
             "rotate": self.rotate_var.get(),
@@ -2222,6 +2717,17 @@ class MediaEditorWindow(tk.Toplevel):
             if start < settings["start"] or start >= settings["end"]:
                 start = settings["start"]
             duration = min(15.0, settings["end"] - start)
+            preview_pieces = None
+            edit = self.edit_timeline
+            if settings["pieces"] is not None and edit is not None:
+                playable = edit.next_playable(start, settings["end"]) or settings["start"]
+                preview_pieces = edit.pieces_from(playable, 15.0, settings["start"], settings["end"])
+                if not preview_pieces:
+                    preview_pieces = edit.pieces_from(settings["start"], 15.0, settings["start"], settings["end"])
+                if not preview_pieces:
+                    raise ValueError("The next 15 seconds are only gaps; move the playhead to a kept part.")
+                start = preview_pieces[0][0]
+                duration = preview_pieces[-1][1] - start
             suffix = ".mp4" if self.info.has_video else ".mp3"
             output = self.temp_dir / f"preview_{os.getpid()}{suffix}"
             command = build_preview_clip_command(
@@ -2238,6 +2744,7 @@ class MediaEditorWindow(tk.Toplevel):
                 volume_percent=settings["volume_percent"],
                 fade_in=settings["fade_in"],
                 fade_out=settings["fade_out"],
+                pieces=preview_pieces,
                 **settings["video"],
             )
         except Exception as exc:
@@ -2327,6 +2834,7 @@ class MediaEditorWindow(tk.Toplevel):
                 fade_in=settings["fade_in"],
                 fade_out=settings["fade_out"],
                 quality=settings["quality"],
+                pieces=settings["pieces"],
                 **settings["video"],
             )
         except Exception as exc:

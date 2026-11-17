@@ -222,5 +222,58 @@ Stream #0:1: Video: mjpeg, yuvj420p(pc), 600x600, 90k tbr, 90k tbn (attached pic
         self.assertEqual(safe_export_name('bad:/name*?.mp4'), "bad_name_.mp4")
 
 
+class SegmentExportTests(unittest.TestCase):
+    INFO = MediaInfo(duration=10.0, has_video=True, has_audio=True, width=1280, height=720, fps=30.0)
+
+    def command(self, pieces, info=None, **overrides):
+        settings = dict(start=0.0, end=10.0, crop_preset="Original", custom_crop=None, rotate="0°", speed=1.0,
+                        mute=False, volume_percent=100, fade_in=0, fade_out=0, quality="High")
+        settings.update(overrides)
+        return build_export_command(Path("in.mp4"), Path("out.mp4"), info or self.INFO, pieces=pieces, **settings)
+
+    def test_single_keep_piece_uses_fast_trim(self) -> None:
+        command, duration = self.command([(1.0, 4.0, "keep")])
+        self.assertNotIn("-filter_complex", command)
+        self.assertEqual(command[command.index("-ss") + 1], "1.000")
+        self.assertAlmostEqual(duration, 3.0)
+
+    def test_pieces_are_joined_with_concat(self) -> None:
+        command, duration = self.command([(1.0, 2.0, "keep"), (4.0, 7.0, "keep"), (7.0, 8.0, "gap")], speed=2.0)
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertEqual(command[command.index("-ss") + 1], "1.000")
+        self.assertIn("trim=start=0.000:end=1.000", graph)
+        self.assertIn("trim=start=3.000:end=6.000", graph)
+        self.assertIn("drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill", graph)
+        self.assertIn("volume=0", graph)
+        self.assertIn("concat=n=3:v=1:a=1[vj][aj]", graph)
+        self.assertIn("setpts=PTS/2", graph)
+        self.assertIn("[vout]", command)
+        self.assertAlmostEqual(duration, 2.5)
+
+    def test_muted_video_drops_audio(self) -> None:
+        command, _ = self.command([(0.0, 1.0, "keep"), (5.0, 6.0, "keep")], mute=True)
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertNotIn("atrim", graph)
+        self.assertIn("concat=n=2:v=1:a=0[vj]", graph)
+        self.assertIn("-an", command)
+
+    def test_audio_only_pieces(self) -> None:
+        info = MediaInfo(duration=10.0, has_video=False, has_audio=True)
+        command, _ = build_export_command(
+            Path("in.mp3"), Path("out.mp3"), info, start=0, end=10, crop_preset="Original", custom_crop=None,
+            rotate="0°", speed=1.0, mute=False, volume_percent=100, fade_in=1, fade_out=0, quality="High",
+            pieces=[(0.0, 1.0, "keep"), (5.0, 6.0, "keep")],
+        )
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertNotIn("[0:v:0]", graph)
+        self.assertIn("concat=n=2:v=0:a=1[aj]", graph)
+        self.assertIn("afade=t=in", graph)
+        self.assertIn("libmp3lame", command)
+
+    def test_empty_cut_list_is_an_error(self) -> None:
+        with self.assertRaises(ValueError):
+            self.command([])
+
+
 if __name__ == "__main__":
     unittest.main()

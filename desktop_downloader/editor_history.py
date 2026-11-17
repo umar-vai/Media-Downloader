@@ -24,6 +24,8 @@ class EditorSnapshot:
     contrast: float = 0.0
     saturation: float = 0.0
     resolution: str = "Original"
+    cuts: tuple[float, ...] = ()
+    segment_states: tuple[str, ...] = ("keep",)
 
 
 class EditorHistory:

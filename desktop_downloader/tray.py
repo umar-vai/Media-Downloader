@@ -24,6 +24,7 @@ class TrayController:
         on_resume_all: Callable[[], None],
         on_quit: Callable[[], None],
         run_on_ui: Callable[[Callable[[], None]], None],
+        on_record: Callable[[], None] | None = None,
     ) -> None:
         self._icon: Any = None
         self._title = title
@@ -33,6 +34,7 @@ class TrayController:
         self._on_pause_all = on_pause_all
         self._on_resume_all = on_resume_all
         self._on_quit = on_quit
+        self._on_record = on_record
         self._icon_path = icon_path
 
     @property
@@ -51,6 +53,8 @@ class TrayController:
                 pystray.MenuItem("Pause all", self._wrap(self._on_pause_all)),
                 pystray.MenuItem("Resume all", self._wrap(self._on_resume_all)),
                 pystray.Menu.SEPARATOR,
+                *([pystray.MenuItem("Screen recorder", self._wrap(self._on_record)),
+                   pystray.Menu.SEPARATOR] if self._on_record is not None else []),
                 pystray.MenuItem("Quit", self._wrap(self._on_quit)),
             )
             self._icon = pystray.Icon("MediaDownloader", image, self._title, menu)
