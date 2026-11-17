@@ -32,6 +32,7 @@ import ui_kit as ui
 from batch_page import BatchSection
 from history_window import PropertiesDialog
 from icons import IconSet
+from partial_files import delete_partial_files, find_partial_files, scan_partial_files
 from main_window import (CategoryTree, ConfirmDelete, DetailsPane, DownloadTable, SearchBox, StatusBar,
                          Toolbar, UpdateBadge, setup_style, sysfont)
 from theme import C
@@ -97,6 +98,8 @@ class UIMixin:
         self._history_generation = 0
         self._history_loading = False
         self._discard_ids: set[str] = set()
+        # request id -> (folder, name) whose partial files are removed once the worker has stopped.
+        self._discard_cleanup: dict[str, tuple[str, str]] = {}
         self._heading_drag = False
         self._shown_keys: list[str] = []
 
@@ -167,6 +170,7 @@ class UIMixin:
         downloads.add_command(label="Delete…", accelerator="Del", command=self.delete_selected)
         downloads.add_command(label="Delete completed…", command=self.delete_completed)
         downloads.add_command(label="Remove missing files from list", command=self.remove_missing)
+        downloads.add_command(label="Clean up partial files…", command=self.clean_partial_files)
         downloads.add_separator()
         downloads.add_command(label="Copy download link", accelerator="Ctrl+C", command=self.copy_selected_links)
         downloads.add_command(label="Error details…", command=self.details_selected)
@@ -681,6 +685,9 @@ class UIMixin:
                 if item["id"] in self._discard_ids and item.get("status") in {"completed", "failed", "cancelled"}:
                     self.download_queue.remove(item["id"])
                     self._discard_ids.discard(item["id"])
+                    leftover = self._discard_cleanup.pop(item["id"], None)
+                    if leftover:
+                        self._delete_partials(*leftover)  # the worker has stopped: its files are free
                     removed = True
             if removed:
                 snapshots = self.download_queue.snapshot()
@@ -976,18 +983,74 @@ class UIMixin:
         self._invalidate_history()
         self._set_status(f"Removed {removed} missing file{'s' if removed != 1 else ''} from the list", "ready")
 
+    def clean_partial_files(self) -> None:
+        """Delete leftover .part/fragment files in every download folder, except those of live downloads."""
+        folders: list[str] = [str(self.download_dir)]
+        keep: set[Path] = set()
+        for row in self._rows:
+            folder = str(Path(row["path"]).parent) if row["path"] else str(row["save_to"] or "")
+            if folder:
+                folders.append(folder)
+            if row["source"] == "queue" and row["status"] in dl.STOPPABLE | {"paused", "stopping"}:
+                # Unfinished but still in the list: the user may resume it, so its files stay.
+                keep.update(path.resolve() for path in find_partial_files(folder, row["name"]))
+        files = scan_partial_files(folders, keep)
+        if not files:
+            messagebox.showinfo("Media Downloader", "No partial files found.", parent=self)
+            return
+        total = 0
+        for path in files:
+            try:
+                total += path.stat().st_size
+            except OSError:
+                pass
+        if not messagebox.askyesno(
+                "Clean up partial files",
+                f"Delete {len(files)} partial file{'s' if len(files) != 1 else ''} ({dl.format_size(total)}) left "
+                "by cancelled or failed downloads?\n\nDownloads still in the list that can be resumed are not "
+                "touched. This cannot be undone.", parent=self):
+            return
+        problems: list[str] = []
+        for path in files:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                problems.append(f"{path.name}: {exc}")
+        self._set_status(f"Deleted {len(files) - len(problems)} partial file"
+                         f"{'s' if len(files) - len(problems) != 1 else ''}", "ready")
+        if problems:
+            messagebox.showerror("Media Downloader", "Some files could not be deleted:\n\n" + "\n".join(problems[:12]),
+                                 parent=self)
+
+    def _delete_partials(self, folder: str, name: str) -> list[str]:
+        """Remove the half-downloaded files (.part, fragments, per-stream pieces) of one download.
+
+        Returns a message for every file that could not be deleted."""
+        return delete_partial_files(folder, name)[1]
+
     def _delete_rows(self, rows: list[dict[str, Any]], delete_files: bool) -> None:
         history_ids: list[str] = []
         problems: list[str] = []
         for row in rows:
             request_id = row["request_id"]
+            # An unfinished download leaves partial files behind; they go with it automatically.
+            partial_dir = ""
+            if row["status"] != "complete":
+                partial_dir = str(Path(row["path"]).parent) if row["path"] else str(row["save_to"] or "")
             if row["source"] == "queue":
                 if row["status"] in dl.STOPPABLE | {"paused", "stopping"}:
                     self._discard_ids.add(request_id)
+                    if partial_dir:
+                        # The worker may still hold the files: clean up once it has stopped.
+                        self._discard_cleanup[request_id] = (partial_dir, row["name"])
                     self.cancel_download(request_id)
                 else:
                     self.download_queue.remove(request_id)
+                    if partial_dir:
+                        problems += self._delete_partials(partial_dir, row["name"])
             else:
+                if partial_dir:
+                    problems += self._delete_partials(partial_dir, row["name"])
                 history_ids.append(row["history_id"])
                 if request_id:
                     self.download_queue.remove(request_id)

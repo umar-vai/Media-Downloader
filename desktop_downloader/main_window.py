@@ -842,8 +842,9 @@ class ConfirmDelete:
         ttk.Label(body, image="::tk::icons::warning").grid(row=0, column=0, rowspan=3, sticky="nw",
                                                            padx=(0, native.PAD))
         ttk.Label(body, text=text, style="Title.TLabel").grid(row=0, column=1, sticky="w")
-        ttk.Label(body, text="Unfinished downloads are stopped first. Files stay on the disk unless you tick the "
-                             "box below.", wraplength=380, justify="left").grid(
+        ttk.Label(body, text="Unfinished downloads are stopped first and their partial files are deleted. Finished "
+                             "files stay on the disk unless you tick the box below.",
+                  wraplength=380, justify="left").grid(
             row=1, column=1, sticky="w", pady=(native.GAP, native.PAD))
         delete_files = tk.BooleanVar(dialog, value=False)
         box = ttk.Checkbutton(body, text=f"Also delete {files} downloaded file{'s' if files != 1 else ''} from "
