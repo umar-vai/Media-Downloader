@@ -256,3 +256,82 @@ def snap(value: float, targets: Iterable[float], tolerance: float) -> float:
             best = float(target)
             best_distance = distance
     return best
+
+
+# --------------------------------------------------------------------------- sequence view
+@dataclass(frozen=True)
+class Clip:
+    """One part as it sits on the magnetic timeline (what the viewer of the export sees).
+
+    ``seq_start`` is where the part starts on the timeline after ripple-deleted parts were
+    taken out and the rest moved up to close the hole.
+    """
+
+    index: int          # segment index in the cut list
+    start: float        # source time
+    end: float          # source time
+    seq_start: float    # timeline (sequence) time
+    state: str = KEEP
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
+
+    @property
+    def seq_end(self) -> float:
+        return self.seq_start + self.duration
+
+
+def sequence_layout(edit: EditTimeline | None, duration: float) -> list[Clip]:
+    """The parts left on the timeline, packed one after the other with no holes.
+
+    Ripple-deleted parts are gone (the following parts slide left, like a magnet pulling
+    them together); gaps stay as empty space of their own length.
+    """
+    if edit is None:
+        return [Clip(0, 0.0, max(0.001, float(duration)), 0.0, KEEP)]
+    clips: list[Clip] = []
+    position = 0.0
+    for segment in edit.segments():
+        if segment.state == REMOVED or segment.duration <= 0:
+            continue
+        clips.append(Clip(segment.index, segment.start, segment.end, position, segment.state))
+        position += segment.duration
+    return clips
+
+
+def sequence_duration(layout: list[Clip]) -> float:
+    return layout[-1].seq_end if layout else 0.0
+
+
+def seq_from_source(layout: list[Clip], t: float) -> float:
+    """Timeline position of source time ``t`` (a removed time lands where its hole closed)."""
+    t = float(t)
+    for clip in layout:
+        if t < clip.start:
+            return clip.seq_start
+        if t <= clip.end:
+            return clip.seq_start + (t - clip.start)
+    return sequence_duration(layout)
+
+
+def source_from_seq(layout: list[Clip], value: float) -> float:
+    """Source time shown at timeline position ``value``."""
+    if not layout:
+        return 0.0
+    value = float(value)
+    for clip in layout:
+        if value < clip.seq_end - 1e-9:
+            return clip.start + max(0.0, value - clip.seq_start)
+    last = layout[-1]
+    return last.end
+
+
+def clip_at(layout: list[Clip], value: float) -> Clip | None:
+    """The clip under timeline position ``value``."""
+    for clip in layout:
+        if clip.seq_start - 1e-9 <= value < clip.seq_end - 1e-9:
+            return clip
+    if layout and abs(value - layout[-1].seq_end) <= 1e-6:
+        return layout[-1]
+    return None

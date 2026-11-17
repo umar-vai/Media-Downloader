@@ -42,9 +42,12 @@ Location: `desktop_downloader/`
 - Frame preview plus MP4/MKV/MOV and MP3/M4A/WAV export
 - Editor keys work like a pro editor: Space plays/pauses from anywhere except text boxes; Blade tool (B)
   cuts the timeline (or Ctrl+K at the playhead), Selection tool (V) picks parts, Delete removes them.
-  Ripple delete closes the gap; with it off (or Shift+Delete) the part becomes a black, silent gap.
-  Works for video and audio files, with undo/redo, snapping and a right-click menu (restore, join, clear)
-- Screen recorder (Record button, File menu or tray): full screen, a dragged area or a fixed size; quality,
+  Magnetic timeline: a ripple-deleted part disappears and the rest slides together; with ripple off
+  (or Shift+Delete) the part becomes a black, silent gap. Works for video and audio files, with
+  undo/redo, snapping and a right-click menu (restore, join, clear). Dark, modern editor look
+- Screen recorder (Record button, File menu or tray): full screen, a dragged area (with a REC / OK /
+  Cancel toolbar on the box, exact width × height and a ratio lock) or a fixed size; live microphone and
+  system sound meters; quality,
   frame rate, output size, MP4/MKV, GPU encoders (NVENC, Quick Sync, AMF) when present; system sound and
   microphone (mixed, kept in sync), webcam overlay, cursor and click highlight, countdown, auto-stop timer,
   pause/resume and global hotkeys (F12 start/stop, Shift+F12 pause). Interrupted recordings are recovered

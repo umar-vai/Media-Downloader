@@ -13,6 +13,15 @@ Downloaded files are saved to:
 
 You can change the save location from Settings.
 
+## v4.5.0: screen recorder fixes, magnetic timeline, dark editor
+
+- Screen recorder: Stop no longer hangs. The step that adds the sound to the video could run forever with the ffmpeg build the app ships, so the recording never finished and the app froze. Every part now has a known length, and a stuck step is stopped instead of blocking.
+- Select area: as soon as a box is drawn, a toolbar appears on its top corner with ● REC (start now), OK and Cancel, exact width × height fields, a ratio lock (16:9, 9:16, 4:3, 1:1, 21:9...) and a full-screen button. No more Enter or double-click needed. The inside of the box stays clear while choosing.
+- While recording, the bar on the box's corner shows the time, the size, live microphone and system sound meters, Pause/Resume and Stop.
+- Sound section: live level meters for the microphone and system sound before recording starts, so you can see the microphone hears you.
+- Media editor: magnetic timeline. A deleted part disappears and the parts after it slide over to close the hole (like Premiere ripple delete or CapCut). "Delete, leave gap" shows empty space. Clips are shown as blocks with thumbnails, a real time ruler and a red playhead.
+- Media editor: new dark, modern look (dark panels, blue accent buttons, dark tabs and fields).
+
 ## v4.4.3 — screen recorder and blade cutting
 
 - Media editor: Space plays and pauses from anywhere in the editor except text boxes, also right after clicking the video.

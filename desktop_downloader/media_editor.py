@@ -16,6 +16,7 @@ from PIL import Image, ImageEnhance, ImageTk
 from tkinter import filedialog, messagebox, ttk
 
 import crop_geometry as cg
+import editor_theme
 import native
 from app_logging import get_logger
 from edit_timeline import GAP, KEEP, REMOVED, EditTimeline
@@ -48,15 +49,14 @@ from ui_kit import px
 
 APP_TITLE = "Media Editor"
 
-# Classic Windows look: the system colours from the app theme. Only problems are coloured;
-# progress and success messages are plain text, as in a Windows status bar.
-BG = C["BG"]
-SURFACE = C["SURFACE"]
-TEXT = C["TEXT"]
-MUTED = C["MUTED"]
-DANGER = C["DANGER"]
+# A dark, pro-editor look (see editor_theme.py), whatever the app's own theme is.
+BG = editor_theme.PALETTE["bg"]
+SURFACE = editor_theme.PALETTE["panel"]
+TEXT = editor_theme.PALETTE["text"]
+MUTED = editor_theme.PALETTE["muted"]
+DANGER = editor_theme.PALETTE["danger"]
 SUCCESS = TEXT
-WARNING = TEXT
+WARNING = editor_theme.PALETTE["warning"]
 # Kept for the playback code, which still passes button colours (ignored by EButton).
 CYAN = CYAN_HOVER = PURPLE = PURPLE_HOVER = ""
 PREVIEW_BG = "#000000"  # the video preview stays black, like any media player
@@ -188,7 +188,7 @@ class Progress(native.Progress):
 
 class MediaEditorWindow(tk.Toplevel):
     def __init__(self, parent: Any, source_path: Path, output_dir: Path | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(parent, class_="MediaEditor")
         self.parent = parent
         self.source_path = Path(source_path)
         self.output_dir = Path(output_dir or self.source_path.parent)
@@ -273,7 +273,7 @@ class MediaEditorWindow(tk.Toplevel):
         self.quality_var = tk.StringVar(self, value="High")
 
         self.title(f"{self.source_path.name} - {APP_TITLE}")
-        self.configure(bg=native.dialog_bg(self))
+        self.configure(bg=BG)
         try:
             icon = getattr(parent, "_icon_file", None)
             if icon:
@@ -428,6 +428,7 @@ class MediaEditorWindow(tk.Toplevel):
 
         self._build_timeline()
         self._build_bottom_bar()
+        editor_theme.apply(self)
 
     def _build_menu(self) -> None:
         bar = tk.Menu(self, tearoff=0)
@@ -511,7 +512,7 @@ class MediaEditorWindow(tk.Toplevel):
             bg=PREVIEW_BG,
             bd=0,
             highlightthickness=1,
-            highlightbackground=C["BORDER"],
+            highlightbackground=editor_theme.PALETTE["border"],
             cursor="crosshair",
         )
         self.preview_canvas.grid(row=0, column=0, sticky="nsew")

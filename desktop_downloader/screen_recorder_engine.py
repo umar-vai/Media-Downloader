@@ -487,8 +487,13 @@ def build_part_mux_command(video: Path, tracks: list[AudioTrack], output: Path,
                            duration: float | None = None) -> list[str]:
     """Add the aligned, mixed audio to one video part. The video is copied, not re-encoded.
 
-    ``duration`` cuts the part where the user pressed Pause/Stop: ffmpeg only notices the
-    "q" a few hundred milliseconds later and keeps capturing until then.
+    ``duration`` is the length of the part: the audio is padded with silence up to it and
+    the output is cut there. It also trims the part where the user pressed Pause/Stop
+    (ffmpeg only notices the "q" a few hundred milliseconds later).
+
+    Never pad without a duration: ``apad`` makes an endless stream, and with a copied video
+    stream the ffmpeg build the app ships (7.x) ignores ``-shortest`` and runs forever. That
+    was the "recording never finishes / app hangs after Stop" bug.
     """
     command = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(video)]
     for track in tracks:
@@ -511,15 +516,64 @@ def build_part_mux_command(video: Path, tracks: list[AudioTrack], output: Path,
         steps.append(f"aresample={AUDIO_RATE}")
         graph.append(f"[{index}:a]{','.join(steps)}[a{index}]")
         labels.append(f"[a{index}]")
-    # The audio is padded with silence and cut at the end of the video (-shortest), so a
-    # track that stopped a moment early or started late never shortens the video.
+    # With a known length the audio is padded with silence up to the end of the video, so
+    # a track that stopped a moment early or started late never shortens the video.
+    pad = f",apad=whole_dur={duration:.3f}" if duration and duration > 0 else ""
     if len(tracks) > 1:
-        graph.append(f"{''.join(labels)}amix=inputs={len(tracks)}:duration=longest:normalize=0,apad[aout]")
+        graph.append(f"{''.join(labels)}amix=inputs={len(tracks)}:duration=longest:normalize=0{pad}[aout]")
     else:
-        graph[-1] = graph[-1].rsplit("[", 1)[0].rstrip() + ",apad[aout]"
+        graph[-1] = graph[-1].rsplit("[", 1)[0].rstrip() + f"{pad}[aout]"
     return command + ["-filter_complex", ";".join(graph), "-map", "0:v:0", "-map", "[aout]",
-                      "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", *limit, "-f", "matroska",
+                      "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", *limit, "-f", "matroska",
                       str(output)]
+
+
+_DURATION_LINE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+_TIME_STAT = re.compile(r"time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+
+def _hms(match: re.Match[str]) -> float:
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def parse_duration(text: str) -> float | None:
+    """Length from ffmpeg's ``Duration: 00:01:02.50`` header line (None for N/A)."""
+    match = _DURATION_LINE.search(text or "")
+    if not match:
+        return None
+    value = _hms(match)
+    return value if value > 0 else None
+
+
+def parse_last_time(text: str) -> float | None:
+    """The last ``time=00:00:05.00`` progress value ffmpeg printed."""
+    found = list(_TIME_STAT.finditer(text or ""))
+    if not found:
+        return None
+    value = _hms(found[-1])
+    return value if value > 0 else None
+
+
+def probe_duration(path: Path) -> float | None:
+    """Length of a recorded part. Reads the header, or (for a file cut off by a crash,
+    which has no length in its header) reads the whole video stream without decoding it."""
+    try:
+        result = _run([ffmpeg_exe(), "-hide_banner", "-nostdin", "-i", str(path)], timeout=30)
+        value = parse_duration(result.stderr)
+        if value:
+            return value
+        result = _run([ffmpeg_exe(), "-hide_banner", "-nostdin", "-i", str(path), "-map", "0:v:0", "-c", "copy",
+                       "-f", "null", "-"], timeout=300)
+        return parse_last_time(result.stderr)
+    except Exception:
+        return None
+
+
+def part_length(probed: float | None, wanted: float | None) -> float | None:
+    """The length to give a finished part: where the user stopped, never past the video."""
+    values = [value for value in (probed, wanted) if value and value > 0]
+    return min(values) if values else None
 
 
 def build_join_command(parts_list: Path, output: Path) -> list[str]:
@@ -620,6 +674,60 @@ class AudioRecorder(threading.Thread):
         finally:
             self._ready.set()
             done()
+
+
+class LevelMonitor(threading.Thread):
+    """Live input level of system sound or a microphone, before recording starts.
+
+    Nothing is written anywhere: it only keeps ``level`` (peak, 0..1) up to date so the
+    recorder can show a moving meter, the way Bandicam does, and the user can see that the
+    microphone really hears them.
+    """
+
+    def __init__(self, *, loopback: bool, device: str | None = None) -> None:
+        super().__init__(name=f"level-{'loopback' if loopback else 'mic'}", daemon=True)
+        self.loopback = loopback
+        self.device = device
+        self.level = 0.0
+        self.error = ""
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    @property
+    def stopped(self) -> bool:
+        return self._stop_event.is_set()
+
+    def run(self) -> None:
+        if audio_backend_error():
+            self.error = audio_backend_error()
+            return
+        done = _com_init()
+        try:
+            source = AudioRecorder(Path(os.devnull), loopback=self.loopback, device=self.device)._open_source()
+            with source.recorder(samplerate=AUDIO_RATE, channels=AUDIO_CHANNELS) as recorder:
+                while not self._stop_event.is_set():
+                    data = recorder.record(numframes=AUDIO_RATE // 25)  # 40 ms
+                    if data is None or len(data) == 0:
+                        self.level = 0.0
+                        continue
+                    self.level = float(numpy.abs(data).max())
+        except Exception as exc:
+            self.error = str(exc) or exc.__class__.__name__
+            self.level = 0.0
+        finally:
+            done()
+
+
+def level_fraction(level: float, floor_db: float = -60.0) -> float:
+    """Peak level (0..1) to a meter fill (0..1) on a dB scale, like a mixer meter."""
+    import math
+
+    if level <= 0.0:
+        return 0.0
+    db = 20.0 * math.log10(min(1.0, level))
+    return max(0.0, min(1.0, (db - floor_db) / -floor_db))
 
 
 # --------------------------------------------------------------------------- session
@@ -951,9 +1059,11 @@ class RecordingSession:
             wanted = None
             if part.capture_start is not None and part.quit_sent_at is not None:
                 wanted = part.quit_sent_at - part.capture_start
-            result = _run(build_part_mux_command(part.video, tracks, muxed, wanted), timeout=3600)
-            if result.returncode != 0 or not muxed.exists():
-                self.log(f"Mux of part {index} failed: {result.stderr[-800:]}")
+            length = part_length(probe_duration(part.video), wanted)
+            if length is None and part.out_time > 0:
+                length = part.out_time
+            self.log(f"Part {index} length {length if length is not None else 'unknown'}")
+            if not self._mux_part(part.video, tracks, muxed, length):
                 if tracks:
                     self.warnings.append(f"Audio of part {index} could not be added.")
                 muxed = part.video
@@ -965,13 +1075,33 @@ class RecordingSession:
 
         parts_list = self.work_dir / "parts.txt"
         parts_list.write_text(concat_list_text(finished), encoding="utf-8")
-        result = _run(build_join_command(parts_list, self.output), timeout=3600)
+        try:
+            result = _run(build_join_command(parts_list, self.output), timeout=1800)
+        except subprocess.TimeoutExpired:
+            raise RecordingError("Joining the recording took too long. The raw recording is kept in:\n"
+                                 f"{self.work_dir}") from None
         if result.returncode != 0 or not self.output.exists():
             # Keep the raw parts so nothing is lost, and say where they are.
             raise RecordingError("Could not write the final file. The raw recording is kept in:\n"
                                  f"{self.work_dir}\n\n{result.stderr[-800:]}")
         shutil.rmtree(self.work_dir, ignore_errors=True)
         return self.output
+
+    def _mux_part(self, video: Path, tracks: list[AudioTrack], output: Path, length: float | None) -> bool:
+        """Put the audio on one part. Never blocks for long: a stuck ffmpeg is killed."""
+        timeout = max(120.0, (length or 600.0) * 2)
+        try:
+            result = _run(build_part_mux_command(video, tracks, output, length), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.log(f"Mux of {video.name} timed out after {timeout:.0f}s")
+            return False
+        except Exception as exc:
+            self.log(f"Mux of {video.name} failed: {exc}")
+            return False
+        if result.returncode != 0 or not output.exists() or output.stat().st_size == 0:
+            self.log(f"Mux of {video.name} failed: {result.stderr[-800:]}")
+            return False
+        return True
 
     # ---------------------------------------------------------------- misc
     def free_space(self) -> int | None:
@@ -1016,8 +1146,14 @@ def finish_unfinished(folder: Path, container: str = "MP4") -> Path:
         tracks = [AudioTrack(path) for path in sorted(folder.glob(f"{part.stem}_*.wav"))
                   if path.stat().st_size > 44]
         muxed = folder / f"{part.stem}_final.mkv"
-        result = _run(build_part_mux_command(part, tracks, muxed), timeout=3600)
-        finished.append(muxed if result.returncode == 0 and muxed.exists() else part)
+        length = probe_duration(part)
+        try:
+            result = _run(build_part_mux_command(part, tracks, muxed, length),
+                          timeout=max(120.0, (length or 600.0) * 2))
+            ok = result.returncode == 0 and muxed.exists() and muxed.stat().st_size > 0
+        except Exception:
+            ok = False
+        finished.append(muxed if ok else part)
     stem = folder.name.lstrip(".").rsplit(".parts", 1)[0] or default_file_stem()
     suffix = ".mkv" if container.upper() == "MKV" else ".mp4"
     output = unique_path(folder.parent / f"{stem} (recovered){suffix}")
