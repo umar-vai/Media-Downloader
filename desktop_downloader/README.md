@@ -13,6 +13,11 @@ Downloaded files are saved to:
 
 You can change the save location from Settings.
 
+## v4.4.2 — partial file cleanup
+
+- Removing a cancelled, failed or running download from the list now also deletes its leftover `.part`, `.ytdl` and fragment files.
+- New Downloads > Clean up partial files... command removes old leftovers from your download folders; downloads you can still resume are kept.
+
 ## v4.4.1 — visual editor crop and transform tools
 
 - Crop directly on the video preview: draw, move and resize the crop box; use ratio presets or a freeform custom shape.
