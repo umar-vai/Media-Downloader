@@ -13,6 +13,12 @@ Downloaded files are saved to:
 
 You can change the save location from Settings.
 
+## v4.4.3 — screen recorder and blade cutting
+
+- Media editor: Space plays and pauses from anywhere in the editor except text boxes, also right after clicking the video.
+- Blade tool (B) cuts the timeline, Ctrl+K cuts at the playhead; Selection tool (V) picks parts and Delete removes them. Ripple delete closes the gap; with it off (or Shift+Delete) the part becomes a black, silent gap. Works for video and audio, with undo/redo and snapping.
+- New screen recorder (Record button, File menu or tray): full screen, a dragged area or a fixed size; quality, frame rate, size, MP4/MKV and GPU encoders; system sound and microphone in sync; webcam overlay, cursor and click highlight, countdown, auto-stop, pause/resume and F12 / Shift+F12 hotkeys. Interrupted recordings are recovered.
+
 ## v4.4.2 — partial file cleanup
 
 - Removing a cancelled, failed or running download from the list now also deletes its leftover `.part`, `.ytdl` and fragment files.
