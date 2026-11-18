@@ -430,6 +430,7 @@ class DownloaderApp(UIMixin, tk.Tk):
         self.last_file: Path | None = None
         self.editor_window: MediaEditorWindow | None = None
         self.recorder_window: Any = None
+        self.audio_recorder_window: Any = None
         self.diagnostics_window: DiagnosticsWindow | None = None
         self.settings_panel: OptionsDialog | None = None
         self.settings_window: Any = None
@@ -1618,6 +1619,40 @@ class DownloaderApp(UIMixin, tk.Tk):
             self.recorder_window = None
             messagebox.showerror(APP_NAME, f"Could not open the screen recorder.\n\n{exc}")
 
+    def open_audio_recorder(self) -> None:
+        """Audio-only recorder: the other side of a call or meeting plus the microphone."""
+        window = self.audio_recorder_window
+        try:
+            if window is not None and window.winfo_exists():
+                window.show()
+                return
+        except Exception:
+            self.audio_recorder_window = None
+        try:
+            from audio_recorder import AudioRecorderWindow
+
+            stored = self.settings.get("audio_recorder")
+            self.audio_recorder_window = AudioRecorderWindow(
+                self,
+                output_dir=self.download_dir / "Recordings",
+                settings=stored if isinstance(stored, dict) else None,
+                save_settings=self._save_audio_recorder_settings,
+            )
+            self.audio_recorder_window.bind("<Destroy>", self._audio_recorder_destroyed, add="+")
+            LOGGER.info("Audio recorder opened")
+        except Exception as exc:
+            LOGGER.exception("Could not open the audio recorder")
+            self.audio_recorder_window = None
+            messagebox.showerror(APP_NAME, f"Could not open the audio recorder.\n\n{exc}")
+
+    def _save_audio_recorder_settings(self, values: dict[str, Any]) -> None:
+        self.settings["audio_recorder"] = values
+        save_settings(self.settings)
+
+    def _audio_recorder_destroyed(self, event: Any) -> None:
+        if event.widget is self.audio_recorder_window:
+            self.audio_recorder_window = None
+
     def _save_recorder_settings(self, values: dict[str, Any]) -> None:
         self.settings["recorder"] = values
         save_settings(self.settings)
@@ -2290,6 +2325,7 @@ class DownloaderApp(UIMixin, tk.Tk):
             ("Open download folder", self.open_download_folder),
             ("Open media editor", self.open_editor),
             ("Open screen recorder", self.open_screen_recorder),
+            ("Open audio recorder", self.open_audio_recorder),
             ("Delete completed downloads…", self.delete_completed),
             ("Open settings", self.open_settings),
             ("Export browser extension", self.export_browser_extension),

@@ -155,6 +155,7 @@ class UIMixin:
         file.add_separator()
         file.add_command(label="Media editor…", command=lambda: self.open_editor())
         file.add_command(label="Screen recorder…", command=self.open_screen_recorder)
+        file.add_command(label="Audio recorder (calls, meetings)…", command=self.open_audio_recorder)
         bar.add_cascade(label="File", menu=file, underline=0)
         self._file_menu = file
 
@@ -259,6 +260,8 @@ class UIMixin:
         bar.add("editor", "Editor", "editor", lambda: self.open_editor(), "Cut, convert and export media files")
         bar.add("recorder", "Record", "record", self.open_screen_recorder,
                 "Record the screen (full screen or an area) with sound")
+        bar.add("audio_recorder", "Audio", "mic", self.open_audio_recorder,
+                "Record a call or meeting: the other side's voice and yours, as MP3 / WAV")
         self.toolbar = bar
         self.top_update_button = UpdateBadge(bar.right, self.icons, lambda: self.show_page("updates"),
                                               check=lambda: self.check_for_updates(manual=False, inline=True),

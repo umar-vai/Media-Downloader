@@ -178,6 +178,11 @@ def _tool_painter(name: str, ink: str) -> Painter:
             _rrect(d, u, 0.40, 0.74, 0.60, 0.86, 0.0, ink)
             _rrect(d, u, 0.26, 0.86, 0.74, 0.94, 0.03, ink)
             _circle(d, u, 0.5, 0.42, 0.17, TOOL_RED)
+        elif name == "mic":
+            _rrect(d, u, 0.36, 0.06, 0.64, 0.56, 0.14, TOOL_RED)
+            d.arc(_box(u, 0.22, 0.28, 0.78, 0.78), 0, 180, fill=ink, width=max(1, int(0.07 * u)))
+            _line(d, u, [(0.5, 0.78), (0.5, 0.92)], ink, 0.07)
+            _line(d, u, [(0.34, 0.93), (0.66, 0.93)], ink, 0.07)
         elif name == "folder":
             _folder(d, u, BLUE)
         elif name == "update":

@@ -388,6 +388,29 @@ def list_microphones() -> list[str]:
         done()
 
 
+def list_speakers() -> list[str]:
+    """Output devices (what sound can be captured from), default first. Worker thread only."""
+    if audio_backend_error():
+        return []
+    done = _com_init()
+    try:
+        import soundcard as sc  # type: ignore
+
+        names: list[str] = []
+        try:
+            names.append(sc.default_speaker().name)
+        except Exception:
+            pass
+        for speaker in sc.all_speakers():
+            if speaker.name not in names:
+                names.append(speaker.name)
+        return names
+    except Exception:
+        return []
+    finally:
+        done()
+
+
 # --------------------------------------------------------------------------- command builders
 def video_codec_args(encoder: str, quality: str, fps: int, *, heavy: bool = False) -> list[str]:
     crf = QUALITIES.get(quality, 18)
@@ -688,7 +711,13 @@ class AudioRecorder(threading.Thread):
         import soundcard as sc  # type: ignore
 
         if self.loopback:
-            speaker = sc.default_speaker()
+            speaker = None
+            if self.device:  # a chosen output device (e.g. the headset a call plays on)
+                for candidate in sc.all_speakers():
+                    if candidate.name == self.device:
+                        speaker = candidate
+                        break
+            speaker = speaker or sc.default_speaker()
             return sc.get_microphone(id=str(speaker.name), include_loopback=True)
         if self.device:
             for mic in sc.all_microphones(include_loopback=False):

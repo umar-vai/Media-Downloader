@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-EXTENSION_VERSION = "2.8.3"
+EXTENSION_VERSION = "2.8.4"
 
 MANIFEST = {
     "manifest_version": 3,
@@ -1302,8 +1302,11 @@ CONTENT_JS = r"""
 
   function localItems(list, title) {
     const here = location.href.split("#")[0];
-    const base = {referer: location.href, pageUrl: here, title, kind: "media",
-      headers: {Origin: location.origin, "User-Agent": navigator.userAgent}};
+    // Pornhub's CDN answers "request incorrect" (410/412) unless the Referer is just the site
+    // ("https://www.pornhub.com/", what the browser's own player sends) and no Origin header is
+    // present; the full page address as Referer, or an Origin, is refused.
+    const base = {referer: location.origin + "/", pageUrl: here, title, kind: "media",
+      headers: {"User-Agent": navigator.userAgent}};
     const top = list[0];
     return [{...base, url: top.url, quality: "Best available", best: true,
         label: "Best quality · " + top.height + "p", detail: "Highest resolution this video offers"},
