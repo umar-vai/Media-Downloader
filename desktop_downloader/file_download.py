@@ -148,7 +148,12 @@ def _request(url: str, headers: dict[str, str], referer: str, start: int = 0) ->
 
 def probe_file(url: str, *, headers: dict[str, str] | None = None, cookiefile: str = "", referer: str = "",
                timeout: float = 15) -> dict[str, Any] | None:
-    """When the link answers with a downloadable file instead of a web page: its name and size."""
+    """When the link answers with a downloadable file instead of a web page: its name and size.
+
+    A stream playlist (HLS .m3u8 / DASH .mpd) is never a file to save: it is a few hundred bytes
+    that point at the real video, so a failed analysis must be reported, not saved as "master.m3u8"."""
+    if extension_of(name_from_url(url)) in _STREAM_EXTENSIONS:
+        return None
     try:
         with _opener(cookiefile, url).open(_request(url, headers or {}, referer), timeout=timeout) as response:
             disposition = response.headers.get("Content-Disposition") or ""
@@ -156,6 +161,8 @@ def probe_file(url: str, *, headers: dict[str, str] | None = None, cookiefile: s
             size = int(response.headers.get("Content-Length") or 0)
             final_url = response.geturl() or url
     except Exception:
+        return None
+    if any(tag in content_type for tag in ("mpegurl", "dash+xml")):
         return None
     if "attachment" not in disposition.lower() and (
         not content_type or content_type.startswith(("text/html", "application/xhtml"))

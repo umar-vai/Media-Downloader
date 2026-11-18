@@ -1161,6 +1161,7 @@ class DownloaderApp(UIMixin, tk.Tk):
                 except SharedCancelled:
                     raise
                 except Exception as exc:
+                    LOGGER.info("Analysis failed request=%s url=%s: %s", request_id, url, " ".join(str(exc).split())[:600])
                     if fallback_url and fallback_url != url and not cancel_event.is_set():
                         # The page could not be read: use the stream the browser captured instead.
                         LOGGER.info("Page analysis failed request=%s, using captured stream: %s", request_id, exc)
