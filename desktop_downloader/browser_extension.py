@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-EXTENSION_VERSION = "2.8.0"
+EXTENSION_VERSION = "2.8.1"
 
 MANIFEST = {
     "manifest_version": 3,
@@ -354,9 +354,20 @@ async function finishResolve(tabId, streams, closeTab) {
   if (closeTab && tab) { try { await api.tabs.remove(tabId); } catch (e) {} }
 }
 
+// Sites whose player streams come from signed CDN links (bound to the browser's session):
+// the app cannot download those, so the video's own page link is used and the badge shows
+// how many qualities that page offers instead of how many requests the player made.
+const PAGE_ONLY_RE = /(^|\.)pornhub\.(com|org)$/;
+function pageOnlyUrl(url) {
+  try { return PAGE_ONLY_RE.test(new URL(url).hostname.toLowerCase()); } catch (e) { return false; }
+}
+
 function announce(tabId) {
   const state = tabs.get(tabId);
-  const count = state ? currentStreams(state).filter(s => !s.drm).length : 0;
+  let count = state ? currentStreams(state).filter(s => !s.drm).length : 0;
+  if (state && pageOnlyUrl(state.page || "")) {
+    count = state.q && state.q.page === state.page ? state.q.n : 0;
+  }
   try {
     Promise.resolve(api.action.setBadgeBackgroundColor({tabId, color: "#7657ff"})).catch(() => {});
     Promise.resolve(api.action.setBadgeText({tabId, text: count ? String(count) : ""})).catch(() => {});
@@ -805,7 +816,20 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "md-menu") { menuFor(tabId).then(sendResponse); return true; }
   if (msg.type === "md-analyze") {
     if (!/^https?:/i.test(msg.url || "")) { sendResponse({ok: false, error: "No link for this video."}); return; }
-    analyzeVideo(msg.url, msg.pageUrl || (tab && tab.url) || "", !!msg.prefetch).then(sendResponse);
+    analyzeVideo(msg.url, msg.pageUrl || (tab && tab.url) || "", !!msg.prefetch).then(async result => {
+      // The page's own video: the badge shows its quality count.
+      if (tab && result && result.ok && Array.isArray(result.qualities) && pageOnlyUrl(msg.url)) {
+        const state = await tabState(tab.id);
+        const here = String(tab.url || "").split("#")[0];
+        if (here && here === String(msg.url).split("#")[0]) {
+          state.page = here;
+          state.q = {page: here, n: result.qualities.length};
+          persist(tab.id);
+          announce(tab.id);
+        }
+      }
+      sendResponse(result);
+    });
     return true;
   }
   if (msg.type === "md-found") {
@@ -901,7 +925,7 @@ CONTENT_JS = r"""
     {re: /(^|\.)eporner\.com$/, link: /\/(video-|hd-porn\/)\w+/, page: /^\/(video-|hd-porn\/|embed\/)\w+/},
     {re: /(^|\.)xvideos\d*\.com$|(^|\.)xnxx\.com$/, link: /\/video[.\d]\w*/, page: /^\/video[.\d]\w*/},
     {re: /(^|\.)xhamster\d*\.(com|desi)$/, link: /\/videos\/[\w-]+/, page: /^\/videos\/[\w-]+/},
-    {re: /(^|\.)pornhub\.(com|org)$/, link: /\/view_video\.php\?viewkey=/, page: /^\/view_video\.php\?viewkey=/},
+    {re: /(^|\.)pornhub\.(com|org)$/, link: /\/view_video\.php\?viewkey=/, page: /^\/view_video\.php\?viewkey=/, pageOnly: true},
     {re: /(^|\.)spankbang\.com$/, link: /\/\w+\/video\//, page: /^\/\w+\/video\//},
     {re: /(^|\.)(vimeo|dailymotion|twitch|bilibili|pinterest|linkedin|rumble|streamable|vk|ok|soundcloud|bitchute|9gag|imgur|tumblr|snapchat|likee|kick)\.(com|tv|ru|be|tw)$/, link: null, page: null},
   ];
@@ -910,6 +934,11 @@ CONTENT_JS = r"""
 
   function siteFor(host) {
     return SITES.find(site => site.re.test(host)) || null;
+  }
+  // Signed CDN streams cannot be downloaded by the app: only the video's own link is offered.
+  function pageOnly() {
+    const site = siteFor(location.hostname.toLowerCase());
+    return !!(site && site.pageOnly);
   }
 
   function videoLink(el) {
@@ -1204,10 +1233,10 @@ CONTENT_JS = r"""
     const video = videoLink(target);
     // In a feed the captured streams may belong to another post: use them on the video's own page.
     const ownPage = !video.known || video.url === location.href.split("#")[0];
-    const stream = ownPage ? (groups.find(g => !g.drm && g.master) || groups.find(g => !g.drm) || groups[0] || null) : null;
+    const stream = ownPage && !pageOnly() ? (groups.find(g => !g.drm && g.master) || groups.find(g => !g.drm) || groups[0] || null) : null;
     let items = stream ? stream.items.slice() : [];
     const src = target && (target.currentSrc || target.src);
-    if (!items.length && src && /^https?:/i.test(src)) {
+    if (!items.length && src && /^https?:/i.test(src) && !pageOnly()) {
       const audio = target.tagName === "AUDIO";
       items = [{url: src, referer: location.href, quality: "Best available", best: true, mode: audio ? "Audio" : "",
         label: (audio ? "Audio" : "Video") + " file", detail: ""}];
@@ -1254,6 +1283,7 @@ CONTENT_JS = r"""
         const title = goodTitle(r.title) || shownTitle;
         const base = {url: video.url, referer: location.href, pageUrl: video.url, title};
         const qualities = Array.isArray(r.qualities) ? r.qualities : [];
+        if (pageOnly() && ownPage) setCount(qualities.length);
         const list = [{...base, quality: "Best available", best: true,
           label: "Best quality" + (qualities[0] ? " · " + qualities[0] : ""), detail: "video + audio"}];
         for (const q of qualities) list.push({...base, quality: q, label: q, detail: ""});
@@ -1367,6 +1397,13 @@ CONTENT_JS = r"""
     api.runtime.onMessage.addListener(msg => {
       if (!msg || msg.type !== "md-streams-changed") return;
       const grew = (msg.count || 0) > count;
+      if (pageOnly()) {
+        // The badge counts the qualities of this page's video, not the player's requests.
+        const here = videoLink(target).url === location.href.split("#")[0];
+        if (here && msg.count) setCount(msg.count);
+        if (menuOpen) renderMenu();
+        return;
+      }
       setCount(msg.count);
       if (menuOpen) renderMenu();
       else if (grew && target) show(target, 3000);
@@ -1375,7 +1412,7 @@ CONTENT_JS = r"""
       if (area === "local" && (changes.blocked || changes.overlay)) start();
     });
     const data = await ask({type: "md-menu"});
-    setCount(data && data.groups ? data.groups.filter(g => !g.items.every(i => i.disabled)).length : 0);
+    if (!pageOnly()) setCount(data && data.groups ? data.groups.filter(g => !g.items.every(i => i.disabled)).length : 0);
   }
 
   start();
@@ -1434,6 +1471,7 @@ async function send(message) {
   if (!data || !data.groups || !data.groups.length) return;
   list.textContent = "";
   // One list: the stream the page is playing (the master playlist with every quality first).
+  if (/(^|\.)pornhub\.(com|org)$/.test(new URL(tab.url).hostname)) return;  // signed CDN streams: use "Send this page"
   const groups = data.groups;
   const best = groups.find(g => !g.drm && g.master) || groups.find(g => !g.drm) || groups[0];
   for (const group of [best]) {
