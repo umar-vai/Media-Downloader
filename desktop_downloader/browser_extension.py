@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-EXTENSION_VERSION = "2.8.2"
+EXTENSION_VERSION = "2.8.3"
 
 MANIFEST = {
     "manifest_version": 3,
@@ -1295,6 +1295,7 @@ CONTENT_JS = r"""
   }
 
   function publishCount(n) {
+    if (n === count) return;  // an unchanged count must not echo back and redraw the menu
     setCount(n);
     ask({type: "md-qcount", n});
   }
@@ -1496,8 +1497,7 @@ CONTENT_JS = r"""
         // The badge counts the qualities of this page's video, not the player's requests.
         const here = videoLink(target).url === location.href.split("#")[0];
         if (here && msg.count) setCount(msg.count);
-        if (menuOpen) renderMenu();
-        return;
+        return;  // the list comes from the page itself: never rebuild it under the pointer
       }
       setCount(msg.count);
       if (menuOpen) renderMenu();
