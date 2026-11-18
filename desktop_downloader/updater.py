@@ -71,6 +71,98 @@ def wait_for_process_exit(pid: int, timeout_seconds: int = 30) -> bool:
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
+INSTALLER_EXIT_CODES = {
+    1: "Setup could not start.",
+    2: "Setup was cancelled before installing.",
+    3: "Setup hit a fatal error while preparing.",
+    4: "Setup hit a fatal error while installing.",
+    5: "A file of the program was still in use, so Setup could not replace it.",
+    6: "Setup was stopped.",
+    7: "Setup cannot continue (Windows needs a restart or a file is in use).",
+    8: "Windows needs a restart to finish installing.",
+}
+
+
+def _is_inside(path: str, folder: Path) -> bool:
+    try:
+        return os.path.normcase(os.path.abspath(path)).startswith(
+            os.path.normcase(os.path.abspath(str(folder))) + os.sep)
+    except Exception:
+        return False
+
+
+def processes_in_folder(folder: Path) -> list[tuple[int, str]]:
+    """Running processes whose program file lies inside ``folder`` (Windows only).
+
+    The editor's mpv player, an ffmpeg started by the recorder or the editor, or a second
+    copy of the app keep their EXE/DLL files locked; the installer then cannot replace them
+    and stops with exit code 5.
+    """
+    if os.name != "nt":
+        return []
+    from ctypes import wintypes
+
+    psapi = ctypes.windll.psapi
+    kernel32 = ctypes.windll.kernel32
+    size = 4096
+    while True:
+        pids = (wintypes.DWORD * size)()
+        needed = wintypes.DWORD()
+        if not psapi.EnumProcesses(ctypes.byref(pids), ctypes.sizeof(pids), ctypes.byref(needed)):
+            return []
+        if needed.value < ctypes.sizeof(pids):
+            break
+        size *= 2
+    found: list[tuple[int, str]] = []
+    own = os.getpid()
+    for pid in pids[: needed.value // ctypes.sizeof(wintypes.DWORD)]:
+        if not pid or pid == own:
+            continue
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            continue
+        try:
+            buffer = ctypes.create_unicode_buffer(32768)
+            length = wintypes.DWORD(len(buffer))
+            if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(length)):
+                if _is_inside(buffer.value, folder):
+                    found.append((int(pid), buffer.value))
+        finally:
+            kernel32.CloseHandle(handle)
+    return found
+
+
+def stop_processes_in_folder(folder: Path, log_file: Path, timeout_seconds: float = 10.0) -> int:
+    """Close every process still running from the install folder. Returns how many."""
+    if os.name != "nt":
+        return 0
+    stopped = 0
+    for pid, path in processes_in_folder(folder):
+        handle = ctypes.windll.kernel32.OpenProcess(0x0001 | 0x00100000, False, pid)  # TERMINATE | SYNCHRONIZE
+        if not handle:
+            append_log(log_file, f"Could not open process {pid} ({path}) to close it.")
+            continue
+        try:
+            ctypes.windll.kernel32.TerminateProcess(handle, 1)
+            ctypes.windll.kernel32.WaitForSingleObject(handle, int(timeout_seconds * 1000))
+            stopped += 1
+            append_log(log_file, f"Closed process {pid} that was still using {path}.")
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    return stopped
+
+
+def setup_log_errors(log_path: Path, limit: int = 6) -> str:
+    """The error lines of an Inno Setup log (which file was locked, and why)."""
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    keys = ("error", "failed", "in use", "abort", "access is denied", "being used")
+    hits = [line.strip() for line in lines if any(key in line.lower() for key in keys)]
+    return "\n".join(hits[-limit:])
+
+
 def launch_target(target: Path) -> subprocess.Popen[bytes]:
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     return subprocess.Popen([str(target)], cwd=str(target.parent), creationflags=creationflags)
@@ -193,26 +285,44 @@ def install_with_setup(
         write_result(result_file, "failed", version, message)
         return 6
 
-    command = [
-        str(source),
-        "/VERYSILENT",
-        "/SUPPRESSMSGBOXES",
-        "/NORESTART",
-        "/CLOSEAPPLICATIONS",
-    ]
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    install_dir = target.parent
 
     try:
-        append_log(log_file, f"Launching installer: {' '.join(command)}")
-        result = subprocess.run(
-            command,
-            cwd=str(source.parent),
-            timeout=600,
-            check=False,
-            creationflags=creationflags,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Installer exited with code {result.returncode}.")
+        result_code = None
+        for attempt in (1, 2):
+            # Helper programs started by the app (mpv, ffmpeg) can outlive it and lock files.
+            if stop_processes_in_folder(install_dir, log_file):
+                time.sleep(1.5)
+            setup_log = log_file.with_name(f"setup-{version}-{attempt}.log")
+            command = [
+                str(source),
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/CLOSEAPPLICATIONS",
+                f"/LOG={setup_log}",
+            ]
+            append_log(log_file, f"Launching installer (attempt {attempt}): {' '.join(command)}")
+            result = subprocess.run(
+                command,
+                cwd=str(source.parent),
+                timeout=600,
+                check=False,
+                creationflags=creationflags,
+            )
+            result_code = result.returncode
+            if result_code == 0:
+                break
+            details = setup_log_errors(setup_log)
+            append_log(log_file, f"Installer exited with code {result_code}. {INSTALLER_EXIT_CODES.get(result_code, '')}"
+                                 + (f"\n{details}" if details else ""))
+            if result_code not in {3, 4, 5, 7} or attempt == 2:
+                break
+            time.sleep(3)
+        if result_code != 0:
+            reason = INSTALLER_EXIT_CODES.get(result_code, "")
+            raise RuntimeError(f"Installer exited with code {result_code}. {reason}".strip())
 
         if not target.exists():
             raise RuntimeError("Installer completed, but the application executable is missing.")
