@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import tempfile
 import unittest
@@ -174,3 +175,37 @@ class VersionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallerUpdaterHelpersTests(unittest.TestCase):
+    """The installer update closes leftover helpers and explains a failed setup."""
+
+    def test_inside_folder(self) -> None:
+        import updater
+
+        base = Path(tempfile.gettempdir()) / "Media Downloader"
+        self.assertTrue(updater._is_inside(str(base / "_internal" / "mpv.exe"), base))
+        self.assertFalse(updater._is_inside(str(base.with_name("Media Downloader 2") / "x.exe"), base))
+        self.assertFalse(updater._is_inside(str(base), base))
+
+    def test_setup_log_errors_picks_the_problem_lines(self) -> None:
+        import updater
+
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "setup.log"
+            log.write_text("Starting the installation process.\n"
+                           "-- File entry --\n"
+                           "DeleteFile failed; code 5.\n"
+                           "Access is denied.\n"
+                           "Installation process succeeded.\n", encoding="utf-8")
+            text = updater.setup_log_errors(log)
+            self.assertIn("DeleteFile failed", text)
+            self.assertIn("Access is denied", text)
+            self.assertNotIn("succeeded", text)
+            self.assertEqual(updater.setup_log_errors(Path(directory) / "missing.log"), "")
+
+    def test_exit_code_5_is_explained(self) -> None:
+        import updater
+
+        self.assertIn("in use", updater.INSTALLER_EXIT_CODES[5])
+        self.assertEqual(updater.stop_processes_in_folder(Path("."), Path("x.log")) if os.name != "nt" else 0, 0)

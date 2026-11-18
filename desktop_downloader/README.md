@@ -13,6 +13,10 @@ Downloaded files are saved to:
 
 You can change the save location from Settings.
 
+## v4.5.1: in-app update fix
+
+- "Install update" could fail with "Installer exited with code 5" when a helper program started by the app (the editor's video player or ffmpeg) was still running and kept a program file locked. The updater now closes anything still running from the program folder, tries once more if a file is in use, saves the setup log next to the update log and says which file was the problem.
+
 ## v4.5.0: screen recorder fixes, magnetic timeline, dark editor
 
 - Screen recorder: Stop no longer hangs. The step that adds the sound to the video could run forever with the ffmpeg build the app ships, so the recording never finished and the app froze. Every part now has a known length, and a stuck step is stopped instead of blocking.
