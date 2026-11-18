@@ -10,10 +10,11 @@ if not exist "%CSC%" set CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe
 del IconMaker.exe
 
 "%CSC%" /nologo /target:winexe /optimize+ /platform:anycpu /out:LiteRecorder.exe /win32icon:app.ico ^
-  /r:System.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll Program.cs Audio.cs Mp3.cs MicIcon.cs || goto :fail
+  /r:System.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll Program.cs MainForm.cs Audio.cs Mp3.cs MicIcon.cs || goto :fail
 echo Built LiteRecorder.exe
 exit /b 0
 :fail
 echo BUILD FAILED
 exit /b 1
+
 

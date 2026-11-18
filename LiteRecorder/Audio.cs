@@ -13,14 +13,80 @@ namespace LiteRecorder
     [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IMMDeviceEnumerator
     {
-        void EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+        void EnumAudioEndpoints(int dataFlow, int stateMask, out IMMDeviceCollection devices);
         void GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
+        void GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
+    }
+
+    [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDeviceCollection
+    {
+        void GetCount(out uint count);
+        void Item(uint index, out IMMDevice device);
     }
 
     [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IMMDevice
     {
         void Activate(ref Guid iid, int clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
+        void OpenPropertyStore(int access, out IPropertyStore store);
+        void GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct PropKey { public Guid fmtid; public int pid; }
+
+    [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPropertyStore
+    {
+        void GetCount(out int count);
+        void GetAt(int index, out PropKey key);
+        void GetValue(ref PropKey key, IntPtr value);
+    }
+
+    // Lists the active microphones / speakers so the user can pick one.
+    class AudioDevice
+    {
+        public string Id, Name;
+        public override string ToString() { return Name; }
+
+        [DllImport("ole32.dll")] static extern int PropVariantClear(IntPtr pv);
+
+        public static System.Collections.Generic.List<AudioDevice> List(bool capture)
+        {
+            System.Collections.Generic.List<AudioDevice> list = new System.Collections.Generic.List<AudioDevice>();
+            try
+            {
+                IMMDeviceEnumerator en = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+                IMMDeviceCollection col;
+                en.EnumAudioEndpoints(capture ? 1 : 0, 1, out col);
+                uint n; col.GetCount(out n);
+                for (uint i = 0; i < n; i++)
+                {
+                    IMMDevice dev; col.Item(i, out dev);
+                    AudioDevice d = new AudioDevice();
+                    dev.GetId(out d.Id);
+                    d.Name = d.Id;
+                    IPropertyStore ps; dev.OpenPropertyStore(0, out ps);
+                    PropKey k = new PropKey();
+                    k.fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"); k.pid = 14;
+                    IntPtr pv = Marshal.AllocHGlobal(32);
+                    for (int b = 0; b < 32; b += 8) Marshal.WriteInt64(pv, b, 0);
+                    try
+                    {
+                        ps.GetValue(ref k, pv);
+                        IntPtr s = Marshal.ReadIntPtr(pv, 8);
+                        if (s != IntPtr.Zero) d.Name = Marshal.PtrToStringUni(s);
+                    }
+                    catch { }
+                    PropVariantClear(pv);
+                    Marshal.FreeHGlobal(pv);
+                    list.Add(d);
+                }
+            }
+            catch { }
+            return list;
+        }
     }
 
     [ComImport, Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -66,10 +132,21 @@ namespace LiteRecorder
         int len;
         Thread thread;
         volatile bool stop;
+        readonly string deviceId;
         public string Error;
         public bool Ok;
+        public volatile bool Dead;        // capture thread ended unexpectedly (device unplugged...)
+        public volatile bool Discard = true;   // true = only meter the level, keep no audio (idle monitoring)
+        volatile int meter, recMax;
 
-        public Source(bool loopback) { this.loopback = loopback; }
+        // deviceId null = Windows default device.
+        public Source(bool loopback, string deviceId) { this.loopback = loopback; this.deviceId = deviceId; }
+
+        // Highest sample since the last call (0..32768).
+        public int ReadLevel() { int v = meter; meter = 0; return v; }
+        // Highest sample since BeginRecording().
+        public int RecordedMax { get { return recMax; } }
+        public void BeginRecording() { lock (lk) { len = 0; } recMax = 0; Discard = false; }
 
         public void Start()
         {
@@ -102,7 +179,8 @@ namespace LiteRecorder
 
                 IMMDeviceEnumerator en = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
                 IMMDevice dev;
-                en.GetDefaultAudioEndpoint(loopback ? 0 : 1, 0, out dev);
+                if (deviceId != null) en.GetDevice(deviceId, out dev);
+                else en.GetDefaultAudioEndpoint(loopback ? 0 : 1, 0, out dev);
                 Guid iid = typeof(IAudioClient).GUID;
                 object o;
                 dev.Activate(ref iid, 23, IntPtr.Zero, out o);
@@ -140,6 +218,7 @@ namespace LiteRecorder
             }
             finally
             {
+                if (!stop) Dead = true;
                 Marshal.FreeHGlobal(fmt);
                 if (cap != null) Marshal.ReleaseComObject(cap);
                 if (client != null) Marshal.ReleaseComObject(client);
@@ -149,11 +228,31 @@ namespace LiteRecorder
 
         void Append(IntPtr p, int bytes, bool silent)
         {
+            if (silent) { if (!Discard) AppendBytes(null, bytes); return; }
+            byte[] tmp = new byte[bytes];
+            Marshal.Copy(p, tmp, 0, bytes);
+            int peak = 0;
+            for (int i = 0; i < bytes; i += 2)
+            {
+                int v = (short)(tmp[i] | (tmp[i + 1] << 8));
+                if (v < 0) v = -v;
+                if (v > peak) peak = v;
+            }
+            if (peak > meter) meter = peak;
+            if (!Discard)
+            {
+                if (peak > recMax) recMax = peak;
+                AppendBytes(tmp, bytes);
+            }
+        }
+
+        void AppendBytes(byte[] data, int bytes)
+        {
             lock (lk)
             {
                 if (len + bytes > buf.Length) Array.Resize(ref buf, Math.Max(buf.Length * 2, len + bytes));
-                if (silent) Array.Clear(buf, len, bytes);
-                else Marshal.Copy(p, buf, len, bytes);
+                if (data == null) Array.Clear(buf, len, bytes);
+                else Buffer.BlockCopy(data, 0, buf, len, bytes);
                 len += bytes;
             }
         }
@@ -223,12 +322,13 @@ namespace LiteRecorder
         public TimeSpan Elapsed { get { return sw.Elapsed; } }
 
         // basePath has no extension; Path gets the real file path.
-        public void Start(string basePath, bool useMic, bool useSys, int kbps)
+        // The sources are owned (and metered while idle) by the UI; null = that input is off.
+        public void Start(string basePath, Source micSrc, Source sysSrc, int kbps)
         {
-            if (!useMic && !useSys) throw new InvalidOperationException("Turn on Microphone or PC sound first.");
-            if (useMic) { mic = new Source(false); mic.Start(); if (!mic.Ok) { Warning = "No microphone found" + (mic.Error != null ? " (" + mic.Error + ")" : "") + "."; mic = null; } }
-            if (useSys) { sys = new Source(true); sys.Start(); if (!sys.Ok) { Warning = (Warning != null ? Warning + " " : "") + "PC sound could not be captured."; sys = null; } }
-            if (mic == null && sys == null) throw new InvalidOperationException(Warning ?? "No audio device available.");
+            mic = micSrc; sys = sysSrc;
+            if (mic == null && sys == null) throw new InvalidOperationException("Turn on Microphone or PC sound first.");
+            if (mic != null) mic.BeginRecording();
+            if (sys != null) sys.BeginRecording();
 
             // The encoder lives entirely on the mixer thread (COM objects must not be created on the UI thread
             // and used from another one, or Stop() would deadlock).
@@ -239,8 +339,8 @@ namespace LiteRecorder
             ready.WaitOne();
             if (startError != null)
             {
-                if (mic != null) mic.Stop();
-                if (sys != null) sys.Stop();
+                if (mic != null) mic.Discard = true;
+                if (sys != null) sys.Discard = true;
                 throw new InvalidOperationException(startError);
             }
         }
@@ -269,10 +369,10 @@ namespace LiteRecorder
                 try { MixTo((sw.ElapsedMilliseconds - 150) * Fmt.Rate / 1000); }
                 catch (Exception ex) { WriteError = ex.Message; stop = true; }
             }
-            if (mic != null) mic.Stop();
-            if (sys != null) sys.Stop();
             sw.Stop();
             try { MixTo(sw.ElapsedMilliseconds * Fmt.Rate / 1000); } catch (Exception ex) { WriteError = WriteError ?? ex.Message; }
+            if (mic != null) mic.Discard = true;
+            if (sys != null) sys.Discard = true;
             try { enc.Close(); } catch (Exception ex) { WriteError = WriteError ?? ex.Message; }
         }
 
