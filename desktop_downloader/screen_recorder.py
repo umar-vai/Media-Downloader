@@ -696,13 +696,13 @@ class RegionBorder:
 
 
 class ClickHighlighter:
-    """Shows a coloured ring where the mouse is clicked (yellow = left, red = right).
+    """Shows a ripple around the cursor when the mouse is clicked (yellow = left, red = right).
 
-    The ring is a small click-through window, so it is part of the screen and gets
+    The ripple is a small click-through window, so it is part of the screen and gets
     recorded like everything else; nothing has to be added to the video afterwards.
     """
 
-    SIZE = 56
+    SIZE = 110
 
     def __init__(self, master: tk.Misc) -> None:
         self.master = master
@@ -733,7 +733,7 @@ class ClickHighlighter:
             restore_foreground(previous)
         self._state = (False, False)
         self._after: str | None = None
-        self._hide_after: str | None = None
+        self._ripple: tuple[float, str] | None = None
         self.active = False
 
     def start(self) -> None:
@@ -744,6 +744,7 @@ class ClickHighlighter:
 
     def stop(self) -> None:
         self.active = False
+        self._ripple = None
         if self._after:
             try:
                 self.master.after_cancel(self._after)
@@ -768,36 +769,63 @@ class ClickHighlighter:
         except tk.TclError:
             pass
 
+    # Ripple, like Bandicam: shown only after a click, rings spread from the cursor like a water
+    # drop and fade out; the whole effect follows the cursor while it lasts.
+    DURATION = 0.75   # seconds
+    RINGS = 3
+    RING_DELAY = 0.13  # seconds between rings
+
     def _poll(self) -> None:
         if not self.active:
             return
         try:
             left, right, x, y = _mouse_state()
             if left and not self._state[0]:
-                self._show(x, y, RING_COLORS["left"])
+                self._start_ripple(RING_COLORS["left"])
             elif right and not self._state[1]:
-                self._show(x, y, RING_COLORS["right"])
+                self._start_ripple(RING_COLORS["right"])
             self._state = (left, right)
+            if self._ripple is not None:
+                self._draw_ripple(x, y)
         except Exception:
             pass
         self._after = self.master.after(15, self._poll)
 
-    def _show(self, x: int, y: int, color: str) -> None:
+    def _start_ripple(self, color: str) -> None:
+        self._ripple = (time.monotonic(), color)
+
+    def _draw_ripple(self, x: int, y: int) -> None:
+        started, color = self._ripple  # type: ignore[misc]
+        elapsed = time.monotonic() - started
+        total = self.DURATION + self.RING_DELAY * (self.RINGS - 1)
+        if elapsed >= total:
+            self._ripple = None
+            self._hide()
+            return
         size = self.SIZE
+        half = size / 2
         self.canvas.delete("all")
-        self.canvas.create_oval(4, 4, size - 4, size - 4, outline=color, width=5)
-        self.canvas.create_oval(size / 2 - 5, size / 2 - 5, size / 2 + 5, size / 2 + 5, fill=color, outline=color)
+        for ring in range(self.RINGS):
+            p = (elapsed - ring * self.RING_DELAY) / self.DURATION
+            if p <= 0 or p >= 1:
+                continue
+            ease = 1 - (1 - p) ** 2  # fast at first, slowing like a spreading wave
+            radius = 6 + ease * (half - 10)
+            width = max(1.0, 5.0 * (1 - p))
+            self.canvas.create_oval(half - radius, half - radius, half + radius, half + radius,
+                                    outline=color, width=width)
+        # One alpha for the whole window: the newest ring is the most visible one.
+        alpha = max(0.0, min(0.95, 1.0 - (elapsed / total) ** 2))
+        try:
+            self.window.attributes("-alpha", alpha)
+        except tk.TclError:
+            pass
         self.canvas.update_idletasks()
-        if not show_without_focus(self.window, x - size // 2, y - size // 2, size, size):
-            self.window.geometry(f"{size}x{size}+{x - size // 2}+{y - size // 2}")
+        left, top = int(x - half), int(y - half)
+        if not show_without_focus(self.window, left, top, size, size):
+            self.window.geometry(f"{size}x{size}+{left}+{top}")
             self.window.deiconify()
             self.window.lift()
-        if self._hide_after:
-            try:
-                self.master.after_cancel(self._hide_after)
-            except tk.TclError:
-                pass
-        self._hide_after = self.master.after(380, self._hide)
 
 
 class Countdown(tk.Toplevel):

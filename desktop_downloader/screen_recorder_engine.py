@@ -593,6 +593,69 @@ def concat_list_text(parts: list[Path]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# --------------------------------------------------------------------------- audio engine keep-alive
+class _AudioAwake(threading.Thread):
+    """Plays inaudible audio on the default speaker while anything is recording.
+
+    Windows hands out capture packets of some microphones (and of the system-sound loopback)
+    only while the audio engine is running, i.e. while some program is playing a sound.
+    Without this the microphone delivers pure silence until the user starts a video, which
+    is exactly what was seen in recordings: digital silence, then sound once something played.
+    A stream of near-silence (about -94 dBFS, far below anything audible) keeps it running.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(name="audio-awake", daemon=True)
+        self._stop_event = threading.Event()
+        self.error = ""
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        done = _com_init()
+        try:
+            import soundcard as sc  # type: ignore
+
+            speaker = sc.default_speaker()
+            block = AUDIO_RATE // 10  # 100 ms
+            rng = numpy.random.default_rng(1)
+            with speaker.player(samplerate=AUDIO_RATE, channels=AUDIO_CHANNELS, blocksize=block) as player:
+                while not self._stop_event.is_set():
+                    noise = (rng.random((block, AUDIO_CHANNELS), dtype="float32") - 0.5) * 4e-5
+                    player.play(noise)
+        except Exception as exc:  # no speaker, busy device...: recording still works as before
+            self.error = str(exc) or exc.__class__.__name__
+        finally:
+            done()
+
+
+_awake_lock = threading.Lock()
+_awake_users = 0
+_awake_thread: _AudioAwake | None = None
+
+
+def audio_awake_acquire() -> None:
+    """Start the keep-alive stream (shared by every recorder and level monitor)."""
+    global _awake_users, _awake_thread
+    if audio_backend_error():  # also imports soundcard here, before a second thread can race on it
+        return
+    with _awake_lock:
+        _awake_users += 1
+        if _awake_thread is None or not _awake_thread.is_alive():
+            _awake_thread = _AudioAwake()
+            _awake_thread.start()
+
+
+def audio_awake_release() -> None:
+    global _awake_users, _awake_thread
+    with _awake_lock:
+        _awake_users = max(0, _awake_users - 1)
+        if _awake_users == 0 and _awake_thread is not None:
+            _awake_thread.stop()
+            _awake_thread = None
+
+
 # --------------------------------------------------------------------------- audio capture
 class AudioRecorder(threading.Thread):
     """Records one soundcard source (system sound loopback or a microphone) to a WAV file.
@@ -634,6 +697,7 @@ class AudioRecorder(threading.Thread):
         return sc.default_microphone()
 
     def run(self) -> None:
+        audio_awake_acquire()  # imports soundcard before this thread's COM mode is set
         done = _com_init()
         try:
             source = self._open_source()
@@ -672,6 +736,7 @@ class AudioRecorder(threading.Thread):
         except Exception as exc:
             self.error = str(exc) or exc.__class__.__name__
         finally:
+            audio_awake_release()
             self._ready.set()
             done()
 
@@ -703,6 +768,7 @@ class LevelMonitor(threading.Thread):
         if audio_backend_error():
             self.error = audio_backend_error()
             return
+        audio_awake_acquire()  # imports soundcard before this thread's COM mode is set
         done = _com_init()
         try:
             source = AudioRecorder(Path(os.devnull), loopback=self.loopback, device=self.device)._open_source()
@@ -717,6 +783,7 @@ class LevelMonitor(threading.Thread):
             self.error = str(exc) or exc.__class__.__name__
             self.level = 0.0
         finally:
+            audio_awake_release()
             done()
 
 
