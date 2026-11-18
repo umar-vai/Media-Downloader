@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-EXTENSION_VERSION = "2.8.1"
+EXTENSION_VERSION = "2.8.2"
 
 MANIFEST = {
     "manifest_version": 3,
@@ -832,6 +832,19 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
     return true;
   }
+  if (msg.type === "md-qcount") {
+    // The page itself listed its qualities (see pageQualities in the page script).
+    if (tab) {
+      tabState(tab.id).then(state => {
+        const here = String(tab.url || "").split("#")[0];
+        state.page = here;
+        state.q = {page: here, n: Number(msg.n) || 0};
+        persist(tab.id);
+        announce(tab.id);
+      });
+    }
+    return;
+  }
   if (msg.type === "md-found") {
     // Media links written in the page itself (<video src>, <source>, og:video, playlists in
     // the player's config): listed at once, before the player requests anything.
@@ -1029,9 +1042,17 @@ CONTENT_JS = r"""
     if (site && site.link && video.url === location.href.split("#")[0]
         && !(site.page && site.page.test(location.pathname + location.search))) return;
     prefetched.add(video.url);
-    ask({type: "md-analyze", url: video.url, pageUrl: location.href, prefetch: true}).then(r => {
+    const analyze = () => ask({type: "md-analyze", url: video.url, pageUrl: location.href, prefetch: true}).then(r => {
       if (!r || !r.ok) prefetched.delete(video.url);
     });
+    if (pageOnly() && video.url === location.href.split("#")[0]) {
+      pageQualities().then(list => {
+        if (list.length) publishCount(list.length);
+        else { prefetched.delete(video.url); analyze(); }
+      });
+      return;
+    }
+    analyze();
   }
 
   function qualifies(el) {
@@ -1220,6 +1241,74 @@ CONTENT_JS = r"""
   }
   function sep() { return Object.assign(document.createElement("div"), {className: "sep"}); }
 
+  // ---------------------------------------------------------------- qualities written in the page
+  // Pornhub lists every quality of the video (a playlist link each) in the page's own player
+  // settings ("mediaDefinitions"). Reading them here needs no network access from the app,
+  // which some networks block for pornhub.com while the browser works.
+  function parseMediaDefinitions(text) {
+    const key = text.indexOf('"mediaDefinitions"');
+    if (key < 0) return [];
+    const start = text.indexOf("[", key);
+    if (start < 0) return [];
+    let depth = 0, inStr = false, esc = false, end = -1;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inStr) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
+      if (ch === '"') inStr = true;
+      else if (ch === "[") depth++;
+      else if (ch === "]") { depth--; if (depth === 0) { end = i; break; } }
+    }
+    if (end < 0) return [];
+    try { const list = JSON.parse(text.slice(start, end + 1)); return Array.isArray(list) ? list : []; }
+    catch (e) { return []; }
+  }
+
+  // [{height, url}] best first, one per height; only playlist (HLS) entries.
+  function qualityList(defs) {
+    const byHeight = new Map();
+    for (const d of defs) {
+      if (!d || String(d.format || "").toLowerCase() !== "hls") continue;
+      const url = String(d.videoUrl || "");
+      if (!/^https?:\/\//i.test(url)) continue;
+      const heights = (Array.isArray(d.quality) ? d.quality : [d.quality]).map(Number).filter(h => h > 0);
+      for (const h of heights) if (!byHeight.has(h)) byHeight.set(h, url);
+    }
+    return [...byHeight.entries()].sort((a, b) => b[0] - a[0]).map(([height, url]) => ({height, url}));
+  }
+
+  async function pageQualities() {
+    const here = location.href.split("#")[0];
+    let list = [];
+    for (const el of document.querySelectorAll("script:not([src])")) {
+      const text = el.textContent || "";
+      if (!text.includes("mediaDefinitions")) continue;
+      list = qualityList(parseMediaDefinitions(text));
+      if (list.length) break;
+    }
+    if (!list.length) {
+      try {
+        const r = await fetch(here, {credentials: "include"});
+        list = qualityList(parseMediaDefinitions(await r.text()));
+      } catch (e) {}
+    }
+    return list;
+  }
+
+  function publishCount(n) {
+    setCount(n);
+    ask({type: "md-qcount", n});
+  }
+
+  function localItems(list, title) {
+    const here = location.href.split("#")[0];
+    const base = {referer: location.href, pageUrl: here, title, kind: "media",
+      headers: {Origin: location.origin, "User-Agent": navigator.userAgent}};
+    const top = list[0];
+    return [{...base, url: top.url, quality: "Best available", best: true,
+        label: "Best quality · " + top.height + "p", detail: "Highest resolution this video offers"},
+      ...list.map(q => ({...base, url: q.url, quality: q.height + "p", label: q.height + "p", detail: ""}))];
+  }
+
   // One list for the video: the stream the player already loaded is shown at once (like
   // IDM/NDM); on video sites the app also reads the video's own link and its list replaces
   // the captured one only when it offers a higher quality. A failed lookup is shown only
@@ -1235,6 +1324,12 @@ CONTENT_JS = r"""
     const ownPage = !video.known || video.url === location.href.split("#")[0];
     const stream = ownPage && !pageOnly() ? (groups.find(g => !g.drm && g.master) || groups.find(g => !g.drm) || groups[0] || null) : null;
     let items = stream ? stream.items.slice() : [];
+    let local = null;
+    if (pageOnly() && ownPage) {
+      const list = await pageQualities();
+      if (!menuOpen || seq !== renderSeq) return;
+      if (list.length) { local = list; publishCount(list.length); items = localItems(list, pageTitle()); }
+    }
     const src = target && (target.currentSrc || target.src);
     if (!items.length && src && /^https?:/i.test(src) && !pageOnly()) {
       const audio = target.tagName === "AUDIO";
@@ -1312,7 +1407,7 @@ CONTENT_JS = r"""
     }
 
     if (items.length) showItems(items);
-    if (video.known || !items.length) lookUp(!items.length);
+    if (!local && (video.known || !items.length)) lookUp(!items.length);
     menu.appendChild(sep());
     const page = row("foot", "Send page link instead", "app finds the best quality");
     page.addEventListener("click", () => send({type: "md-send-page"}));
