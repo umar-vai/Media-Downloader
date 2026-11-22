@@ -115,6 +115,22 @@ class CapturedStreamTests(unittest.TestCase):
         )
         self.assertIsNone(preferred_page_url(self.EPORNER_PAGE, self.EPORNER_PAGE))
 
+    def test_refused_cdn_stream_falls_back_to_the_page(self):
+        from media_core.sources import page_fallback_url, preferred_page_url
+
+        stream = (
+            "https://hv-h.phncdn.com/hls/videos/202404/05/450671101/1080P_4000K_450671101.mp4/"
+            "master.m3u8?h=abc%3D&e=1795375542&f=1"
+        )
+        page = "https://www.pornhub.com/view_video.php?viewkey=6aea0fde6d177"
+        # Different domains: the captured stream is still tried first...
+        self.assertIsNone(preferred_page_url(stream, page))
+        # ...and the page is the fallback when the CDN refuses it.
+        self.assertEqual(page_fallback_url(stream, page), page)
+        self.assertIsNone(page_fallback_url(stream, stream))
+        self.assertIsNone(page_fallback_url(page, page))
+        self.assertIsNone(page_fallback_url(stream, "https://unknown-site.example/watch/1"))
+
     def test_direct_stream_has_few_attempts(self):
         attempts = extraction_attempts(self.EPORNER_HLS)
         self.assertEqual(len(attempts), 2)

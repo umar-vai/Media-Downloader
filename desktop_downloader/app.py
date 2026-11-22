@@ -43,7 +43,7 @@ from history_store import HistoryStore, make_history_entry
 from media_probe import probe_media
 from install_mode import is_installed_mode
 from media_editor import MediaEditorWindow
-from media_sources import detect_platform, platform_name, preferred_page_url
+from media_sources import detect_platform, page_fallback_url, platform_name, preferred_page_url
 from shared_engine import Cancelled as SharedCancelled, analyze_url as shared_analyze_url, download_from_analysis as shared_download_from_analysis, engine_options
 from media_core.engine import is_placeholder_title
 from batch_download import parse_batch_urls_detailed
@@ -1205,10 +1205,11 @@ class DownloaderApp(UIMixin, tk.Tk):
                 except Exception as exc:
                     LOGGER.info("Analysis failed request=%s url=%s: %s", request_id, url, " ".join(str(exc).split())[:600])
                     if fallback_url and fallback_url != url and not cancel_event.is_set():
-                        # The page could not be read: use the stream the browser captured instead.
-                        LOGGER.info("Page analysis failed request=%s, using captured stream: %s", request_id, exc)
+                        # The page could not be read: use the stream the browser captured instead,
+                        # or the captured stream was refused: read the page it was playing on.
+                        # (Kept in the settings, so a manual Retry gets the same second chance.)
+                        LOGGER.info("Analysis failed request=%s, trying fallback %s", request_id, fallback_url)
                         url = fallback_url
-                        request_settings.pop("fallback_url", None)
                         summary, extracted_info = analyze(url)
                     elif not cancel_event.is_set() and plain_file():
                         # Not a video page but a file (download.php?id=..., an attachment...): save it as-is.
@@ -2300,6 +2301,15 @@ class DownloaderApp(UIMixin, tk.Tk):
             if better:
                 extra["fallback_url"] = url
                 url = better
+            else:
+                # A stream on the site's own CDN (PornHub: phncdn.com) is tried first; if the
+                # CDN refuses it, the page is read instead, as "Paste URL" would.
+                try:
+                    page_fallback = page_fallback_url(url, page_url)
+                except Exception:
+                    page_fallback = None
+                if page_fallback:
+                    extra["fallback_url"] = page_fallback
         options = self._default_batch_options()
         quality = str(data.get("quality") or "")
         if is_valid_quality(quality):

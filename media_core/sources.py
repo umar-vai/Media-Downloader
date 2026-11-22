@@ -406,6 +406,21 @@ def preferred_page_url(stream_url: str, page_url: str) -> str | None:
     return page_url if has_dedicated_extractor(page_url) else None
 
 
+def page_fallback_url(stream_url: str, page_url: str) -> str | None:
+    """The page link to try when a captured stream cannot be read, or None.
+
+    A stream the browser captured is often short-lived or tied to the browser's session: a
+    PornHub playlist on ``hv-h.phncdn.com`` answers "request incorrect" to any other client.
+    The stream's CDN has a different domain from the page, so ``preferred_page_url`` keeps the
+    stream; when it then fails, the page (which yt-dlp's site extractor reads fresh links from,
+    like "Paste URL" does) is the way to still get the video."""
+    if not is_direct_stream_url(stream_url) or is_direct_stream_url(page_url):
+        return None
+    if not _hostname(page_url) or page_url.split("#", 1)[0] == stream_url.split("#", 1)[0]:
+        return None
+    return page_url if has_dedicated_extractor(page_url) else None
+
+
 def extraction_attempts(url: str) -> list[tuple[str, dict]]:
     """Return ordered extraction/network fallbacks for any HTTP(S) media page."""
     platform = detect_platform(url)
