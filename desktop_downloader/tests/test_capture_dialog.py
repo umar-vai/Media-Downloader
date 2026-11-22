@@ -20,7 +20,7 @@ class FakeBackend:
 
     def api(self) -> CaptureApi:
         return CaptureApi(
-            start=lambda n, f, later: (self.calls.append(("start", n, f, later)) or "rid1"),
+            start=lambda n, f, later, rem: (self.calls.append(("start", n, f, later)) or "rid1"),
             state=lambda _rid: (self.snap, self.metrics),
             pause=lambda r: self.calls.append(("pause", r)),
             resume=lambda r: self.calls.append(("resume", r)),

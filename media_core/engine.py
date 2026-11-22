@@ -432,7 +432,7 @@ def _format_eta(seconds: Any) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
-def download_from_analysis(
+def _download_from_analysis(
     *,
     url: str,
     cached_info: dict[str, Any],
@@ -811,3 +811,50 @@ def download_from_analysis(
     if on_progress:
         on_progress(1.0, "Complete")
     return output
+
+
+def _kill_ffmpeg_for(marker: str) -> None:
+    """Stop ffmpeg processes of this app that are writing the given download.
+
+    yt-dlp runs ffmpeg itself for many HLS streams and only looks at the cancel flag when
+    ffmpeg reports progress, so a cancel or pause could wait for the whole video."""
+    try:
+        import psutil
+    except ImportError:
+        return
+    needle = marker.lower().replace("/", "\\")
+    try:
+        children = psutil.Process().children(recursive=True)
+    except Exception:
+        return
+    for child in children:
+        try:
+            if "ffmpeg" not in (child.name() or "").lower():
+                continue
+            cmd = " ".join(child.cmdline()).lower().replace("/", "\\")
+            if needle in cmd:
+                child.kill()
+        except Exception:
+            continue
+
+
+def download_from_analysis(**kwargs: Any) -> Path:
+    cancel_event: threading.Event = kwargs["cancel_event"]
+    marker = str(Path(kwargs["download_dir"]).expanduser() / str(kwargs["filename"]))
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.is_set():
+            if cancel_event.wait(0.4):
+                # Keep trying for a while: ffmpeg may be started again by a retry.
+                for _ in range(10):
+                    _kill_ffmpeg_for(marker)
+                    if stop.wait(0.5):
+                        return
+                return
+
+    threading.Thread(target=watch, name="cancel-watch", daemon=True).start()
+    try:
+        return _download_from_analysis(**kwargs)
+    finally:
+        stop.set()

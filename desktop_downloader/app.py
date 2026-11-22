@@ -37,6 +37,7 @@ import theme
 import ui_kit as ui
 import download_list
 import file_download
+from title_fix import reconcile_title
 from download_queue import DownloadQueue, DownloadRequest
 from history_store import HistoryStore, make_history_entry
 from media_probe import probe_media
@@ -466,6 +467,8 @@ class DownloaderApp(UIMixin, tk.Tk):
         self._download_progress_lock = threading.Lock()
         self._latest_download_progress: dict[str, dict[str, Any]] = {}
         self._latest_download_metrics: dict[str, dict[str, Any]] = {}
+        self._stopping_workers: set[str] = set()   # stopped by force, thread still winding down
+        self._forced_cancelled: set[str] = set()
         self._capture_ids: set[str] = set()   # downloads shown in their own window: no notifications
         self._capture_dialogs: list[Any] = []
         self._download_activity_after_id: str | None = None
@@ -1448,6 +1451,16 @@ class DownloaderApp(UIMixin, tk.Tk):
                     data = payload.get("data")
                     request_state = self.download_queue.get(request_id)
 
+                    if request_id in self._stopping_workers and kind != "download_finished":
+                        # This worker was stopped by force (cancel/pause took too long): whatever it
+                        # still reports is stale. A file it managed to finish after a cancel goes away.
+                        if kind == "download_done" and request_id in self._forced_cancelled:
+                            try:
+                                Path(str((data or {}).get("path") or "")).unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                        continue
+
                     if kind == "download_status":
                         self.download_queue.update_detail(request_id, str(data or "Working…"))
                         self._schedule_download_activity_refresh(80)
@@ -1517,6 +1530,8 @@ class DownloaderApp(UIMixin, tk.Tk):
                         self._schedule_download_activity_refresh(30)
 
                     elif kind == "download_finished":
+                        self._stopping_workers.discard(request_id)
+                        self._forced_cancelled.discard(request_id)
                         self.download_cancel_events.pop(request_id, None)
                         with self._download_progress_lock:
                             self._latest_download_metrics.pop(request_id, None)
@@ -2253,6 +2268,10 @@ class DownloaderApp(UIMixin, tk.Tk):
             extra["title_hint"] = title
         page_url = str(data.get("pageUrl") or "").strip()
         kind = str(data.get("kind") or "")
+        if title and kind != "file":
+            # A site may keep the title of another episode: the address knows which one is playing.
+            title = reconcile_title(title, page_url)[:180]
+            extra["title_hint"] = title
         # A download the browser started ("file"), or a right-clicked link to a zip/exe/pdf...,
         # is saved as-is instead of being read as a video page.
         direct = kind == "file" or (kind != "media" and file_download.looks_like_file(url))
@@ -2320,17 +2339,25 @@ class DownloaderApp(UIMixin, tk.Tk):
             )
         except Exception:
             folder = self.download_dir
-        if os.path.normcase(str(folder)) == os.path.normcase(str(self.download_dir)):
-            last = str(self.settings.get("capture_last_dir") or "")
-            if last and os.path.isdir(last):
-                folder = Path(last)
-        host = urlsplit(site_url).netloc
+        host = urlsplit(site_url).netloc.lower()
+        ext = os.path.splitext(name)[1].lower() if direct else ""
+        remembered = dict(self.settings.get("capture_dirs") or {})
+        for key in ((f"ext:{ext}" if ext else ""), f"site:{host}"):
+            saved = str(remembered.get(key) or "") if key else ""
+            if saved and os.path.isdir(saved):
+                folder = Path(saved)
+                break
+        else:
+            if os.path.normcase(str(folder)) == os.path.normcase(str(self.download_dir)):
+                last = str(self.settings.get("capture_last_dir") or "")
+                if last and os.path.isdir(last):
+                    folder = Path(last)
         try:
             size = int(data.get("fileSize") or 0) if direct else 0
         except (TypeError, ValueError):
             size = 0
 
-        def start(final_name: str, folder_text: str, hold: bool) -> str | None:
+        def start(final_name: str, folder_text: str, hold: bool, remember: dict[str, bool]) -> str | None:
             ex = dict(extra)
             if direct:
                 cleaned = file_download.clean_filename(final_name, "")
@@ -2344,6 +2371,13 @@ class DownloaderApp(UIMixin, tk.Tk):
                 return None
             self._capture_ids.add(ids[0])
             self.settings["capture_last_dir"] = folder_text
+            if remember.get("ext") or remember.get("site"):
+                saved = dict(self.settings.get("capture_dirs") or {})
+                if remember.get("ext") and ext:
+                    saved[f"ext:{ext}"] = folder_text
+                if remember.get("site") and host:
+                    saved[f"site:{host}"] = folder_text
+                self.settings["capture_dirs"] = saved
             save_settings(self.settings)
             return ids[0]
 
@@ -2366,7 +2400,7 @@ class DownloaderApp(UIMixin, tk.Tk):
         self._capture_dialogs = [d for d in self._capture_dialogs if _widget_alive(d)]
         dialog = CaptureDialog(
             self, api, name=name, folder=str(folder), source=host, size_bytes=size,
-            is_file=direct, offset=len(self._capture_dialogs),
+            is_file=direct, offset=len(self._capture_dialogs), ext=ext, host=host,
         )
         self._capture_dialogs.append(dialog)
 
@@ -2526,11 +2560,33 @@ class DownloaderApp(UIMixin, tk.Tk):
             if event is not None:
                 event.set()
             self._set_status("Pausing download…", "working")
+            self.after(3000, lambda: self._force_stop(request_id))
         elif state == "paused":
             self._set_status("Download paused", "ready")
         self._schedule_download_activity_refresh(20)
 
+    def _force_stop(self, request_id: str) -> None:
+        """Pause/cancel was asked but the worker is stuck (a slow fragment, ffmpeg...): settle it now."""
+        snap = self.download_queue.get(request_id)
+        if snap is None or snap.get("status") != "cancelling":
+            return
+        self._stopping_workers.add(request_id)
+        if request_id in self._pause_ids:
+            self._pause_ids.discard(request_id)
+            self.download_queue.mark_paused(request_id)
+            self._set_status("Download paused", "ready")
+        else:
+            self._forced_cancelled.add(request_id)
+            self.download_queue.cancel(request_id)
+            self._record_history(request_id, "cancelled")
+            self._set_status("Download cancelled", "cancelled")
+        self._schedule_download_activity_refresh(20)
+
     def resume_download(self, request_id: str) -> None:
+        if request_id in self._stopping_workers:
+            # The old worker is still winding down; starting a second one would fight over the files.
+            self.after(1000, lambda: self.resume_download(request_id))
+            return
         if self.download_queue.resume(request_id):
             self._set_status("Download resumed", "working")
             self._start_available_downloads()
@@ -2554,6 +2610,7 @@ class DownloaderApp(UIMixin, tk.Tk):
             if event is not None:
                 event.set()
             self._set_status("Cancelling download…", "working")
+            self.after(3000, lambda: self._force_stop(request_id))
         elif state == "cancelled":
             self._set_status("Queued download cancelled", "cancelled")
             self._start_available_downloads()

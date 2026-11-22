@@ -29,7 +29,7 @@ class CaptureApi:
     def __init__(
         self,
         *,
-        start: Callable[[str, str, bool], str | None],
+        start: Callable[[str, str, bool, dict[str, bool]], str | None],
         state: Callable[[str], tuple[dict[str, Any] | None, dict[str, Any]]],
         pause: Callable[[str], None],
         resume: Callable[[str], None],
@@ -82,6 +82,8 @@ class CaptureDialog(tk.Toplevel):
         size_bytes: int = 0,
         is_file: bool = True,
         offset: int = 0,
+        ext: str = "",
+        host: str = "",
     ) -> None:
         super().__init__(master)
         self.withdraw()
@@ -100,6 +102,10 @@ class CaptureDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Escape>", lambda _e: self._on_escape())
 
+        self._ext = ext
+        self._host = host
+        self.remember_ext = tk.BooleanVar(self, value=False)
+        self.remember_site = tk.BooleanVar(self, value=False)
         self.name_var = tk.StringVar(self, value=name)
         self.folder_var = tk.StringVar(self, value=folder)
         self._source = source
@@ -152,7 +158,7 @@ class CaptureDialog(tk.Toplevel):
         self._button_widgets = []
         self.unbind("<Return>")
         for text, command, default in reversed(items):
-            button = ttk.Button(self.buttons, text=text, command=command, width=13,
+            button = ttk.Button(self.buttons, text=text, command=command, width=14,
                                 default="active" if default else "normal")
             button.pack(side="right", padx=(GAP, 0))
             self._button_widgets.append(button)
@@ -177,9 +183,17 @@ class CaptureDialog(tk.Toplevel):
         ttk.Entry(body, textvariable=self.folder_var, width=50).grid(
             row=3, column=1, sticky="ew", padx=(GAP, 0))
         ttk.Button(body, text="Browse…", command=self._browse).grid(row=3, column=2, padx=(GAP, 0))
+        row = 4
+        if self._ext:
+            ttk.Checkbutton(body, text=f"Always save {self._ext} files in this folder",
+                            variable=self.remember_ext).grid(row=row, column=1, columnspan=2, sticky="w", pady=(GAP, 0))
+            row += 1
+        if self._host:
+            ttk.Checkbutton(body, text=f"Always save downloads from {self._host} in this folder",
+                            variable=self.remember_site).grid(row=row, column=1, columnspan=2, sticky="w")
         self._set_buttons([
-            ("Download Now", lambda: self._begin(False), True),
-            ("Download Later", lambda: self._begin(True), False),
+            ("Download", lambda: self._begin(False), True),
+            ("Later", lambda: self._begin(True), False),
             ("Cancel", self._on_close, False),
         ])
         self.status.configure(text="")
@@ -210,7 +224,9 @@ class CaptureDialog(tk.Toplevel):
             self.status.configure(text=f"Cannot use that folder: {exc.strerror or exc}")
             return
         try:
-            request_id = self._api.start(name, folder, later)
+            request_id = self._api.start(
+                name, folder, later,
+                {"ext": bool(self.remember_ext.get()), "site": bool(self.remember_site.get())})
         except Exception as exc:  # noqa: BLE001
             self.status.configure(text=f"Could not start: {exc}"[:90])
             return
@@ -355,8 +371,9 @@ class CaptureDialog(tk.Toplevel):
         self._api.resume(self._request_id)
 
     def _cancel(self) -> None:
-        if messagebox.askyesno("Media Downloader", "Cancel this download?", parent=self):
-            self._api.cancel(self._request_id)
+        # Cancelling closes the window at once; the app finishes stopping in the background.
+        self._api.cancel(self._request_id)
+        self._on_close()
 
     def _retry(self) -> None:
         self._api.retry(self._request_id)
