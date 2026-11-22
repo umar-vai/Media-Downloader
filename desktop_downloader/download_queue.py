@@ -15,6 +15,9 @@ MAX_OUTSTANDING = 600
 _RATE_LIMIT_RE = re.compile(r"429|too many requests|rate.?limit", re.IGNORECASE)
 RATE_LIMIT_COOLDOWN = 120.0
 RATE_LIMIT_CONCURRENCY = 2
+# A batch item that keeps failing is given up after this many automatic retries (it used to
+# retry forever, downloading the same video again and again).
+MAX_BATCH_AUTO_RETRIES = 6
 
 
 @dataclass
@@ -230,6 +233,8 @@ class DownloadQueue:
         with self._lock:
             request = self._find_locked(request_id)
             if request is None or not request.payload.get("batch_id"):
+                return None
+            if int(request.payload.get("auto_attempts") or 0) >= MAX_BATCH_AUTO_RETRIES:
                 return None
             attempts = int(request.payload.get("auto_attempts") or 0) + 1
             request.payload["auto_attempts"] = attempts

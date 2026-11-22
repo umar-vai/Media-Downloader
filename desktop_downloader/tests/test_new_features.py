@@ -51,6 +51,18 @@ class QueueRetryTests(unittest.TestCase):
         self.assertTrue(queue.release_auto_retry(item.id))
         self.assertEqual(len(queue.start_available()), 1)
 
+    def test_auto_retry_gives_up_after_limit(self) -> None:
+        from download_queue import MAX_BATCH_AUTO_RETRIES
+
+        queue = DownloadQueue()
+        item = queue.enqueue({"url": "https://e.com/a", "batch_id": "b"})
+        queue.start_available()
+        for _ in range(MAX_BATCH_AUTO_RETRIES):
+            self.assertIsNotNone(queue.schedule_auto_retry(item.id, "boom"))
+            self.assertTrue(queue.release_auto_retry(item.id))
+            queue.start_available()
+        self.assertIsNone(queue.schedule_auto_retry(item.id, "boom"))
+
     def test_single_download_is_not_auto_retried(self) -> None:
         queue = DownloadQueue()
         item = queue.enqueue({"url": "https://e.com/a"})

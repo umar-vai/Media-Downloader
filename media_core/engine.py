@@ -12,6 +12,7 @@ from imageio_ffmpeg import get_ffmpeg_exe
 
 from . import options as engine_options
 from .browser_resolver import resolve_with_installed_browser
+from .png_disguise import strip_png_disguise
 from .sources import (
     browser_session_attempts,
     detect_platform,
@@ -597,6 +598,15 @@ def _download_from_analysis(
                     bits.insert(0, f"Part {index}/{max(expected_streams, len(stream_state))}")
                 on_progress(overall_progress(), " • ".join(bits) or "Downloading")
         elif status == "finished":
+            # Some sites hide each HLS segment behind a fake PNG image; ffmpeg then cannot merge
+            # the streams at all. Clean the stream now, before yt-dlp merges it.
+            finished_file = str(data.get("filename") or "")
+            if finished_file:
+                try:
+                    if strip_png_disguise(finished_file) and on_status:
+                        on_status("Removed fake image headers from the stream")
+                except OSError:
+                    pass
             state["fraction"] = 1.0
             state["finished"] = 1.0
             finished_bytes = float(data.get("total_bytes") or data.get("downloaded_bytes") or 0)
@@ -868,11 +878,17 @@ def download_from_analysis(**kwargs: Any) -> Path:
         except RuntimeError as exc:
             if "Error opening output files" not in str(exc) or cancel_event.is_set():
                 raise
-        import uuid
+        import hashlib
 
         wanted = str(kwargs["filename"])
         folder = Path(kwargs["download_dir"]).expanduser()
-        temp_kwargs = {**kwargs, "filename": "dl_" + uuid.uuid4().hex[:10]}
+        # The same short name every time for this video: a later retry finds the streams it
+        # already downloaded instead of fetching the whole video again under a new random name.
+        # Links often carry a short-lived token, so the title identifies the video; only a
+        # placeholder title ("Untitled") needs the link to keep different videos apart.
+        source = str(kwargs.get("url") or "") if is_placeholder_title(wanted) else ""
+        key = f"{source}\n{wanted}\n{kwargs.get('mode', '')}".encode("utf-8", "replace")
+        temp_kwargs = {**kwargs, "filename": "dl_" + hashlib.sha1(key).hexdigest()[:10]}
         produced = _download_from_analysis(**temp_kwargs, _safe_mode=2)
         target = folder / (_available_name(folder, wanted) + produced.suffix)
         produced.replace(target)

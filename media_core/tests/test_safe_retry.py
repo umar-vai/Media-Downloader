@@ -37,6 +37,26 @@ class SafeRetryTests(unittest.TestCase):
             self.assertEqual([m for _n, m in seen], [0, 1, 2])
             self.assertTrue(seen[2][0].startswith("dl_"))
 
+    def test_plain_name_is_the_same_on_every_retry(self) -> None:
+        # A random name made every auto-retry download the whole video again.
+        names: list[str] = []
+
+        def fake(**kwargs):
+            if kwargs.get("_safe_mode", 0) < 2:
+                raise RuntimeError("Error opening output files: Invalid argument")
+            names.append(kwargs["filename"])
+            raise RuntimeError("Error opening output files: Invalid argument")
+
+        with mock.patch.object(engine, "_download_from_analysis", fake):
+            for _ in range(2):
+                with self.assertRaises(RuntimeError):
+                    engine.download_from_analysis(
+                        url="u?token=1", cached_info={}, download_dir=Path("."), filename="Show Ep 1",
+                        mode="Video", video_quality="b", audio_format="mp3", audio_quality="1",
+                        cancel_event=threading.Event())
+        self.assertEqual(len(names), 2)
+        self.assertEqual(names[0], names[1])
+
     def test_other_errors_are_not_retried(self) -> None:
         calls = []
 

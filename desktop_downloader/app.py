@@ -61,7 +61,10 @@ APP_USER_MODEL_ID = "TeamFahad.MediaDownloader"
 MAX_AUTO_RETRIES = 3
 AUDIO_FORMATS = {"MP3", "M4A", "FLAC", "OPUS", "WAV"}
 # Batch auto-retry never loops on errors that can only be fixed by the user.
-_NO_AUTO_RETRY = re.compile(r"drm.protected|widevine|valid http|no space left", re.IGNORECASE)
+# A merge that ffmpeg refuses ("Error opening output files") fails the same way every time.
+_NO_AUTO_RETRY = re.compile(
+    r"drm.protected|widevine|valid http|no space left|error opening output files", re.IGNORECASE
+)
 _PERMANENT_ERRORS = re.compile(
     r"unsupported url|private video|sign in|log in|login|members.only|removed|copyright|"
     r"not available in your country|age.restricted|video unavailable|does not exist|no space left",
