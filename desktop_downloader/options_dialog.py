@@ -137,6 +137,7 @@ class OptionsDialog(native.Dialog):
             "open_editor_after_download": boolean("open_editor_after_download", False),
             "confirm_before_exit": boolean("confirm_before_exit", True),
             "close_to_tray": boolean("close_to_tray", True),
+            "capture_dialog": boolean("capture_dialog", True),
             "start_with_windows": boolean("start_with_windows", False),
             "auto_check_updates": boolean("auto_check_updates", True),
             "auto_download_updates": boolean("auto_download_updates", False),
@@ -190,6 +191,8 @@ class OptionsDialog(native.Dialog):
         check(box, "Open finished downloads in the media editor", v["open_editor_after_download"], 1)
         check(box, "Global hotkeys: Ctrl+Alt+D downloads the copied link, Ctrl+Alt+M its audio",
               v["clipboard_hotkey"], 2)
+        check(box, "Ask where to save (with a progress window) for downloads started in the browser",
+              v["capture_dialog"], 3)
 
         box = group(tab, "Appearance", row=2, column=0, sticky="ew", pady=(PAD, 0))
         ttk.Label(box, text="Theme:").grid(row=0, column=0, sticky="w", padx=(0, GAP))

@@ -282,7 +282,7 @@ class HandOverTests(unittest.TestCase):
     def fake(self) -> SimpleNamespace:
         calls: list[tuple] = []
         return SimpleNamespace(
-            calls=calls, tray=None,
+            calls=calls, tray=None, settings={"capture_dialog": False},
             _default_batch_options=lambda mode=None: {"mode": "Video", "video_quality": "720p",
                                                        "audio_format": "MP3", "audio_quality": "192"},
             _enqueue_batch_downloads=lambda text, options, extra=None: calls.append((text, options, extra)),

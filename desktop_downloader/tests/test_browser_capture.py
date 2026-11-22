@@ -69,7 +69,7 @@ class ExternalDownloadTests(unittest.TestCase):
         calls: list[tuple] = []
         fake = SimpleNamespace(
             calls=calls,
-            tray=None,
+            tray=None, settings={"capture_dialog": False},
             _default_batch_options=lambda mode=None: {
                 "mode": "Video", "video_quality": "720p", "audio_format": "MP3", "audio_quality": "192",
             },

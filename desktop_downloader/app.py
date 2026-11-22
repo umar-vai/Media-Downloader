@@ -99,6 +99,13 @@ def _recent_ext_analysis(url: str) -> tuple[dict[str, Any], dict[str, Any]] | No
     return copy.deepcopy(hit[1]), copy.deepcopy(hit[2])
 
 
+def _widget_alive(widget: Any) -> bool:
+    try:
+        return bool(widget.winfo_exists())
+    except Exception:
+        return False
+
+
 def _link_label(url: str) -> str:
     """A readable name for a link that could not be read yet (instead of "Batch item 1")."""
     parts = urlsplit(url)
@@ -228,6 +235,7 @@ def default_settings() -> dict[str, Any]:
         "open_editor_after_download": False,
         "confirm_before_exit": True,
         "close_to_tray": True,
+        "capture_dialog": True,
         "start_with_windows": False,
         "default_mode": "Video",
         "video_quality": "720p",
@@ -300,6 +308,7 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         ("open_editor_after_download", False),
         ("confirm_before_exit", True),
         ("close_to_tray", True),
+        ("capture_dialog", True),
         ("start_with_windows", False),
         ("skip_existing", True),
         ("organize_by_site", False),
@@ -457,6 +466,8 @@ class DownloaderApp(UIMixin, tk.Tk):
         self._download_progress_lock = threading.Lock()
         self._latest_download_progress: dict[str, dict[str, Any]] = {}
         self._latest_download_metrics: dict[str, dict[str, Any]] = {}
+        self._capture_ids: set[str] = set()   # downloads shown in their own window: no notifications
+        self._capture_dialogs: list[Any] = []
         self._download_activity_after_id: str | None = None
 
         self.settings = load_settings()
@@ -598,7 +609,7 @@ class DownloaderApp(UIMixin, tk.Tk):
         for item in snapshots:
             if item.get("status") == "completed" and item["id"] not in self._notified_done:
                 self._notified_done.add(item["id"])
-                if hidden and self.tray is not None:
+                if hidden and self.tray is not None and item["id"] not in self._capture_ids:
                     self.tray.notify(str(item.get("name") or "Download"), "Download complete")
 
     def _close_app(self, *, for_update: bool = False) -> None:
@@ -951,7 +962,14 @@ class DownloaderApp(UIMixin, tk.Tk):
         self.show_page("batch")
 
     def _enqueue_batch_downloads(
-        self, text: str, options: dict[str, str], extra: dict[str, Any] | None = None
+        self,
+        text: str,
+        options: dict[str, str],
+        extra: dict[str, Any] | None = None,
+        *,
+        target_dir_override: Path | None = None,
+        hold: bool = False,
+        ids_out: list[str] | None = None,
     ) -> tuple[str, int, int]:
         urls, duplicates = parse_batch_urls(text)
         mode = str(options.get("mode") or "Video")
@@ -984,6 +1002,8 @@ class DownloaderApp(UIMixin, tk.Tk):
                 organize_by_site=bool(self.settings.get("organize_by_site", False)),
                 platform=platform_name(site_url),
             )
+            if target_dir_override is not None:
+                target_dir = target_dir_override
             request_settings = {
                 **(extra or {}),
                 "batch_id": batch_id,
@@ -999,7 +1019,10 @@ class DownloaderApp(UIMixin, tk.Tk):
                 "history_quality": url_quality if mode == "Video" else f"{audio_format} {bitrate} kbps",
                 "history_duration": 0,
             }
-            file_name = str((extra or {}).get("file_name") or "") if len(urls) == 1 else ""
+            file_name = (
+                str((extra or {}).get("file_name") or (extra or {}).get("custom_title") or "")
+                if len(urls) == 1 else ""
+            )
             payloads.append({
                 "url": url,
                 "name": file_name or _link_label(url),
@@ -1009,7 +1032,13 @@ class DownloaderApp(UIMixin, tk.Tk):
                 "request_settings": request_settings,
                 "cached_info": None,
             })
-        self.download_queue.enqueue_batch(payloads)
+        requests = self.download_queue.enqueue_batch(payloads)
+        if ids_out is not None:
+            ids_out.extend(request.id for request in requests)
+        if hold:
+            # "Download later": waits in the list, paused, until the user resumes it.
+            for request in requests:
+                self.download_queue.pause(request.id)
         LOGGER.info(
             "Desktop batch queued batch=%s links=%s duplicates_skipped=%s",
             batch_id, len(payloads), duplicates
@@ -1185,8 +1214,12 @@ class DownloaderApp(UIMixin, tk.Tk):
                 # Streams captured by the browser extension carry the page title; a bare
                 # .m3u8 would otherwise be saved as "master" or "index".
                 title_hint = str(request_settings.get("title_hint") or "").strip()
+                custom_title = str(request_settings.get("custom_title") or "").strip()
+                if custom_title:
+                    # The name the user confirmed in the download window always wins.
+                    summary = {**summary, "title": custom_title}
                 # "Untitled" (a site that hides its title) never replaces a real title.
-                if title_hint and not is_placeholder_title(title_hint):
+                elif title_hint and not is_placeholder_title(title_hint):
                     summary = {**summary, "title": title_hint}
                 name = self._reserve_name(
                     request_id,
@@ -2253,14 +2286,89 @@ class DownloaderApp(UIMixin, tk.Tk):
                 path = None
             if path is not None:
                 extra["cookiefile"] = str(path)
+        if bool(self.settings.get("capture_dialog", True)):
+            self._open_capture_dialog(url, options, extra, direct=direct, data=data)
+            return
         try:
             self._enqueue_batch_downloads(url, options, extra=extra)
         except (ValueError, OSError) as exc:
             LOGGER.warning("Extension link rejected: %s", exc)
-            return
-        if self.tray is not None:
-            message = f"Downloading {extra['file_name']}" if direct else "Link added from the browser."
-            self.tray.notify(message, "Media Downloader")
+
+    # ------------------------------------------------------------------ download window
+    def _open_capture_dialog(
+        self, url: str, options: dict[str, str], extra: dict[str, Any], *, direct: bool, data: dict[str, Any]
+    ) -> None:
+        from capture_dialog import CaptureApi, CaptureDialog
+
+        page_url = str(extra.get("page_url") or "")
+        site_url = page_url or url
+        if direct:
+            name = str(extra.get("file_name") or "download")
+        else:
+            name = str(extra.get("title_hint") or "")
+            if not name or is_placeholder_title(name):
+                name = urlsplit(site_url).path.rstrip("/").split("/")[-1] or urlsplit(site_url).netloc or "video"
+            name = " ".join(name.split())[:150]
+        try:
+            folder, _quality = resolve_target(
+                site_url,
+                rules=parse_rules(str(self.settings.get("folder_rules") or "")),
+                default_dir=self.download_dir,
+                default_quality=str(options.get("video_quality") or "720p"),
+                organize_by_site=bool(self.settings.get("organize_by_site", False)),
+                platform=platform_name(site_url),
+            )
+        except Exception:
+            folder = self.download_dir
+        if os.path.normcase(str(folder)) == os.path.normcase(str(self.download_dir)):
+            last = str(self.settings.get("capture_last_dir") or "")
+            if last and os.path.isdir(last):
+                folder = Path(last)
+        host = urlsplit(site_url).netloc
+        try:
+            size = int(data.get("fileSize") or 0) if direct else 0
+        except (TypeError, ValueError):
+            size = 0
+
+        def start(final_name: str, folder_text: str, hold: bool) -> str | None:
+            ex = dict(extra)
+            if direct:
+                cleaned = file_download.clean_filename(final_name, "")
+                ex["file_name"] = cleaned or ex.get("file_name") or "download"
+            else:
+                ex["custom_title"] = final_name
+            ids: list[str] = []
+            self._enqueue_batch_downloads(
+                url, options, extra=ex, target_dir_override=Path(folder_text), hold=hold, ids_out=ids)
+            if not ids:
+                return None
+            self._capture_ids.add(ids[0])
+            self.settings["capture_last_dir"] = folder_text
+            save_settings(self.settings)
+            return ids[0]
+
+        def state(request_id: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+            with self._download_progress_lock:
+                metrics = dict(self._latest_download_metrics.get(request_id) or {})
+            return self.download_queue.get(request_id), metrics
+
+        def deleted(_request_id: str, _path: str) -> None:
+            try:
+                self.history_store.prune_missing()
+                self._invalidate_history()
+            except Exception:
+                pass
+
+        api = CaptureApi(
+            start=start, state=state, pause=self.pause_download, resume=self.resume_download,
+            cancel=self.cancel_download, retry=self.retry_download, deleted=deleted,
+        )
+        self._capture_dialogs = [d for d in self._capture_dialogs if _widget_alive(d)]
+        dialog = CaptureDialog(
+            self, api, name=name, folder=str(folder), source=host, size_bytes=size,
+            is_file=direct, offset=len(self._capture_dialogs),
+        )
+        self._capture_dialogs.append(dialog)
 
     def export_browser_extension(self) -> None:
         from browser_extension import export_extension

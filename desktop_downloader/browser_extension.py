@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-EXTENSION_VERSION = "2.8.4"
+EXTENSION_VERSION = "2.9.0"
 
 MANIFEST = {
     "manifest_version": 3,
@@ -269,7 +269,7 @@ function notify(message) {
 
 async function sendAndNotify(payload) {
   const result = await sendToApp(payload);
-  notify(result.ok ? "Added to Media Downloader." : result.error);
+  if (!result.ok) notify(result.error);   // success is silent: the app opens its own window
   return result;
 }
 
@@ -780,7 +780,6 @@ async function captureDownload(item) {
   if (result.ok) {
     try { await api.downloads.cancel(item.id); } catch (e) {}
     try { await api.downloads.erase({id: item.id}); } catch (e) {}
-    notify(`Downloading with Media Downloader: ${name || url}`);
   } else {
     capturedIds.delete(item.id);
     try { await api.downloads.resume(item.id); } catch (e) {}
@@ -855,8 +854,19 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === "md-send") {
     const item = msg.item || {};
-    const pageUrl = item.pageUrl || (tab && tab.url) || msg.pageUrl || "";
-    sendToApp({...item, pageUrl, title: item.title || cleanTitle(tab && tab.title) || msg.title || ""}).then(sendResponse);
+    const streamPage = item.pageUrl || (tab && tab.url) || msg.pageUrl || "";
+    // The title and address are read again at the moment of the click: a stream remembers the
+    // tab as it was when the player first loaded it, which on sites that switch videos without
+    // a full page load (anime episode lists) is often the previous video's title.
+    (async () => {
+      let fresh = null;
+      try { if (tabId !== undefined && tabId >= 0) fresh = await api.tabs.get(tabId); } catch (e) {}
+      const here = fresh && fresh.url ? fresh.url.replace(RESOLVE_RE, "") : "";
+      const samePage = !!here && (!streamPage || here.split("#")[0] === streamPage.split("#")[0]);
+      const liveTitle = samePage ? cleanTitle(fresh && fresh.title) : "";
+      const pageUrl = samePage ? here : streamPage;
+      sendToApp({...item, pageUrl, title: liveTitle || item.title || msg.title || ""}).then(sendResponse);
+    })();
     return true;
   }
   if (msg.type === "md-send-page") {
