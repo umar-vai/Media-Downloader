@@ -446,6 +446,7 @@ def _download_from_analysis(
     on_status: StatusCallback | None = None,
     on_progress: ProgressCallback | None = None,
     on_metrics: MetricsCallback | None = None,
+    _safe_mode: int = 0,
 ) -> Path:
     download_dir = Path(download_dir).expanduser()
     download_dir.mkdir(parents=True, exist_ok=True)
@@ -660,7 +661,7 @@ def _download_from_analysis(
             metadata_pp = processor
             extra_processors.remove(processor)
     if metadata_pp is not None and mode.lower() != "audio" and isinstance(cached_info, dict):
-        tags = _merge_metadata_args(cached_info, str(filename or ""))
+        tags = _merge_metadata_args(cached_info, str(filename or "")) if _safe_mode == 0 else []
         if tags:
             opts["postprocessor_args"]["merger+ffmpeg_o"] = [*tags, *_NO_FASTSTART]
 
@@ -855,6 +856,26 @@ def download_from_analysis(**kwargs: Any) -> Path:
 
     threading.Thread(target=watch, name="cancel-watch", daemon=True).start()
     try:
-        return _download_from_analysis(**kwargs)
+        try:
+            return _download_from_analysis(**kwargs)
+        except RuntimeError as exc:
+            if "Error opening output files" not in str(exc) or cancel_event.is_set():
+                raise
+        # ffmpeg could not write the merged file (seen with some streams). Try again without the
+        # extra tags, then with a short plain file name that is renamed when it is finished.
+        try:
+            return _download_from_analysis(**kwargs, _safe_mode=1)
+        except RuntimeError as exc:
+            if "Error opening output files" not in str(exc) or cancel_event.is_set():
+                raise
+        import uuid
+
+        wanted = str(kwargs["filename"])
+        folder = Path(kwargs["download_dir"]).expanduser()
+        temp_kwargs = {**kwargs, "filename": "dl_" + uuid.uuid4().hex[:10]}
+        produced = _download_from_analysis(**temp_kwargs, _safe_mode=2)
+        target = folder / (_available_name(folder, wanted) + produced.suffix)
+        produced.replace(target)
+        return target
     finally:
         stop.set()

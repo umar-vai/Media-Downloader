@@ -67,7 +67,8 @@ class CaptureDialogTests(unittest.TestCase):
                             "result_path": str(target)}
             dialog._refresh()
             self.assertEqual(dialog._mode, "ended")
-            self.assertEqual(dialog.state_label.cget("text"), "Download complete.")
+            self.assertEqual(dialog.path_var.get(), str(target))
+            self.assertEqual(dialog.title(), "Download complete")
             self.assertEqual(dialog._last_status, "done")
             dialog._on_close()
 

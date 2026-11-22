@@ -84,6 +84,8 @@ class CaptureDialog(tk.Toplevel):
         offset: int = 0,
         ext: str = "",
         host: str = "",
+        ext_saved: bool = False,
+        site_saved: bool = False,
     ) -> None:
         super().__init__(master)
         self.withdraw()
@@ -104,8 +106,9 @@ class CaptureDialog(tk.Toplevel):
 
         self._ext = ext
         self._host = host
-        self.remember_ext = tk.BooleanVar(self, value=False)
-        self.remember_site = tk.BooleanVar(self, value=False)
+        # Ticked when this file type / site already saves into the folder shown here.
+        self.remember_ext = tk.BooleanVar(self, value=bool(ext_saved))
+        self.remember_site = tk.BooleanVar(self, value=bool(site_saved))
         self.name_var = tk.StringVar(self, value=name)
         self.folder_var = tk.StringVar(self, value=folder)
         self._source = source
@@ -274,12 +277,58 @@ class CaptureDialog(tk.Toplevel):
         elif kind == "stopping":
             self._set_buttons([("Minimize", self.iconify, False)])
         elif kind == "done":
-            self._set_buttons([("Open", self._open_file, True), ("Open folder", self._open_folder, False),
+            self._set_buttons([("Open", self._open_file, True), ("Show in folder", self._open_folder, False),
                                ("Delete", self._delete_file, False), ("Close", self._on_close, False)])
         elif kind == "failed":
             self._set_buttons([("Retry", self._retry, True), ("Close", self._on_close, False)])
         else:  # cancelled, deleted, removed
             self._set_buttons([("Close", self._on_close, True)])
+
+    # ------------------------------------------------------------------ step 3: finished
+    def _build_done(self, size: str) -> None:
+        import file_drag
+
+        self._clear()
+        self.title("Download complete")
+        body = self.body
+        body.grid_columnconfigure(0, weight=1)
+        path = self._path
+        ttk.Label(body, text="Download complete", style="Title.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(body, text=" • ".join(p for p in (Path(path).name, size) if p), wraplength=520).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(2, GAP))
+        ttk.Label(body, text="Saved in:", style="Hint.TLabel").grid(row=2, column=0, columnspan=2, sticky="w")
+        self.path_var = tk.StringVar(self, value=path)
+        entry = ttk.Entry(body, textvariable=self.path_var, state="readonly", width=60)
+        entry.grid(row=3, column=0, sticky="ew")
+        ttk.Button(body, text="Copy path", command=self._copy_path).grid(row=3, column=1, padx=(GAP, 0))
+        if file_drag.available():
+            handle = tk.Label(body, text="Drag this file into Telegram, WhatsApp, a browser or a folder",
+                              relief="groove", bd=2, cursor="hand2", padx=PAD, pady=PAD,
+                              bg=native.dialog_bg(self), fg=native.C["TEXT"])
+            handle.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(PAD, 0))
+            handle.bind("<B1-Motion>", self._drag_out)
+        self._last_status = ""
+        self._buttons_for("done")
+        # A finished download comes to the front, even if the window was minimized or buried.
+        self._safe(self.deiconify)
+        self._safe(self.lift)
+        self._safe(lambda: self.attributes("-topmost", True))
+        self.after(600, lambda: self._safe(lambda: self.attributes("-topmost", False)))
+
+    def _copy_path(self) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(self._path)
+        self.status.configure(text="Path copied.")
+
+    def _drag_out(self, _event: Any) -> str:
+        import file_drag
+
+        if self._path and os.path.exists(self._path):
+            try:
+                file_drag.drag_files(self.winfo_id(), [self._path])
+            except Exception:
+                pass
+        return "break"
 
     def _tick(self) -> None:
         if self._closed:
@@ -316,10 +365,7 @@ class CaptureDialog(tk.Toplevel):
                 size = dl.format_size(os.path.getsize(self._path))
             except OSError:
                 pass
-            self.state_label.configure(text="Download complete.")
-            self.stats_label.configure(text=" • ".join(p for p in (size, Path(self._path).name) if p))
-            self.title("Download complete")
-            self._buttons_for("done")
+            self._build_done(size)
             self._mode = "ended"
             return
         if status == "failed":
@@ -402,8 +448,9 @@ class CaptureDialog(tk.Toplevel):
             messagebox.showerror("Media Downloader", f"Could not delete the file.\n\n{exc}", parent=self)
             return
         self._api.deleted(self._request_id, self._path)
-        self.state_label.configure(text="The file was deleted.")
-        self.stats_label.configure(text="")
+        self._clear()
+        ttk.Label(self.body, text="The file was deleted.", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        self._last_status = ""
         self._buttons_for("deleted")
 
     def _on_escape(self) -> None:

@@ -100,6 +100,12 @@ def _recent_ext_analysis(url: str) -> tuple[dict[str, Any], dict[str, Any]] | No
     return copy.deepcopy(hit[1]), copy.deepcopy(hit[2])
 
 
+def _same_folder(saved: Any, folder: Any) -> bool:
+    if not saved or not folder:
+        return False
+    return os.path.normcase(os.path.normpath(str(saved))) == os.path.normcase(os.path.normpath(str(folder)))
+
+
 def _widget_alive(widget: Any) -> bool:
     try:
         return bool(widget.winfo_exists())
@@ -2371,13 +2377,16 @@ class DownloaderApp(UIMixin, tk.Tk):
                 return None
             self._capture_ids.add(ids[0])
             self.settings["capture_last_dir"] = folder_text
-            if remember.get("ext") or remember.get("site"):
-                saved = dict(self.settings.get("capture_dirs") or {})
-                if remember.get("ext") and ext:
-                    saved[f"ext:{ext}"] = folder_text
-                if remember.get("site") and host:
-                    saved[f"site:{host}"] = folder_text
-                self.settings["capture_dirs"] = saved
+            saved = dict(self.settings.get("capture_dirs") or {})
+            for key, wanted in ((f"ext:{ext}" if ext else "", remember.get("ext")),
+                                (f"site:{host}" if host else "", remember.get("site"))):
+                if not key:
+                    continue
+                if wanted:
+                    saved[key] = folder_text
+                else:
+                    saved.pop(key, None)   # the box was cleared: stop using a saved folder
+            self.settings["capture_dirs"] = saved
             save_settings(self.settings)
             return ids[0]
 
@@ -2401,6 +2410,8 @@ class DownloaderApp(UIMixin, tk.Tk):
         dialog = CaptureDialog(
             self, api, name=name, folder=str(folder), source=host, size_bytes=size,
             is_file=direct, offset=len(self._capture_dialogs), ext=ext, host=host,
+            ext_saved=_same_folder(remembered.get(f"ext:{ext}") if ext else "", folder),
+            site_saved=_same_folder(remembered.get(f"site:{host}"), folder),
         )
         self._capture_dialogs.append(dialog)
 
