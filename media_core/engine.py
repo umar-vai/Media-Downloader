@@ -973,7 +973,7 @@ def _publish_download(produced: Path, folder: Path, filename: str) -> Path:
 def download_from_analysis(**kwargs: Any) -> Path:
     cancel_event: threading.Event = kwargs["cancel_event"]
     _check_cancel(cancel_event)
-    folder = Path(kwargs["download_dir"]).expanduser().resolve()
+    folder = Path(kwargs["download_dir"]).expanduser()
     filename = str(kwargs["filename"])
     existing = _existing_download(folder, filename, kwargs["mode"], kwargs["cached_info"] or {})
     if existing:
@@ -987,7 +987,7 @@ def download_from_analysis(**kwargs: Any) -> Path:
         "url", "filename", "mode", "video_quality", "audio_format", "audio_quality"
     ))
     digest = hashlib.sha256("\0".join(identity).encode("utf-8", "replace")).hexdigest()[:24]
-    workspace = folder / f".media-downloader-{digest}"
+    workspace = folder.resolve() / f".media-downloader-{digest}"
     with _OUTPUT_LOCK:
         workspace_lock = _WORKSPACES.setdefault(workspace, threading.Lock())
     while not workspace_lock.acquire(timeout=0.2):
