@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import logging
 import re
+import shutil
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urljoin
 
 import yt_dlp
 from imageio_ffmpeg import get_ffmpeg_exe
+from yt_dlp.networking import Request
+from yt_dlp.utils import parse_m3u8_attributes
 
 from . import options as engine_options
 from .browser_resolver import resolve_with_installed_browser
@@ -26,6 +33,11 @@ from .sources import (
 StatusCallback = Callable[[str], None]
 ProgressCallback = Callable[[float, str], None]
 MetricsCallback = Callable[[dict[str, Any]], None]
+
+
+_WORKSPACES: weakref.WeakValueDictionary[Path, threading.Lock] = weakref.WeakValueDictionary()
+_OUTPUT_LOCK = threading.Lock()
+_LOG = logging.getLogger(__name__)
 
 
 class Cancelled(RuntimeError):
@@ -404,11 +416,14 @@ def _files_with_stem(directory: Path, stem: str) -> list[Path]:
     return found
 
 
-def _available_name(directory: Path, requested: str) -> str:
+def _available_name(directory: Path, requested: str, sidecars: tuple[str, ...] = ()) -> str:
     base = safe_filename(requested)
     candidate = base
     index = 2
-    while [p for p in _files_with_stem(directory, candidate) if engine_options.is_final_media(p)]:
+    while (
+        any(engine_options.is_final_media(path) for path in _files_with_stem(directory, candidate))
+        or any((directory / (candidate + suffix)).exists() for suffix in sidecars)
+    ):
         candidate = f"{base} ({index})"
         index += 1
     return candidate
@@ -433,6 +448,81 @@ def _format_eta(seconds: Any) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
+def _hls_manifest(item: dict[str, Any]) -> str:
+    if item.get("protocol") in {"m3u8", "m3u8_native"}:
+        return str(item.get("manifest_url") or "")
+    return ""
+
+
+def _hls_audio_renditions(ydl: yt_dlp.YoutubeDL, manifest: str, video: dict[str, Any]) -> set[str]:
+    try:
+        with ydl.urlopen(Request(manifest, headers=video.get("http_headers"))) as response:
+            lines = response.read(1 << 20).decode("utf-8-sig", errors="replace").splitlines()
+            base_url = response.url
+    except yt_dlp.networking.exceptions.RequestError:
+        return set()
+
+    group = None
+    renditions: list[dict[str, str]] = []
+    variant = None
+    for line in map(str.strip, lines):
+        if line.startswith("#EXT-X-MEDIA:"):
+            attrs = parse_m3u8_attributes(line)
+            if attrs.get("TYPE") == "AUDIO" and attrs.get("URI"):
+                renditions.append(attrs)
+        elif line.startswith("#EXT-X-STREAM-INF:"):
+            variant = parse_m3u8_attributes(line)
+        elif line and not line.startswith("#") and variant is not None:
+            if urljoin(base_url, line) == video.get("url"):
+                group = variant.get("AUDIO")
+            variant = None
+    if group is None:
+        return set()
+    return {urljoin(base_url, item["URI"]) for item in renditions if item.get("GROUP-ID") == group}
+
+
+def _match_hls_audio(ydl: yt_dlp.YoutubeDL) -> None:
+    """Pair a selected HLS variant with the audio group declared by its master playlist."""
+    selector = ydl.format_selector
+
+    def select(context: dict[str, Any]):
+        for selected in selector(context):
+            pair = selected.get("requested_formats") or []
+            if len(pair) != 2:
+                yield selected
+                continue
+            video, audio = pair
+            manifest = _hls_manifest(video)
+            if not manifest:
+                yield selected
+                continue
+            renditions = _hls_audio_renditions(ydl, manifest, video)
+            if not renditions or audio.get("url") in renditions:
+                yield selected
+                continue
+            compatible = [
+                item for item in context["formats"]
+                if item.get("vcodec") != "none" or item.get("url") in renditions
+            ]
+            yield from selector({**context, "formats": compatible})
+
+    ydl.format_selector = select
+
+
+def _clock_container(path: str) -> bytes:
+    """Recognize HLS containers that carry a media timeline in the downloaded file."""
+    try:
+        with open(path, "rb") as media:
+            header = media.read(377)
+    except OSError:
+        return b""
+    if len(header) == 377 and header[::188] == b"GGG":
+        return b"ts"
+    if header[4:8] in {b"ftyp", b"styp"}:
+        return b"mp4"
+    return b""
+
+
 def _download_from_analysis(
     *,
     url: str,
@@ -451,35 +541,10 @@ def _download_from_analysis(
 ) -> Path:
     download_dir = Path(download_dir).expanduser()
     download_dir.mkdir(parents=True, exist_ok=True)
-    # "Skip files that already exist" compares names only, so it is safe only for a real
-    # title: many different videos come back as "Untitled" and must each be downloaded.
-    if engine_options.skip_existing() and not is_placeholder_title(filename):
-        wanted_audio = mode.lower() == "audio"
-        expected_size = 0
-        if isinstance(cached_info, dict):
-            expected_size = int(cached_info.get("filesize") or cached_info.get("filesize_approx") or 0)
-        audio_suffixes = {".mp3", ".m4a", ".aac", ".flac", ".opus", ".ogg", ".wav"}
-        for existing in _files_with_stem(download_dir, safe_filename(filename)):
-            try:
-                usable = (
-                    engine_options.is_final_media(existing)
-                    and existing.stat().st_size > 0
-                    and (existing.suffix.lower() in audio_suffixes) == wanted_audio
-                )
-                if usable and expected_size and not wanted_audio:
-                    # Same title, clearly a different video (sizes far apart): download it too.
-                    ratio = existing.stat().st_size / expected_size
-                    usable = 0.8 <= ratio <= 1.25
-            except OSError:
-                usable = False
-            if usable:
-                if on_status:
-                    on_status("Already downloaded — skipped")
-                if on_progress:
-                    on_progress(1.0, "Already downloaded")
-                return existing
-    name = _available_name(download_dir, filename)
-    started_at = time.time()
+    name = safe_filename(filename) if _safe_mode == 2 else "media"
+    saved_files: list[Path] = []
+    active_post_args: dict[str, list[str]] = {}
+    active_paths: dict[str, str] = {}
 
     # Video+audio are downloaded as separate streams and then merged. A naive hook
     # reports each stream from 0-100% so the bar runs forward, snaps back and runs
@@ -503,6 +568,13 @@ def _download_from_analysis(
         # first finished stream looked like the whole file and the bar sat at 98.5%.
         nonlocal expected_streams
         requested = info.get("requested_formats") or []
+        streams = requested or [info]
+        # A format ID can refer to a different rendition after re-extraction.
+        # Resume only when the stream URLs and format IDs still match.
+        plan = "\0".join(f"{item.get('format_id')}\0{item.get('url')}" for item in streams)
+        plan_id = hashlib.sha256(plan.encode("utf-8", "replace")).hexdigest()[:16]
+        plan_dir = download_dir / plan_id
+        active_paths.update(home=str(plan_dir), temp=str(plan_dir / "work"))
         if isinstance(requested, list) and len(requested) > 1:
             expected_streams = len(requested)
             weights.clear()
@@ -620,7 +692,21 @@ def _download_from_analysis(
 
     def post_hook(data: dict[str, Any]) -> None:
         _check_cancel(cancel_event)
-        if data.get("status") == "started" and on_status:
+        if data.get("status") != "started":
+            return
+        if data.get("postprocessor") == "Merger":
+            active_post_args.pop("merger+ffmpeg_i2", None)
+            info = data.get("info_dict") or {}
+            pair = info.get("requested_formats") or []
+            files = info.get("__files_to_merge") or []
+            if len(pair) == len(files) == 2:
+                manifest = _hls_manifest(pair[0])
+                if manifest and manifest == _hls_manifest(pair[1]):
+                    container = _clock_container(files[0])
+                    if container and container == _clock_container(files[1]):
+                        # Keep inputs on the same HLS clock instead of starting both at zero.
+                        active_post_args["merger+ffmpeg_i2"] = ["-isync", "0"]
+        if on_status:
             names = {
                 "Merger": "Merging video and audio",
                 "FFmpegMerger": "Merging video and audio",
@@ -631,7 +717,9 @@ def _download_from_analysis(
             on_status(names.get(str(data.get("postprocessor") or ""), "Processing file"))
 
     opts: dict[str, Any] = {
-        "outtmpl": str(download_dir / f"{name}.%(ext)s"),
+        "outtmpl": f"{name}.%(ext)s",
+        "paths": {"home": str(download_dir), "temp": str(download_dir / "work")},
+        "post_hooks": [lambda path: saved_files.append(Path(path))],
         "noplaylist": True,
         "quiet": True,
         "noprogress": True,
@@ -642,6 +730,7 @@ def _download_from_analysis(
         # antivirus briefly locking the .part file on Windows.
         "retries": 10,
         "fragment_retries": 15,
+        "skip_unavailable_fragments": False,
         "extractor_retries": 3,
         "file_access_retries": 6,
         "retry_sleep_functions": {
@@ -678,9 +767,15 @@ def _download_from_analysis(
     def make_ydl(params: dict[str, Any]) -> yt_dlp.YoutubeDL:
         # Each attempt starts clean: streams left half-done (or "finished") by a failed attempt
         # must not count towards this one. The bar itself never moves backwards.
+        nonlocal active_post_args, active_paths
         stream_state.clear()
-        ydl = yt_dlp.YoutubeDL(params)
-        ydl.add_post_processor(plan_pp, when="before_dl")
+        saved_files.clear()
+        active_post_args = dict(opts["postprocessor_args"])
+        active_paths = dict(opts["paths"])
+        ydl = yt_dlp.YoutubeDL({**params, "postprocessor_args": active_post_args, "paths": active_paths})
+        if mode.lower() != "audio":
+            _match_hls_audio(ydl)
+        ydl.add_post_processor(plan_pp, when="video")
         if metadata_pp is not None:
             pp = _MetadataPP(
                 ydl,
@@ -720,15 +815,6 @@ def _download_from_analysis(
 
     attempts = extraction_attempts(url)
 
-    def cleanup_transient_files() -> None:
-        # Keep .part/.ytdl so yt-dlp can resume after a retry or process restart.
-        for partial in _files_with_stem(download_dir, name):
-            if partial.suffix.lower() in {".tmp", ".temp"}:
-                try:
-                    partial.unlink()
-                except OSError:
-                    pass
-
     _check_cancel(cancel_event)
     if cached_info:
         try:
@@ -745,7 +831,6 @@ def _download_from_analysis(
             raise
         except Exception as exc:
             errors.append(f"Analyzed media: {str(exc).strip()}")
-            cleanup_transient_files()
 
     if not downloaded_ok:
         _check_cancel(cancel_event)
@@ -774,7 +859,6 @@ def _download_from_analysis(
             raise
         except Exception as exc:
             errors.append(f"Fresh media info: {str(exc).strip()}")
-            cleanup_transient_files()
 
     if not downloaded_ok:
         for index, (attempt_url, network_options) in enumerate(attempts, start=1):
@@ -796,7 +880,6 @@ def _download_from_analysis(
                 raise
             except Exception as exc:
                 errors.append(f"Fallback {index}: {str(exc).strip()}")
-                cleanup_transient_files()
 
     _check_cancel(cancel_event)
     if not downloaded_ok:
@@ -805,23 +888,15 @@ def _download_from_analysis(
             + (f"\n" + "\n".join(errors[-5:]) if errors else "")
         )
 
-    candidates: list[Path] = []
-    for path in _files_with_stem(download_dir, name):
-        if not engine_options.is_final_media(path):
-            continue
-        try:
-            if path.stat().st_mtime >= started_at - 2:
-                candidates.append(path)
-        except OSError:
-            pass
-
-    if not candidates:
-        raise RuntimeError("Download finished, but the final file could not be located.")
-
-    output = max(candidates, key=lambda item: item.stat().st_mtime)
-    if on_progress:
-        on_progress(1.0, "Complete")
-    return output
+    for path in saved_files:
+        if (
+            download_dir in path.resolve().parents
+            and engine_options.is_final_media(path)
+            and path.is_file()
+            and path.stat().st_size > 0
+        ):
+            return path
+    raise RuntimeError("Download finished, but the final file could not be located.")
 
 
 def _kill_ffmpeg_for(marker: str) -> None:
@@ -849,49 +924,113 @@ def _kill_ffmpeg_for(marker: str) -> None:
             continue
 
 
+def _existing_download(directory: Path, filename: str, mode: str, info: dict[str, Any]) -> Path | None:
+    if not engine_options.skip_existing() or is_placeholder_title(filename):
+        return None
+    wanted_audio = mode.lower() == "audio"
+    expected_size = int(info.get("filesize") or info.get("filesize_approx") or 0)
+    audio_suffixes = {".mp3", ".m4a", ".aac", ".flac", ".opus", ".ogg", ".wav"}
+    for path in _files_with_stem(directory, safe_filename(filename)):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        if (
+            path.suffix.lower() in engine_options.MEDIA_SUFFIXES
+            and size > 0
+            and (path.suffix.lower() in audio_suffixes) == wanted_audio
+            and (not expected_size or wanted_audio or 0.8 <= size / expected_size <= 1.25)
+        ):
+            return path
+    return None
+
+
+def _publish_download(produced: Path, folder: Path, filename: str) -> Path:
+    """Move the finalized media and any explicitly requested subtitle sidecars."""
+    sidecars = [
+        path for path in produced.parent.iterdir()
+        if path.name.startswith(produced.stem + ".") and path.is_file()
+        and path.suffix.lower() in {".srt", ".vtt", ".ass", ".lrc"}
+    ]
+    suffixes = {path: path.name[len(produced.stem):] for path in sidecars}
+    with _OUTPUT_LOCK:
+        name = _available_name(folder, filename, tuple(suffixes.values()))
+        target = folder / (name + produced.suffix)
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for sidecar, suffix in suffixes.items():
+                destination = folder / (name + suffix)
+                sidecar.rename(destination)
+                moved.append((destination, sidecar))
+            produced.rename(target)
+        except OSError:
+            for destination, sidecar in moved:
+                destination.rename(sidecar)
+            raise
+        return target
+
+
 def download_from_analysis(**kwargs: Any) -> Path:
     cancel_event: threading.Event = kwargs["cancel_event"]
-    marker = str(Path(kwargs["download_dir"]).expanduser() / str(kwargs["filename"]))
+    _check_cancel(cancel_event)
+    folder = Path(kwargs["download_dir"]).expanduser()
+    filename = str(kwargs["filename"])
+    existing = _existing_download(folder, filename, kwargs["mode"], kwargs["cached_info"] or {})
+    if existing:
+        if status := kwargs.get("on_status"):
+            status("Already downloaded — skipped")
+        if progress := kwargs.get("on_progress"):
+            progress(1.0, "Already downloaded")
+        return existing
+
+    identity = (str(kwargs[key]) for key in (
+        "url", "filename", "mode", "video_quality", "audio_format", "audio_quality"
+    ))
+    digest = hashlib.sha256("\0".join(identity).encode("utf-8", "replace")).hexdigest()[:24]
+    workspace = folder.resolve() / f".media-downloader-{digest}"
+    with _OUTPUT_LOCK:
+        workspace_lock = _WORKSPACES.setdefault(workspace, threading.Lock())
+    while not workspace_lock.acquire(timeout=0.2):
+        _check_cancel(cancel_event)
+
     stop = threading.Event()
 
     def watch() -> None:
-        while not stop.is_set():
-            if cancel_event.wait(0.4):
-                # Keep trying for a while: ffmpeg may be started again by a retry.
+        while not stop.wait(0.2):
+            if cancel_event.is_set():
                 for _ in range(10):
-                    _kill_ffmpeg_for(marker)
+                    _kill_ffmpeg_for(str(workspace))
                     if stop.wait(0.5):
                         return
                 return
 
-    threading.Thread(target=watch, name="cancel-watch", daemon=True).start()
+    watcher = threading.Thread(target=watch, name="cancel-watch", daemon=True)
     try:
+        _check_cancel(cancel_event)
+        watcher.start()
+        # The same private directory is used for a retry or resume. Publishing only
+        # happens after yt-dlp has finished all postprocessors.
+        staged = {**kwargs, "download_dir": workspace}
+        for safe_mode in range(3):
+            if safe_mode == 2:
+                staged["filename"] = "dl_" + digest[:10]
+            try:
+                produced = _download_from_analysis(**staged, _safe_mode=safe_mode)
+                break
+            except RuntimeError as exc:
+                if safe_mode == 2 or "Error opening output files" not in str(exc) or cancel_event.is_set():
+                    raise
+        _check_cancel(cancel_event)
+        target = _publish_download(produced, folder, filename)
         try:
-            return _download_from_analysis(**kwargs)
-        except RuntimeError as exc:
-            if "Error opening output files" not in str(exc) or cancel_event.is_set():
-                raise
-        # ffmpeg could not write the merged file (seen with some streams). Try again without the
-        # extra tags, then with a short plain file name that is renamed when it is finished.
-        try:
-            return _download_from_analysis(**kwargs, _safe_mode=1)
-        except RuntimeError as exc:
-            if "Error opening output files" not in str(exc) or cancel_event.is_set():
-                raise
-        import hashlib
-
-        wanted = str(kwargs["filename"])
-        folder = Path(kwargs["download_dir"]).expanduser()
-        # The same short name every time for this video: a later retry finds the streams it
-        # already downloaded instead of fetching the whole video again under a new random name.
-        # Links often carry a short-lived token, so the title identifies the video; only a
-        # placeholder title ("Untitled") needs the link to keep different videos apart.
-        source = str(kwargs.get("url") or "") if is_placeholder_title(wanted) else ""
-        key = f"{source}\n{wanted}\n{kwargs.get('mode', '')}".encode("utf-8", "replace")
-        temp_kwargs = {**kwargs, "filename": "dl_" + hashlib.sha1(key).hexdigest()[:10]}
-        produced = _download_from_analysis(**temp_kwargs, _safe_mode=2)
-        target = folder / (_available_name(folder, wanted) + produced.suffix)
-        produced.replace(target)
+            shutil.rmtree(workspace)
+        except OSError:
+            _LOG.warning("Could not clean completed download workspace %s", workspace.name, exc_info=True)
+        if progress := kwargs.get("on_progress"):
+            progress(1.0, "Complete")
         return target
     finally:
         stop.set()
+        if watcher.ident is not None:
+            watcher.join()
+        workspace_lock.release()

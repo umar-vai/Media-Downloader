@@ -208,6 +208,8 @@ class FileDownloadTests(unittest.TestCase):
                 rng = self.headers.get("Range")
                 if rng:
                     start = int(rng.split("=")[1].split("-")[0])
+                    if self.path.startswith("/bad-range"):
+                        start = 0
                     self.send_response(206)
                     self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
                 else:
@@ -217,7 +219,10 @@ class FileDownloadTests(unittest.TestCase):
                 self.send_header("Content-Disposition", 'attachment; filename="server name.zip"')
                 self.send_header("Content-Length", str(len(data) - start))
                 self.end_headers()
-                self.wfile.write(data[start:])
+                try:
+                    self.wfile.write(data[start:])
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # The client may deliberately discard a bad range response.
 
         self.server = _Server(("127.0.0.1", 0), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -253,6 +258,17 @@ class FileDownloadTests(unittest.TestCase):
         named = file_download.direct_download(url=f"{self.base}/dl.php?id=3", download_dir=self.dir,
                                               cancel_event=threading.Event())
         self.assertEqual(named.name, "server name.zip")
+
+    def test_bad_resume_offset_restarts_instead_of_appending(self) -> None:
+        partial = self.dir / "setup.zip.mdpart"
+        partial.write_bytes(self.DATA[:300_000])
+        path = file_download.direct_download(
+            url=f"{self.base}/bad-range", download_dir=self.dir, filename="setup.zip",
+            cancel_event=threading.Event(),
+        )
+        self.assertEqual(path.read_bytes(), self.DATA)
+        self.assertFalse(partial.exists())
+        self.assertEqual([headers.get("Range") for headers in self.seen], ["bytes=300000-", None])
 
     def test_stop_keeps_the_partial_file(self) -> None:
         cancel = threading.Event()

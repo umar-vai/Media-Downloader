@@ -15,8 +15,11 @@ from pathlib import Path
 _EXTENSIONS = re.compile(r"\.(mp3|m4a|mp4|webm|mkv|mov|wav|flac|opus|ogg)$", re.I)
 _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 _SPACES = re.compile(r"\s+")
-# yt-dlp's per-stream intermediate file, e.g. ".f137.mp4" or ".fhls-1080.mp4" (not ".final.mp4").
-_STREAM_FILE = re.compile(r"^\.f(?:\d|hls|dash|http)[^.]*\.\w+$", re.I)
+# yt-dlp's per-stream pieces, FFmpeg temporary outputs, and direct HTTP resume files.
+_STREAM_FILE = r"\.f(?:\d|hls|dash|http)[^.]*\.\w+"
+_DOWNLOAD_SUFFIX = r"(?:\.part(?:-frag\d+)?|\.ytdl|\.mdpart|-frag\d+|\.unpng)"
+_MERGE_SUFFIX = r"\.temp\.(?:mp4|m4a|webm|mkv|mov|mp3|opus|wav|flac)"
+_ANY_LEFTOVER = re.compile(rf"(?:{_DOWNLOAD_SUFFIX}|{_STREAM_FILE}|{_MERGE_SUFFIX})$", re.I)
 
 
 def stem_for(name: str) -> str:
@@ -28,10 +31,7 @@ def stem_for(name: str) -> str:
 
 def _is_leftover(rest: str) -> bool:
     """``rest`` is whatever follows the title in the file name, starting with a dot."""
-    lower = rest.lower()
-    return (".part" in lower or "-frag" in lower
-            or lower.endswith((".ytdl", ".tmp", ".temp"))
-            or bool(_STREAM_FILE.match(lower)))
+    return bool(_ANY_LEFTOVER.search(rest))
 
 
 def find_partial_files(directory: str | Path, name: str) -> list[Path]:
@@ -66,12 +66,6 @@ def delete_partial_files(directory: str | Path, name: str) -> tuple[int, list[st
         except OSError as exc:
             problems.append(f"{path.name}: {exc}")
     return removed, problems
-
-
-# Leftovers recognised without knowing the download's name (for the "clean up" command). Stricter
-# than ``_is_leftover``: it scans whole folders, so it only matches yt-dlp's own patterns.
-_ANY_LEFTOVER = re.compile(
-    r"(?:\.(?:part|ytdl)(?:-frag\d+)?|-frag\d+|\.f\d+(?:-\d+)?\.(?:mp4|m4a|webm|mkv|mp3|opus))$", re.I)
 
 
 def scan_partial_files(directories: list[str | Path], keep: set[Path] | None = None) -> list[Path]:

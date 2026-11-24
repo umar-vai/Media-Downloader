@@ -90,6 +90,87 @@ class DownloadEndToEndTests(unittest.TestCase):
             self.assertGreater(path.stat().st_size, 0)
 
 
+    def test_split_hls_keeps_the_declared_audio_group_and_start_offset(self):
+        import functools
+        import http.server
+        import re
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        from media_core import engine
+
+        ffmpeg = engine.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as tmp:
+            streams, output = Path(tmp, "streams"), Path(tmp, "downloads")
+            streams.mkdir()
+
+            def make_track(name, *args):
+                subprocess.run(
+                    [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *args, "-f", "hls",
+                     "-hls_time", "1", "-hls_playlist_type", "vod", str(streams / name)],
+                    check=True,
+                )
+
+            make_track(
+                "video.m3u8", "-f", "lavfi", "-i", "testsrc2=duration=2:size=160x120:rate=15",
+                "-an", "-c:v", "libx264", "-g", "15", "-sc_threshold", "0", "-bf", "0",
+            )
+            make_track(
+                "audio.m3u8", "-itsoffset", "0.7", "-f", "lavfi", "-i",
+                "sine=frequency=440:sample_rate=48000:duration=1.3", "-vn", "-c:a", "aac",
+            )
+            make_track(
+                "other.m3u8", "-f", "lavfi", "-i", "sine=frequency=200:sample_rate=48000:duration=2",
+                "-vn", "-c:a", "aac",
+            )
+            (streams / "master.m3u8").write_text(
+                '#EXTM3U\n#EXT-X-VERSION:3\n'
+                '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="main",NAME="English",DEFAULT=YES,'
+                'AUTOSELECT=YES,LANGUAGE="en",URI="audio.m3u8"\n'
+                '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="other",NAME="Other",DEFAULT=YES,'
+                'AUTOSELECT=YES,LANGUAGE="fr",URI="other.m3u8"\n'
+                '#EXT-X-STREAM-INF:BANDWIDTH=300000,RESOLUTION=160x120,'
+                'CODECS="avc1.64000b,mp4a.40.2",AUDIO="main"\nvideo.m3u8\n',
+                encoding="utf-8",
+            )
+
+            class Quiet(http.server.SimpleHTTPRequestHandler):
+                def log_message(self, *_args):
+                    pass
+
+            server = http.server.ThreadingHTTPServer(
+                ("127.0.0.1", 0), functools.partial(Quiet, directory=str(streams))
+            )
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}/master.m3u8"
+                path = engine.download_from_analysis(
+                    url=url, cached_info={}, download_dir=output, filename="Split stream",
+                    mode="video", video_quality="Best available", audio_format="mp3",
+                    audio_quality="192", cancel_event=threading.Event(),
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+
+            self.assertEqual(list(output.iterdir()), [path])
+            timing = subprocess.run(
+                [ffmpeg, "-nostdin", "-hide_banner", "-i", str(path), "-map", "0:v:0", "-map", "0:a:0",
+                 "-vf", "showinfo", "-af", "ashowinfo", "-f", "null", "-"],
+                capture_output=True, text=True, check=True,
+            ).stderr
+
+            def first_pts(filter_name):
+                match = re.search(
+                    rf"Parsed_{filter_name}_.*?\bn:\s*0\s+pts:\s*-?\d+\s+pts_time:\s*(-?[\d.]+)", timing
+                )
+                self.assertIsNotNone(match, timing)
+                return float(match.group(1))
+
+            self.assertAlmostEqual(first_pts("ashowinfo") - first_pts("showinfo"), 0.679, delta=0.04)
+
+
 class HlsProgressTests(unittest.TestCase):
     """yt-dlp's byte total for HLS is a guess from the first fragments. It used to drive the
     percentage, so a 1.2 GB video sat at 98.5% after 60 MB. Fragments must drive it now."""
@@ -107,6 +188,7 @@ class HlsProgressTests(unittest.TestCase):
             def __init__(self, params):
                 self.params = params
                 self._pps = {"post_process": []}
+                self.format_selector = lambda _context: iter(())
 
             def add_post_processor(self, pp, when="post_process"):
                 pass
@@ -121,7 +203,10 @@ class HlsProgressTests(unittest.TestCase):
                 for data in events:
                     for hook in self.params["progress_hooks"]:
                         hook(dict(data))
-                Path(self.params["outtmpl"].replace("%(ext)s", "mp4")).write_bytes(b"x" * 10)
+                output = Path(self.params["paths"]["home"]) / self.params["outtmpl"].replace("%(ext)s", "mp4")
+                output.write_bytes(b"x" * 10)
+                for hook in self.params["post_hooks"]:
+                    hook(str(output))
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(engine.yt_dlp, "YoutubeDL", FakeYDL):
             engine.download_from_analysis(

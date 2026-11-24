@@ -21,9 +21,12 @@ class SafeRetryTests(unittest.TestCase):
             def fake(**kwargs):
                 mode = kwargs.get("_safe_mode", 0)
                 seen.append((kwargs["filename"], mode))
+                work = kwargs["download_dir"]
+                work.mkdir(exist_ok=True)
+                (work / "previous.f137.mp4.part").write_bytes(b"partial")
                 if mode < 2:
                     raise RuntimeError("No compatible download path succeeded.\nError opening output files: Invalid argument")
-                out = folder / (kwargs["filename"] + ".mp4")
+                out = work / (kwargs["filename"] + ".mp4")
                 out.write_bytes(b"x")
                 return out
 
@@ -34,6 +37,7 @@ class SafeRetryTests(unittest.TestCase):
                     cancel_event=threading.Event())
             self.assertEqual(result.name, "Nice Name.mp4")
             self.assertTrue(result.exists())
+            self.assertEqual(list(folder.iterdir()), [result])
             self.assertEqual([m for _n, m in seen], [0, 1, 2])
             self.assertTrue(seen[2][0].startswith("dl_"))
 
