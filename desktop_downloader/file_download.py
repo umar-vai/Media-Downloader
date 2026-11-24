@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import ExitStack
 from email.message import Message
 from pathlib import Path
 from typing import Any, Callable
@@ -227,7 +228,8 @@ def direct_download(
         start = 0
         response = connect(0)
 
-    with response:
+    with ExitStack() as responses:
+        responses.enter_context(response)
         if final is None or part is None:
             name = choose_filename(suggested=filename, disposition=response.headers.get("Content-Disposition") or "",
                                    url=response.geturl() or url,
@@ -241,13 +243,24 @@ def direct_download(
                 ranged = connect(start)
                 if ranged is not None:
                     response.close()
-                    response = ranged
-        if response.status != 206:
+                    response = responses.enter_context(ranged)
+
+        match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("Content-Range") or "")
+        if response.status == 206 and start and (match is None or int(match.group(1)) != start):
+            # A response starting at the wrong byte would corrupt the saved partial.
+            response.close()
+            response = responses.enter_context(connect(0))
+            start = 0
+            match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("Content-Range") or "")
+        if response.status == 206:
+            if match is None:
+                raise RuntimeError("Invalid Content-Range during download.")
+            first, last, total = map(int, match.groups())
+            if not first == start <= last < total:
+                raise RuntimeError("Invalid Content-Range during download.")
+        else:
             start = 0
             total = int(response.headers.get("Content-Length") or 0)
-        else:
-            match = re.search(r"/(\d+)\s*$", response.headers.get("Content-Range") or "")
-            total = int(match.group(1)) if match else start + int(response.headers.get("Content-Length") or 0)
         if on_status:
             on_status("Resuming download" if start else "Downloading")
 
@@ -277,9 +290,10 @@ def direct_download(
                                     "eta_seconds": eta})
                     if on_progress:
                         on_progress(min(0.999, done / total) if total else 0.0, "Downloading")
-        response.close()
-    if total and done < total:
+    if total and done != total:
         raise RuntimeError(f"Incomplete download: received {done} of {total} bytes (connection reset).")
+    if cancel_event.is_set():
+        raise Cancelled("Download stopped.")
     os.replace(part, final)
     if on_metrics:
         on_metrics({"downloaded_bytes": done, "total_bytes": total or done, "speed_bps": 0.0, "eta_seconds": 0})

@@ -37,7 +37,10 @@ class ScanTests(unittest.TestCase):
         from partial_files import scan_partial_files
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
-            for name in ["a.mp4.part", "b.mp4.ytdl", "c.f137.mp4", "d.mp4.part-Frag3", "keep.mp4.part", "ok.mp4", "x.final.mp4"]:
+            leftovers = {"a.mp4.part", "b.mp4.ytdl", "c.f137.mp4", "d.mp4.part-Frag3",
+                         "e.zip.mdpart", "f.fhls-1080.mp4", "g.temp.mp4", "h.mp4.unpng"}
+            keep = {"keep.mp4.part", "ok.mp4", "x.final.mp4", "x.part two.mp4"}
+            for name in leftovers | keep:
                 (root / name).write_bytes(b"x")
             found = {p.name for p in scan_partial_files([root, root], {root / "keep.mp4.part"})}
-            self.assertEqual(found, {"a.mp4.part", "b.mp4.ytdl", "c.f137.mp4", "d.mp4.part-Frag3"})
+            self.assertEqual(found, leftovers)
