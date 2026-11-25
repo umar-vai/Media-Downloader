@@ -16,6 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
 import download_list as dl
+from download_rules import writable_folder
 import native
 from native import GAP, PAD
 
@@ -46,17 +47,19 @@ class CaptureApi:
         self.deleted = deleted
 
 
-def open_path(path: str) -> None:
+def open_path(path: str) -> bool:
     try:
         if os.name == "nt":
             os.startfile(path)  # type: ignore[attr-defined]
         else:
             subprocess.Popen(["xdg-open", path])
-    except Exception as exc:
+    except OSError as exc:
         messagebox.showerror("Media Downloader", f"Could not open it.\n\n{exc}")
+        return False
+    return True
 
 
-def reveal(path: str) -> None:
+def reveal(path: str) -> bool:
     target = Path(os.path.normpath(path))
     try:
         if os.name == "nt":
@@ -66,8 +69,10 @@ def reveal(path: str) -> None:
                 os.startfile(str(target if target.is_dir() else target.parent))  # type: ignore[attr-defined]
         else:
             subprocess.Popen(["xdg-open", str(target if target.is_dir() else target.parent)])
-    except Exception:
-        pass
+    except OSError as exc:
+        messagebox.showerror("Media Downloader", f"Could not show the folder.\n\n{exc}")
+        return False
+    return True
 
 
 class CaptureDialog(tk.Toplevel):
@@ -222,9 +227,9 @@ class CaptureDialog(tk.Toplevel):
         if self._is_file and self._orig_ext and not os.path.splitext(name)[1]:
             name += self._orig_ext
         try:
-            os.makedirs(folder, exist_ok=True)
-        except OSError as exc:
-            self.status.configure(text=f"Cannot use that folder: {exc.strerror or exc}")
+            folder = str(writable_folder(folder))
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.status.configure(text=str(exc))
             return
         try:
             request_id = self._api.start(
@@ -426,12 +431,14 @@ class CaptureDialog(tk.Toplevel):
 
     def _open_file(self) -> None:
         if self._path and os.path.exists(self._path):
-            open_path(self._path)
+            if open_path(self._path):
+                self._on_close()
         else:
             messagebox.showwarning("Media Downloader", "The file is no longer on the disk.", parent=self)
 
     def _open_folder(self) -> None:
-        reveal(self._path or self.folder_var.get())
+        if reveal(self._path or self.folder_var.get()):
+            self._on_close()
 
     def _delete_file(self) -> None:
         if not self._path or not os.path.exists(self._path):

@@ -167,9 +167,6 @@ class ExtensionServer:
                 origin = self.headers.get("Origin") or ""
                 return not origin or origin.startswith(EXTENSION_ORIGINS)
 
-            def _from_extension(self) -> bool:
-                return (self.headers.get("Origin") or "").startswith(EXTENSION_ORIGINS)
-
             def _send(self, status: int, payload: dict[str, Any]) -> None:
                 body = json.dumps(payload).encode("utf-8")
                 self.send_response(status)
@@ -200,18 +197,8 @@ class ExtensionServer:
                     return
                 route = urlsplit(self.path).path
                 if route == "/ping":
-                    if self._from_extension():
-                        owner.extension_seen_at = time.time()
                     self._send(200, {"ok": True, "app": "Media Downloader", "version": owner._version,
                                      "capture": bool(owner.capture)})
-                elif route == "/pair":
-                    # Self-pairing: only a browser extension can read the token. Web pages
-                    # cannot fake the Origin header, so they never see it.
-                    if not self._from_extension():
-                        self._send(403, {"ok": False, "error": "forbidden"})
-                        return
-                    owner.extension_seen_at = time.time()
-                    self._send(200, {"ok": True, "token": owner.token})
                 else:
                     self._send(404, {"ok": False, "error": "not found"})
 
@@ -250,7 +237,12 @@ class ExtensionServer:
                     self._send(200 if accepted else 404, {"ok": accepted})
                     return
                 url = str(data.get("url") or "").strip()
-                if urlsplit(url).scheme.lower() not in {"http", "https"}:
+                try:
+                    source = urlsplit(url)
+                    valid_url = source.scheme.lower() in {"http", "https"} and bool(source.hostname)
+                except ValueError:
+                    valid_url = False
+                if not valid_url:
                     self._send(400, {"ok": False, "error": "bad url"})
                     return
                 if route == "/analyze":
@@ -267,7 +259,10 @@ class ExtensionServer:
                     accepted = bool(owner._on_download(data))
                 except Exception:
                     accepted = False
-                self._send(200 if accepted else 500, {"ok": accepted})
+                if accepted:
+                    self._send(200, {"ok": True})
+                else:
+                    self._send(409, {"ok": False, "error": "The desktop app could not accept the download."})
 
         for port in PORTS:
             try:

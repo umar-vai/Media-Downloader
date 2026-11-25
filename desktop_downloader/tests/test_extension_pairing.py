@@ -1,4 +1,4 @@
-"""The browser link pairs itself (like IDM/NDM) and never needs a token copied by hand."""
+"""The connector discovers the app without exposing the installation pairing token."""
 
 from __future__ import annotations
 
@@ -33,25 +33,30 @@ class ExtensionPairingTests(unittest.TestCase):
         self.assertTrue(self.server.start())
         self.addCleanup(self.server.stop)
 
-    def test_extension_can_pair_itself(self) -> None:
-        status, body = _get(self.server.port, "/pair", "chrome-extension://abcdefghijklmnop")
-        self.assertEqual((status, body.get("token")), (200, TOKEN))
-        self.assertTrue(self.server.extension_active())
-
-    def test_web_pages_and_plain_tools_cannot_read_the_token(self) -> None:
-        self.assertEqual(_get(self.server.port, "/pair", "https://evil.example")[0], 403)
-        status, body = _get(self.server.port, "/pair")
-        self.assertEqual(status, 403)
-        self.assertNotIn("token", body)
+    def test_loopback_never_returns_the_pairing_token(self) -> None:
+        for origin, expected in (("chrome-extension://abcdefghijklmnop", 404),
+                                 ("https://evil.example", 403), ("", 404)):
+            with self.subTest(origin=origin):
+                status, body = _get(self.server.port, "/pair", origin)
+                self.assertEqual(status, expected)
+                self.assertNotIn("token", body)
 
     def test_ping_reports_the_capture_option_live(self) -> None:
         self.assertIs(_get(self.server.port, "/ping")[1]["capture"], False)
         self.server.capture = True
         self.assertIs(_get(self.server.port, "/ping")[1]["capture"], True)
 
-    def test_ping_from_extension_marks_it_connected(self) -> None:
+    def test_authenticated_hello_marks_the_extension_connected(self) -> None:
         self.assertFalse(self.server.extension_active())
         _get(self.server.port, "/ping", "moz-extension://1234")
+        self.assertFalse(self.server.extension_active())
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.server.port}/hello",
+            headers={"Origin": "moz-extension://1234", "X-MD-Token": TOKEN},
+            data=b"{}",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            self.assertEqual(response.status, 200)
         self.assertTrue(self.server.extension_active())
 
 

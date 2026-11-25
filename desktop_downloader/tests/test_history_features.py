@@ -140,7 +140,7 @@ class WebsiteFolderTests(unittest.TestCase):
         queued: list[list[dict]] = []
         with tempfile.TemporaryDirectory() as tmp:
             fake = SimpleNamespace(
-                settings={"folder_rules": f"animewave.to => {tmp}\\Anime | 1080p"},
+                settings={"folder_rules": f"animewave.to => {Path(tmp) / 'Anime'} | 1080p"},
                 download_dir=Path(tmp) / "default",
                 download_queue=SimpleNamespace(enqueue_batch=queued.append),
                 _set_status=lambda *a, **k: None,
@@ -156,6 +156,27 @@ class WebsiteFolderTests(unittest.TestCase):
         self.assertEqual(payload["download_dir"], str(Path(tmp) / "Anime"))
         self.assertEqual(payload["request_settings"]["video_quality"], "1080p")
         self.assertEqual(payload["request_settings"]["page_url"], "https://animewave.to/watch/ep-4")
+
+
+    def test_folder_override_does_not_touch_an_unusable_default(self) -> None:
+        queued = []
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            default = base / "unavailable-default"
+            default.write_text("a file, not a directory")
+            target = base / "chosen"
+            fake = SimpleNamespace(
+                settings={}, download_dir=default,
+                download_queue=SimpleNamespace(enqueue_batch=queued.append),
+                _set_status=lambda *a, **k: None,
+                _schedule_download_activity_refresh=lambda *a: None,
+                _start_available_downloads=lambda: None,
+            )
+            app_module.DownloaderApp._enqueue_batch_downloads(
+                fake, "https://example.com/test.zip", {}, target_dir_override=target,
+            )
+            self.assertEqual(queued[0][0]["download_dir"], str(target))
+            self.assertEqual(list(target.iterdir()), [])
 
 
 class RedownloadTests(unittest.TestCase):

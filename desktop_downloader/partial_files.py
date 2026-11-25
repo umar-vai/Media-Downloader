@@ -17,7 +17,7 @@ _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 _SPACES = re.compile(r"\s+")
 # yt-dlp's per-stream pieces, FFmpeg temporary outputs, and direct HTTP resume files.
 _STREAM_FILE = r"\.f(?:\d|hls|dash|http)[^.]*\.\w+"
-_DOWNLOAD_SUFFIX = r"(?:\.part(?:-frag\d+)?|\.ytdl|\.mdpart|-frag\d+|\.unpng)"
+_DOWNLOAD_SUFFIX = r"(?:\.part(?:-frag\d+)?|\.ytdl|\.mdpart(?:\.json)?|-frag\d+|\.unpng)"
 _MERGE_SUFFIX = r"\.temp\.(?:mp4|m4a|webm|mkv|mov|mp3|opus|wav|flac)"
 _ANY_LEFTOVER = re.compile(rf"(?:{_DOWNLOAD_SUFFIX}|{_STREAM_FILE}|{_MERGE_SUFFIX})$", re.I)
 

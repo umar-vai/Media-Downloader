@@ -3,6 +3,7 @@ browser API) and the app's plain-file downloader (against a local HTTP server)."
 
 from __future__ import annotations
 
+import hashlib
 import http.server
 import json
 import shutil
@@ -28,7 +29,7 @@ const vm = require("vm");
 const source = fs.readFileSync(process.argv[2], "utf8");
 const scenario = JSON.parse(process.argv[3]);
 const log = [];
-let onCreated = null, onMessage = null;
+let onFilename = null, onMessage = null;
 const store = Object.assign({token: "t0k"}, scenario.storage || {});
 function deep(path) {
   const fn = function () { return Promise.resolve(undefined); };
@@ -38,7 +39,7 @@ function deep(path) {
       if (key === "then") return undefined;
       if (name === "storage.local.get") return async () => ({...store});
       if (name === "storage.local.set") return async (v) => { Object.assign(store, v); };
-      if (name === "downloads.onCreated.addListener") return (fn) => { onCreated = fn; };
+      if (name === "downloads.onDeterminingFilename.addListener") return (fn) => { onFilename = fn; };
       if (name === "runtime.onMessage.addListener") return (fn) => { onMessage = fn; };
       if (name === "cookies.getAll") return async () => [];
       if (name === "runtime.getURL") return (file) => "ext://" + file;
@@ -57,24 +58,28 @@ async function fakeFetch(url, opts) {
   }
   if (scenario.appDown) throw new Error("connection refused");
   if (url.endsWith("/ping")) return {ok: true, json: async () => ({app: "Media Downloader", capture: scenario.appCapture !== false})};
-  if (url.endsWith("/pair")) return {ok: !!scenario.appToken, json: async () => ({token: scenario.appToken || ""})};
   if (url.endsWith("/download")) {
     const token = opts.headers["X-MD-Token"];
     if (scenario.appToken && token !== scenario.appToken) return {ok: false, status: 401, json: async () => ({ok: false})};
     if (!token) return {ok: false, status: 401, json: async () => ({ok: false})};
-    sent.push(JSON.parse(opts.body)); return {ok: true, status: 200, json: async () => ({ok: true})};
+    sent.push(JSON.parse(opts.body));
+    return {ok: !scenario.reject, status: scenario.reject ? 409 : 200,
+            json: async () => ({ok: !scenario.reject})};
   }
   return {ok: true, json: async () => ({ok: true})};
 }
 const context = {chrome: deep(""), fetch: fakeFetch, console, URL, setTimeout, clearTimeout, setInterval,
-                 clearInterval, Date, Promise, navigator: {userAgent: "node"}, TextDecoder, TextEncoder};
+                 clearInterval, Date, Promise, AbortController, navigator: {userAgent: "node"}, TextDecoder, TextEncoder};
 vm.createContext(context);
 vm.runInContext(source, context);
 (async () => {
   await new Promise(r => setTimeout(r, 20));
-  if (scenario.altClick) onMessage({type: "md-bypass"}, {}, () => {});
-  await onCreated(scenario.item);
-  await new Promise(r => setTimeout(r, 20));
+  if (scenario.altClick) onMessage({type: "md-bypass", url: scenario.altClick === true ?
+                                    scenario.item.url : scenario.altClick}, {}, () => {});
+  await new Promise(resolve => {
+    const asyncDecision = onFilename(scenario.item, () => { log.push("suggest"); resolve(); });
+    if (asyncDecision !== true) throw new Error("The filename decision was not held");
+  });
   console.log(JSON.stringify({log, sent, token: store.token}));
 })();
 """
@@ -110,7 +115,7 @@ class ExtensionCaptureTests(unittest.TestCase):
 
     def test_download_is_handed_to_the_app(self) -> None:
         result = self.run_scenario()
-        self.assertEqual(result["log"][:3], ["pause", "cancel", "erase"])
+        self.assertEqual(result["log"][:3], ["cancel", "erase", "suggest"])
         body = result["sent"][0]
         self.assertEqual((body["kind"], body["fileName"], body["url"]),
                          ("file", "setup.exe", "https://cdn.example.com/setup.exe"))
@@ -120,12 +125,12 @@ class ExtensionCaptureTests(unittest.TestCase):
     def test_browser_keeps_the_download_when_the_app_is_closed(self) -> None:
         # The download is not even paused: the browser carries on as if nothing happened.
         result = self.run_scenario(appDown=True)
-        self.assertEqual(result["log"], [])
+        self.assertEqual(result["log"], ["suggest"])
         self.assertEqual(result["sent"], [])
 
     def test_alt_click_lets_the_browser_download(self) -> None:
         result = self.run_scenario(altClick=True)
-        self.assertEqual((result["log"], result["sent"]), ([], []))
+        self.assertEqual((result["log"], result["sent"]), (["suggest"], []))
 
     def test_pairs_itself_from_the_exported_token(self) -> None:
         # Never pasted a token: the one the app wrote into pairing.json is used.
@@ -135,18 +140,35 @@ class ExtensionCaptureTests(unittest.TestCase):
         # A stale token from an older install is replaced too.
         self.assertEqual(self.run_scenario(storage={"token": "old"}, bundled="new")["token"], "new")
 
-    def test_pairs_itself_with_the_running_app(self) -> None:
-        # No token at all, or a stale one: the app hands the extension its token.
+    def test_unpaired_connector_keeps_the_browser_download(self) -> None:
         for storage in ({"token": ""}, {"token": "stale"}):
             with self.subTest(storage=storage):
                 result = self.run_scenario(storage=storage, appToken="live-token")
-                self.assertEqual(result["token"], "live-token")
-                self.assertEqual(len(result["sent"]), 1)
-                self.assertEqual(result["log"][:3], ["pause", "cancel", "erase"])
+                self.assertEqual((result["log"], result["sent"]), (["suggest"], []))
+
+    def test_app_rejection_keeps_the_browser_download(self) -> None:
+        result = self.run_scenario(reject=True)
+        self.assertEqual(result["log"], ["suggest"])
+        self.assertEqual(len(result["sent"]), 1)
+
+    def test_telegram_worker_and_blob_downloads_keep_their_browser(self) -> None:
+        for source in (
+            {"referrer": "https://web.telegram.org/k/"},
+            {"url": "blob:https://web.telegram.org/sample", "finalUrl": ""},
+            {"url": "https://web.telegram.org/download/sample", "finalUrl": ""},
+            {"danger": "dangerous"},
+        ):
+            with self.subTest(source=source):
+                result = self.run_scenario(item=source)
+                self.assertEqual((result["log"], result["sent"]), (["suggest"], []))
+
+    def test_alt_click_does_not_bypass_another_url(self) -> None:
+        result = self.run_scenario(altClick="https://example.com/another.zip")
+        self.assertEqual(result["log"], ["cancel", "erase", "suggest"])
 
     def test_app_option_off_leaves_downloads_in_the_browser(self) -> None:
         result = self.run_scenario(appCapture=False)
-        self.assertEqual((result["log"], result["sent"]), ([], []))
+        self.assertEqual((result["log"], result["sent"]), (["suggest"], []))
 
     def test_export_writes_the_pairing_file_and_refreshes_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -214,6 +236,7 @@ class FileDownloadTests(unittest.TestCase):
                     self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
                 else:
                     self.send_response(200)
+                self.send_header("ETag", '"fixture-v2"' if self.path.startswith("/changed") else '"fixture-v1"')
                 self.send_header("Accept-Ranges", "bytes")
                 self.send_header("Content-Type", "application/octet-stream")
                 self.send_header("Content-Disposition", 'attachment; filename="server name.zip"')
@@ -233,12 +256,21 @@ class FileDownloadTests(unittest.TestCase):
         self.server.server_close()
         self.tmp.cleanup()
 
+    def seed_partial(self, resource: str) -> Path:
+        part = self.dir / "setup.zip.mdpart"
+        part.write_bytes(self.DATA[:300_000])
+        part.with_suffix(".mdpart.json").write_text(json.dumps({
+            "source": hashlib.sha256(f"{self.base}/{resource}".encode()).hexdigest(),
+            "etag": '"fixture-v1"',
+        }), encoding="utf-8")
+        return part
+
     def test_download_resume_and_names(self) -> None:
         cookie = self.dir / "c.txt"
         cookie.write_text("# Netscape HTTP Cookie File\n127.0.0.1\tFALSE\t/\tFALSE\t9999999999\tsid\tabc\n",
                           encoding="utf-8")
         # A partial file from a stopped download is continued with a Range request.
-        (self.dir / "setup.zip.mdpart").write_bytes(self.DATA[:300_000])
+        self.seed_partial("f")
         metrics: list[dict] = []
         path = file_download.direct_download(url=f"{self.base}/f", download_dir=self.dir, filename="setup.zip",
                                              cancel_event=threading.Event(), cookiefile=str(cookie),
@@ -247,6 +279,7 @@ class FileDownloadTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), self.DATA)
         self.assertFalse((self.dir / "setup.zip.mdpart").exists())
         self.assertEqual(self.seen[-1]["Range"], "bytes=300000-")
+        self.assertEqual(self.seen[-1]["If-Range"], '"fixture-v1"')
         self.assertEqual(self.seen[-1]["Referer"], "https://example.com/")
         self.assertIn("sid=abc", self.seen[-1].get("Cookie", ""))
         self.assertEqual(metrics[-1]["total_bytes"], len(self.DATA))
@@ -260,8 +293,7 @@ class FileDownloadTests(unittest.TestCase):
         self.assertEqual(named.name, "server name.zip")
 
     def test_bad_resume_offset_restarts_instead_of_appending(self) -> None:
-        partial = self.dir / "setup.zip.mdpart"
-        partial.write_bytes(self.DATA[:300_000])
+        partial = self.seed_partial("bad-range")
         path = file_download.direct_download(
             url=f"{self.base}/bad-range", download_dir=self.dir, filename="setup.zip",
             cancel_event=threading.Event(),
@@ -269,6 +301,32 @@ class FileDownloadTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), self.DATA)
         self.assertFalse(partial.exists())
         self.assertEqual([headers.get("Range") for headers in self.seen], ["bytes=300000-", None])
+
+    def test_resume_does_not_reuse_a_different_file_or_version(self) -> None:
+        for old_resource, resource, requested_ranges in (
+            ("different", "f", [None]),
+            ("changed", "changed", ["bytes=300000-", None]),
+        ):
+            with self.subTest(resource=resource):
+                self.seen.clear()
+                self.seed_partial(old_resource).write_bytes(b"wrong" * 60_000)
+                path = file_download.direct_download(
+                    url=f"{self.base}/{resource}", download_dir=self.dir, filename="setup.zip",
+                    cancel_event=threading.Event(),
+                )
+                self.assertEqual(path.read_bytes(), self.DATA)
+                self.assertFalse(path.with_name(path.name + ".mdpart.json").exists())
+                self.assertEqual([headers.get("Range") for headers in self.seen], requested_ranges)
+                path.unlink()
+
+    def test_login_page_is_not_saved_as_the_attachment(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "web page"):
+            file_download.direct_download(
+                url=f"{self.base}/page", download_dir=self.dir, filename="setup.zip",
+                cancel_event=threading.Event(),
+            )
+        self.assertEqual(list(self.dir.iterdir()), [])
+        self.assertEqual(file_download.clean_filename("CON.txt"), "_CON.txt")
 
     def test_stop_keeps_the_partial_file(self) -> None:
         cancel = threading.Event()
@@ -325,6 +383,32 @@ class HandOverTests(unittest.TestCase):
                                                                   "kind": "link"})
         self.assertEqual(fake.calls[0][2]["file_name"], "pack.zip")
         self.assertNotIn("direct", fake.calls[1][2])
+
+
+class DownloadWorkerTests(unittest.TestCase):
+    def test_transfer_failure_uses_the_other_source_once(self) -> None:
+        from unittest.mock import Mock, patch
+
+        working = "https://example.com/watch"
+        denied = "https://cdn.example/expired.m3u8"
+        events = Mock()
+        app = SimpleNamespace(_put_download_event=events, _reserve_name=lambda _id, name: name)
+        options = {"batch_id": "job", "fallback_url": working, "title_hint": "Clip"}
+        with tempfile.TemporaryDirectory() as tmp:
+            download_dir = Path(tmp)
+            output = download_dir / "Clip.bin"
+            with patch.object(app_module, "shared_analyze_url", side_effect=[
+                ({"title": "Clip"}, {"source": "cdn"}),
+                ({"title": "Clip"}, {"source": "page"}),
+            ]) as analyze, patch.object(app_module, "shared_download_from_analysis", side_effect=[
+                RuntimeError("HTTP Error 403: expired"), output,
+            ]) as download:
+                app_module.DownloaderApp._download_worker(
+                    app, "id", threading.Event(), denied, "Clip", download_dir, options,
+                )
+            self.assertEqual([call.args[0] for call in analyze.call_args_list], [denied, working])
+            self.assertEqual([call.kwargs["url"] for call in download.call_args_list], [denied, working])
+            self.assertIn("download_done", [call.args[0] for call in events.call_args_list])
 
 
 if __name__ == "__main__":

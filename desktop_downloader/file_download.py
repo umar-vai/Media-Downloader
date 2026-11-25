@@ -8,7 +8,9 @@ request when the server supports that.
 
 from __future__ import annotations
 
+import hashlib
 import http.cookiejar
+import json
 import mimetypes
 import os
 import re
@@ -24,6 +26,8 @@ from urllib.parse import unquote, urlsplit
 
 PART_SUFFIX = ".mdpart"
 CHUNK = 256 * 1024
+_WINDOWS_DEVICE = re.compile(r"^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])$", re.I)
+_ALLOWED_HEADERS = {"accept", "accept-language", "origin", "user-agent"}
 DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/131.0 Safari/537.36")
 _BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
@@ -57,6 +61,8 @@ def clean_filename(name: str, fallback: str = "download") -> str:
     if len(name) > 180:
         stem, dot, ext = name.rpartition(".")
         name = (stem[: 180 - len(ext) - 1] + "." + ext) if dot and len(ext) <= 10 else name[:180]
+    if _WINDOWS_DEVICE.fullmatch(name.split(".", 1)[0].rstrip()):
+        name = "_" + name
     return name or fallback
 
 
@@ -133,17 +139,19 @@ def _opener(cookiefile: str, url: str = "") -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(*handlers)
 
 
-def _request(url: str, headers: dict[str, str], referer: str, start: int = 0) -> urllib.request.Request:
+def _request(url: str, headers: dict[str, str], referer: str, start: int = 0, etag: str = "") -> urllib.request.Request:
     request = urllib.request.Request(url, method="GET")
     request.add_header("User-Agent", DEFAULT_UA)
     request.add_header("Accept", "*/*")
+    request.add_header("Accept-Encoding", "identity")
     for key, value in (headers or {}).items():
-        if key and value and "\n" not in str(value) and "\r" not in str(value):
+        if str(key).lower() in _ALLOWED_HEADERS and value and "\n" not in str(value) and "\r" not in str(value):
             request.add_header(str(key), str(value))
-    if referer:
+    if referer.startswith(("https://", "http://")) and not any(c in referer for c in "\r\n"):
         request.add_header("Referer", referer)
     if start > 0:
         request.add_header("Range", f"bytes={start}-")
+        request.add_header("If-Range", etag)
     return request
 
 
@@ -187,6 +195,17 @@ def _target(directory: Path, name: str) -> Path:
     return directory / f"{stem} {int(time.time())}{ext}"
 
 
+def _resume_state(part: Path, source: str) -> tuple[int, str]:
+    try:
+        state: Any = json.loads(part.with_suffix(PART_SUFFIX + ".json").read_text(encoding="utf-8"))
+        etag = state.get("etag") if isinstance(state, dict) and state.get("source") == source else None
+        if isinstance(etag, str) and etag.startswith('"') and etag.endswith('"') and not any(c in etag for c in "\r\n"):
+            return part.stat().st_size, etag
+    except (OSError, ValueError):
+        pass
+    return 0, ""
+
+
 def direct_download(
     *,
     url: str,
@@ -204,12 +223,13 @@ def direct_download(
     download_dir = Path(download_dir)
     download_dir.mkdir(parents=True, exist_ok=True)
     opener = _opener(cookiefile, url)
+    source = hashlib.sha256(url.encode("utf-8")).hexdigest()
     if on_status:
         on_status("Connecting")
 
-    def connect(offset: int) -> Any:
+    def connect(offset: int, etag: str = "") -> Any:
         try:
-            return opener.open(_request(url, headers or {}, referer, offset), timeout=timeout)
+            return opener.open(_request(url, headers or {}, referer, offset, etag), timeout=timeout)
         except urllib.error.HTTPError as exc:
             if offset and exc.code == 416:
                 return None  # the saved part no longer matches the file
@@ -222,8 +242,8 @@ def direct_download(
     known = clean_filename(filename, "") if extension_of(filename) else ""
     final = _target(download_dir, known) if known else None
     part = final.with_name(final.name + PART_SUFFIX) if final else None
-    start = part.stat().st_size if part is not None and part.exists() else 0
-    response = connect(start) if start else None
+    start, validator = _resume_state(part, source) if part else (0, "")
+    response = connect(start, validator) if start else None
     if response is None:
         start = 0
         response = connect(0)
@@ -236,17 +256,20 @@ def direct_download(
                                    content_type=response.headers.get("Content-Type") or "")
             final = _target(download_dir, name)
             part = final.with_name(final.name + PART_SUFFIX)
-            start = part.stat().st_size if part.exists() else 0
+            start, validator = _resume_state(part, source)
             accepts_ranges = "bytes" in (response.headers.get("Accept-Ranges") or "").lower()
             length = int(response.headers.get("Content-Length") or 0)
             if start and accepts_ranges and (not length or start < length):
-                ranged = connect(start)
+                ranged = connect(start, validator)
                 if ranged is not None:
                     response.close()
                     response = responses.enter_context(ranged)
 
         match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("Content-Range") or "")
-        if response.status == 206 and start and (match is None or int(match.group(1)) != start):
+        returned_etag = response.headers.get("ETag") or ""
+        if response.status == 206 and start and (
+            match is None or int(match.group(1)) != start or (returned_etag and returned_etag != validator)
+        ):
             # A response starting at the wrong byte would corrupt the saved partial.
             response.close()
             response = responses.enter_context(connect(0))
@@ -261,13 +284,30 @@ def direct_download(
         else:
             start = 0
             total = int(response.headers.get("Content-Length") or 0)
+        content_type = (response.headers.get("Content-Type") or "").lower().split(";")[0].strip()
+        disposition = response.headers.get("Content-Disposition") or ""
+        if (
+            any(tag in content_type for tag in ("mpegurl", "dash+xml"))
+            or content_type in {"text/html", "application/xhtml+xml"}
+            and final.suffix.lower() not in {".htm", ".html", ".xhtml"}
+            and "attachment" not in disposition.lower()
+        ):
+            raise RuntimeError("The server returned a web page or playlist instead of the expected file.")
         if on_status:
             on_status("Resuming download" if start else "Downloading")
 
         done = start
         window: list[tuple[float, int]] = [(time.monotonic(), done)]
         last_report = 0.0
+        if cancel_event.is_set():
+            raise Cancelled("Download stopped.")
+        state_path = part.with_suffix(PART_SUFFIX + ".json")
         with open(part, "ab" if start else "wb") as handle:
+            if not start:
+                # Write the validator after truncating old bytes, before saving new bytes.
+                etag = response.headers.get("ETag") or ""
+                with open(state_path, "w", encoding="utf-8") as state_file:
+                    json.dump({"source": source, "etag": etag}, state_file)
             while True:
                 if cancel_event.is_set():
                     raise Cancelled("Download stopped.")
@@ -295,6 +335,10 @@ def direct_download(
     if cancel_event.is_set():
         raise Cancelled("Download stopped.")
     os.replace(part, final)
+    try:
+        state_path.unlink(missing_ok=True)
+    except OSError:
+        pass
     if on_metrics:
         on_metrics({"downloaded_bytes": done, "total_bytes": total or done, "speed_bps": 0.0, "eta_seconds": 0})
     if on_progress:

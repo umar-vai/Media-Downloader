@@ -16,6 +16,7 @@ import urllib.request
 import uuid
 from urllib.parse import urlsplit
 import webbrowser
+from concurrent.futures import Future, TimeoutError
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -48,7 +49,7 @@ from shared_engine import Cancelled as SharedCancelled, analyze_url as shared_an
 from media_core.engine import is_placeholder_title
 from batch_download import parse_batch_urls_detailed
 from command_palette import CommandPalette
-from download_rules import parse_rules, resolve_target
+from download_rules import parse_rules, resolve_target, writable_folder
 from extension_server import ExtensionServer, purge_old_cookie_files, write_cookie_file
 from failure_dialog import FailureDialog
 from hotkey import GlobalHotkey, MOD_ALT, MOD_CONTROL
@@ -477,7 +478,6 @@ class DownloaderApp(UIMixin, tk.Tk):
         self._latest_download_progress: dict[str, dict[str, Any]] = {}
         self._latest_download_metrics: dict[str, dict[str, Any]] = {}
         self._stopping_workers: set[str] = set()   # stopped by force, thread still winding down
-        self._forced_cancelled: set[str] = set()
         self._capture_ids: set[str] = set()   # downloads shown in their own window: no notifications
         self._capture_dialogs: list[Any] = []
         self._download_activity_after_id: str | None = None
@@ -995,9 +995,9 @@ class DownloaderApp(UIMixin, tk.Tk):
         if audio_format not in AUDIO_FORMATS or bitrate not in {"128", "192", "256", "320"}:
             raise ValueError("Invalid audio output settings.")
 
-        self.download_dir.mkdir(parents=True, exist_ok=True)
         batch_id = uuid.uuid4().hex
         payloads = []
+        checked_dirs: dict[Path, Path] = {}
         rules = parse_rules(str(self.settings.get("folder_rules") or ""))
         # A stream sent by the browser extension lives on a CDN; website folder rules and the
         # history's "website" use the page it was playing on.
@@ -1016,6 +1016,9 @@ class DownloaderApp(UIMixin, tk.Tk):
             )
             if target_dir_override is not None:
                 target_dir = target_dir_override
+            if target_dir not in checked_dirs:
+                checked_dirs[target_dir] = writable_folder(target_dir)
+            target_dir = checked_dirs[target_dir]
             request_settings = {
                 **(extra or {}),
                 "batch_id": batch_id,
@@ -1166,6 +1169,7 @@ class DownloaderApp(UIMixin, tk.Tk):
             skip_existing=False if request_settings.get("force_redownload") else None,
         )
         direct = bool(request_settings.get("direct"))
+        fallback_url = str(request_settings.get("fallback_url") or "")
         try:
             if request_settings.get("batch_id") and not direct:
                 if cancel_event.is_set():
@@ -1184,8 +1188,6 @@ class DownloaderApp(UIMixin, tk.Tk):
                             "download_status", request_id, f"Analyze: {text}"
                         ),
                     )
-
-                fallback_url = str(request_settings.get("fallback_url") or "")
 
                 def plain_file() -> bool:
                     found = file_download.probe_file(
@@ -1209,7 +1211,11 @@ class DownloaderApp(UIMixin, tk.Tk):
                         # or the captured stream was refused: read the page it was playing on.
                         # (Kept in the settings, so a manual Retry gets the same second chance.)
                         LOGGER.info("Analysis failed request=%s, trying fallback %s", request_id, fallback_url)
-                        url = fallback_url
+                        url, fallback_url = fallback_url, ""
+                        engine_options.set_request_context(
+                            cookiefile=str(request_settings.get("cookiefile") or ""),
+                            skip_existing=False if request_settings.get("force_redownload") else None,
+                        )
                         summary, extracted_info = analyze(url)
                     elif not cancel_event.is_set() and plain_file():
                         # Not a video page but a file (download.php?id=..., an attachment...): save it as-is.
@@ -1305,6 +1311,18 @@ class DownloaderApp(UIMixin, tk.Tk):
                 except SharedCancelled:
                     raise
                 except Exception as exc:
+                    if (
+                        not direct and fallback_url and fallback_url != url and not cancel_event.is_set()
+                        and re.search(r"\b(?:401|403|404|410)\b|expired|request incorrect", str(exc), re.I)
+                    ):
+                        url, fallback_url = fallback_url, ""
+                        LOGGER.info("Trying alternate source after transfer failure request=%s", request_id)
+                        engine_options.set_request_context(
+                            cookiefile=str(request_settings.get("cookiefile") or ""),
+                            skip_existing=False if request_settings.get("force_redownload") else None,
+                        )
+                        _summary, cached_info = shared_analyze_url(url, cancel_event=cancel_event)
+                        continue
                     if cancel_event.is_set() or attempt > MAX_AUTO_RETRIES or not _looks_transient(str(exc)):
                         raise
                     LOGGER.warning("Transient failure request=%s attempt=%s: %s", request_id, attempt, exc)
@@ -1446,8 +1464,13 @@ class DownloaderApp(UIMixin, tk.Tk):
                     continue
 
                 if kind == "external_download":
-                    if isinstance(payload, dict):
-                        self._handle_external_download(payload)
+                    data, acceptance = payload
+                    if acceptance.set_running_or_notify_cancel():
+                        try:
+                            acceptance.set_result(self._handle_external_download(data))
+                        except Exception:
+                            LOGGER.exception("Could not accept browser download")
+                            acceptance.set_result(False)
                     continue
                 if kind == "hotkey_clipboard":
                     if isinstance(payload, dict):
@@ -1461,14 +1484,13 @@ class DownloaderApp(UIMixin, tk.Tk):
                     data = payload.get("data")
                     request_state = self.download_queue.get(request_id)
 
-                    if request_id in self._stopping_workers and kind != "download_finished":
-                        # This worker was stopped by force (cancel/pause took too long): whatever it
-                        # still reports is stale. A file it managed to finish after a cancel goes away.
-                        if kind == "download_done" and request_id in self._forced_cancelled:
-                            try:
-                                Path(str((data or {}).get("path") or "")).unlink(missing_ok=True)
-                            except OSError:
-                                pass
+                    if request_id in self._stopping_workers and kind not in {"download_finished", "download_done"}:
+                        continue
+                    # A final path may be an existing file reused by this job. Late worker
+                    # events never delete committed media, even when the row was removed.
+                    if kind == "download_done" and (
+                        not request_state or request_id in getattr(self, "_discard_ids", ())
+                    ):
                         continue
 
                     if kind == "download_status":
@@ -1541,7 +1563,6 @@ class DownloaderApp(UIMixin, tk.Tk):
 
                     elif kind == "download_finished":
                         self._stopping_workers.discard(request_id)
-                        self._forced_cancelled.discard(request_id)
                         self.download_cancel_events.pop(request_id, None)
                         with self._download_progress_lock:
                             self._latest_download_metrics.pop(request_id, None)
@@ -2145,7 +2166,7 @@ class DownloaderApp(UIMixin, tk.Tk):
             return
         server = ExtensionServer(
             token=str(self.settings.get("extension_token") or ""),
-            on_download=lambda data: bool(self.events.put(("external_download", dict(data))) or True),
+            on_download=self._accept_browser_download,
             app_version=APP_VERSION,
             on_analyze=self._analyze_for_extension,
             capture=bool(self.settings.get("extension_enabled", True)),
@@ -2264,7 +2285,18 @@ class DownloaderApp(UIMixin, tk.Tk):
             "qualities": [f"{h}p" for h in heights],
         }
 
-    def _handle_external_download(self, data: dict[str, Any]) -> None:
+    def _accept_browser_download(self, data: dict[str, Any]) -> bool:
+        if self._quitting:
+            return False
+        acceptance: Future[bool] = Future()
+        self.events.put(("external_download", (data, acceptance)))
+        try:
+            return acceptance.result(timeout=1.5)
+        except TimeoutError:
+            acceptance.cancel()
+            return False
+
+    def _handle_external_download(self, data: dict[str, Any]) -> bool:
         url = str(data.get("url") or "").strip()
         extra: dict[str, Any] = {}
         referer = str(data.get("referer") or "").strip()
@@ -2285,6 +2317,11 @@ class DownloaderApp(UIMixin, tk.Tk):
         # A download the browser started ("file"), or a right-clicked link to a zip/exe/pdf...,
         # is saved as-is instead of being read as a video page.
         direct = kind == "file" or (kind != "media" and file_download.looks_like_file(url))
+        if kind == "file" and any(
+            (urlsplit(value).hostname or "").lower() in {"web.telegram.org", "webk.telegram.org", "webz.telegram.org"}
+            for value in (url, page_url, referer)
+        ):
+            return False
         if direct:
             name = file_download.clean_filename(str(data.get("fileName") or ""), "") or file_download.name_from_url(url)
             extra["direct"] = True
@@ -2326,11 +2363,13 @@ class DownloaderApp(UIMixin, tk.Tk):
                 extra["cookiefile"] = str(path)
         if bool(self.settings.get("capture_dialog", True)):
             self._open_capture_dialog(url, options, extra, direct=direct, data=data)
-            return
+            return True
         try:
             self._enqueue_batch_downloads(url, options, extra=extra)
         except (ValueError, OSError) as exc:
             LOGGER.warning("Extension link rejected: %s", exc)
+            return False
+        return True
 
     # ------------------------------------------------------------------ download window
     def _open_capture_dialog(
@@ -2452,8 +2491,8 @@ class DownloaderApp(UIMixin, tk.Tk):
             "1. Open your browser's extensions page (chrome://extensions is on the clipboard; Edge: edge://extensions).\n"
             "2. Turn on Developer mode and choose Load unpacked, then pick that folder.\n"
             "   Already installed? Just press Reload on the extension.\n\n"
-            "It connects to Media Downloader by itself - there is no token to copy. From then on, files you "
-            "download in the browser are downloaded by Media Downloader.",
+            "The exported folder connects automatically. Supported Chrome and Edge downloads can "
+            "open in Media Downloader. Browser-generated downloads stay in the browser.",
             parent=self,
         )
 
@@ -2600,7 +2639,6 @@ class DownloaderApp(UIMixin, tk.Tk):
             self.download_queue.mark_paused(request_id)
             self._set_status("Download paused", "ready")
         else:
-            self._forced_cancelled.add(request_id)
             self.download_queue.cancel(request_id)
             self._record_history(request_id, "cancelled")
             self._set_status("Download cancelled", "cancelled")

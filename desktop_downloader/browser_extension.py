@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-EXTENSION_VERSION = "2.9.0"
+EXTENSION_VERSION = "2.10.0"
 
 MANIFEST = {
     "manifest_version": 3,
@@ -117,6 +117,7 @@ async function syncBundledPairing() {
     if (!token) return;
     const current = String((await api.storage.local.get("token")).token || "").trim();
     if (current !== token) await api.storage.local.set({token, pairedAutomatically: true});
+    return token;
   } catch (e) {}
 }
 const pairingReady = syncBundledPairing();
@@ -128,12 +129,13 @@ async function getToken() {
 }
 
 let appCapture = true; // the app's "catch browser downloads" option, read from /ping
-async function findPort() {
+async function findPort(signal) {
   const cached = (await api.storage.local.get("port")).port;
   const order = cached ? [cached, ...PORTS.filter(p => p !== cached)] : PORTS;
   for (const port of order) {
+    if (signal?.aborted) return 0;
     try {
-      const r = await fetch(`http://127.0.0.1:${port}/ping`, {cache: "no-store"});
+      const r = await fetch(`http://127.0.0.1:${port}/ping`, {cache: "no-store", signal});
       const j = await r.json();
       if (j && j.app === "Media Downloader") {
         appCapture = j.capture !== false;
@@ -145,36 +147,24 @@ async function findPort() {
   return 0;
 }
 
-// Self-pairing: the app hands its token to browser extensions only (web pages cannot fake
-// the Origin header). So a reinstalled app, a new token or an extension loaded from another
-// folder never ends up as "wrong token": it simply pairs again.
-async function pairWithApp(port) {
-  try {
-    const r = await fetch(`http://127.0.0.1:${port}/pair`, {cache: "no-store"});
-    const j = await r.json();
-    const token = String((j && j.token) || "").trim();
-    if (r.ok && token) { await api.storage.local.set({token, pairedAutomatically: true}); return token; }
-  } catch (e) {}
-  return "";
-}
-
 // POST to the app, finding it and (re)pairing as needed. Returns {...reply, ok, status}.
-async function appRequest(path, body) {
-  const port = await findPort();
+async function appRequest(path, body, knownPort = 0, signal) {
+  const port = knownPort || await findPort(signal);
   if (!port) return {ok: false, status: 0, error: "Media Downloader is not running."};
   let token = await getToken();
-  if (!token) token = await pairWithApp(port);
+  if (!token) return {ok: false, status: 401, error: "Pair the extension using the desktop app."};
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const r = await fetch(`http://127.0.0.1:${port}${path}`, {
         method: "POST",
+        signal,
         headers: {"Content-Type": "application/json", "X-MD-Token": token},
         body: JSON.stringify(body || {}),
       });
       const j = await r.json().catch(() => ({}));
       if (r.status === 401 && attempt === 0) {
-        const fresh = await pairWithApp(port);
-        if (fresh) { token = fresh; continue; }
+        const fresh = await syncBundledPairing();
+        if (fresh && fresh !== token) { token = fresh; continue; }
       }
       return {...j, ok: r.ok && !!j.ok, status: r.status};
     } catch (e) {
@@ -198,7 +188,7 @@ function cleanTitle(title) {
 }
 
 // payload: {url, referer, headers, title, quality, mode, pageUrl, kind, fileName, fileSize, mime}
-async function sendToApp(payload) {
+async function sendToApp(payload, port, signal) {
   const seen = new Set();
   let cookies = [];
   for (const source of [payload.url, payload.referer, payload.pageUrl]) {
@@ -220,7 +210,7 @@ async function sendToApp(payload) {
     mime: payload.mime || "",
     cookies,
   };
-  const result = await appRequest("/download", body);
+  const result = await appRequest("/download", body, port, signal);
   if (result.ok) return {ok: true};
   return {ok: false, error: result.error || "The app refused the link."};
 }
@@ -735,8 +725,7 @@ api.contextMenus.onClicked.addListener((info, tab) => {
 // Like a desktop download manager: a file the browser starts saving is paused, handed to the
 // app, and removed from the browser only when the app accepted it. If the app is closed or
 // unpaired the browser simply carries on. Alt+click on a link lets the browser keep it.
-let bypassUntil = 0;
-const capturedIds = new Set();
+const bypassUntil = new Map();
 
 function fileNameOf(item, url) {
   const fromItem = String(item.filename || "").split(/[\\/]/).pop();
@@ -758,35 +747,58 @@ function captureAllowed(name, mime) {
   return /^(video|audio)\//i.test(mime || "") || /zip|rar|7z|x-msdownload|octet-stream|pdf|iso9660|android\.package/i.test(mime || "");
 }
 
+function browserOwnedDownload(item, url) {
+  // Telegram Web and similar service-worker downloads can expose an HTTP-looking
+  // URL whose response only exists inside the originating browser session.
+  const telegramWeb = value => /^(web|webk|webz)\.telegram\.org$/.test(hostOf(value));
+  return item.incognito || !/^https?:/i.test(url) ||
+    [url, item.url, item.referrer].some(telegramWeb);
+}
+
 async function captureDownload(item) {
-  if (!item || capturedIds.has(item.id)) return;
+  if (!item) return;
   await loadSettings();
   const url = item.finalUrl || item.url || "";
-  if (!settings.capture || !/^https?:/i.test(url)) return;          // blob:, data:, file: stay in the browser
-  if (item.byExtensionId || (item.state && item.state !== "in_progress")) return;
-  if (Date.now() < bypassUntil) { bypassUntil = 0; return; }
+  if (!settings.capture || browserOwnedDownload(item, url)) return;
+  if (item.byExtensionId || item.danger && item.danger !== "safe" ||
+      item.state && item.state !== "in_progress") return;
   const pageUrl = item.referrer || "";
+  const bypass = [url, item.url].find(value => (bypassUntil.get(value) || 0) > Date.now());
+  if (bypass) { bypassUntil.delete(bypass); return; }
   if (isBlocked(url) || (pageUrl && isBlocked(pageUrl))) return;
   const name = fileNameOf(item, url);
   if (!captureAllowed(name, item.mime)) return;
-  const size = Number(item.totalBytes || item.fileSize || 0);
+  const size = Number(item.totalBytes > 0 ? item.totalBytes : item.fileSize || 0);
   if (settings.minSizeKb && size > 0 && size < settings.minSizeKb * 1024) return;
-  // Leave the download to the browser when the app is closed or its option is off.
-  if (!(await findPort()) || !appCapture) return;
-  capturedIds.add(item.id);
-  try { await api.downloads.pause(item.id); } catch (e) {}
-  const result = await sendToApp({url, referer: pageUrl, pageUrl, kind: "file", fileName: name, fileSize: size,
-                                  mime: item.mime || "", title: name.replace(/\.[a-z0-9]{1,9}$/i, "")});
-  if (result.ok) {
-    try { await api.downloads.cancel(item.id); } catch (e) {}
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2200);
+  try {
+    const port = await findPort(controller.signal);
+    if (!port || !appCapture) return;
+    const result = await sendToApp({
+      url, referer: pageUrl, pageUrl, kind: "file", fileName: name, fileSize: size,
+      mime: item.mime || "", title: name.replace(/\.[a-z0-9]{1,9}$/i, ""),
+    }, port, controller.signal);
+    if (!result.ok) return;
+    // Chromium has not finalized its filename dialog while suggest() is pending.
+    // Cancel the browser item only once the desktop UI has accepted it.
+    await api.downloads.cancel(item.id);
     try { await api.downloads.erase({id: item.id}); } catch (e) {}
-  } else {
-    capturedIds.delete(item.id);
-    try { await api.downloads.resume(item.id); } catch (e) {}
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-try { api.downloads.onCreated.addListener(item => { captureDownload(item); }); } catch (e) {}
+try {
+  api.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    captureDownload(item).catch(() => {}).finally(() => suggest());
+    return true;
+  });
+} catch (e) {
+  // Browsers without a filename event keep their native download flow.
+  // The explicit extension menu and video button are still available.
+}
 
 api.commands.onCommand.addListener(async (command) => {
   if (command !== "send-page") return;
@@ -882,7 +894,12 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     loadSettings().then(() => sendResponse({blocked: isBlocked(msg.url || ""), host: hostOf(msg.url || "")}));
     return true;
   }
-  if (msg.type === "md-bypass") { bypassUntil = Date.now() + 8000; return; }
+  if (msg.type === "md-bypass" && /^https?:/i.test(msg.url || "")) {
+    for (const [url, until] of bypassUntil) if (until <= Date.now()) bypassUntil.delete(url);
+    if (bypassUntil.size >= 64) bypassUntil.delete(bypassUntil.keys().next().value);
+    bypassUntil.set(msg.url, Date.now() + 8000);
+    return;
+  }
   if (msg.type === "ping") { findPort().then(port => sendResponse({port})); return true; }
 });
 """
@@ -898,7 +915,7 @@ CONTENT_JS = r"""
   document.addEventListener("click", event => {
     if (!event.altKey) return;
     const link = event.target && event.target.closest ? event.target.closest("a[href]") : null;
-    if (link) { try { api.runtime.sendMessage({type: "md-bypass"}); } catch (e) {} }
+    if (link) { try { api.runtime.sendMessage({type: "md-bypass", url: link.href}); } catch (e) {} }
   }, true);
 
   // The background may ask this frame to read a playlist that only the player's origin can load.
