@@ -6,6 +6,7 @@ import tempfile
 import tkinter as tk
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -71,6 +72,21 @@ class CaptureDialogTests(unittest.TestCase):
             self.assertEqual(dialog.title(), "Download complete")
             self.assertEqual(dialog._last_status, "done")
             dialog._on_close()
+
+    def test_completed_actions_close_only_after_launch_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "done.zip"
+            target.write_bytes(b"x")
+            for method, helper in (("_open_file", "open_path"), ("_open_folder", "reveal")):
+                with self.subTest(action=method):
+                    dialog = self.make(FakeBackend(), tmp)
+                    dialog._path = str(target)
+                    with patch(f"capture_dialog.{helper}", side_effect=[False, True]) as launch:
+                        getattr(dialog, method)()
+                        self.assertTrue(dialog.winfo_exists())
+                        getattr(dialog, method)()
+                        self.assertFalse(dialog.winfo_exists())
+                        launch.assert_called_with(str(target))
 
     def test_download_later_closes_window_and_holds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

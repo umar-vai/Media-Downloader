@@ -2862,53 +2862,51 @@ class MediaEditorWindow(tk.Toplevel):
     def _export_worker(self, command: list[str], output: Path, expected_duration: float) -> None:
         error_lines: list[str] = []
         try:
-            output.unlink(missing_ok=True)
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            self.export_process = process
+            with tempfile.TemporaryDirectory(prefix=".md-export-", dir=output.parent) as tmp:
+                staged = Path(tmp) / ("output" + output.suffix)
+                process = subprocess.Popen(
+                    [*command[:-1], str(staged)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                self.export_process = process
 
-            if process.stdout is not None:
-                for raw in process.stdout:
-                    line = raw.strip()
-                    if not line:
-                        continue
-                    if "=" not in line:
-                        error_lines.append(line)
-                        error_lines = error_lines[-20:]
-                        continue
-                    key, value = line.split("=", 1)
-                    if key in {"out_time_ms", "out_time_us"}:
-                        try:
-                            seconds = int(value) / 1_000_000
-                            fraction = max(0.0, min(1.0, seconds / max(0.001, expected_duration)))
-                            self._post_ui(self._apply_export_progress, fraction)
-                        except Exception:
-                            pass
+                if process.stdout is not None:
+                    for raw in process.stdout:
+                        line = raw.strip()
+                        if not line:
+                            continue
+                        if "=" not in line:
+                            error_lines.append(line)
+                            error_lines = error_lines[-20:]
+                            continue
+                        key, value = line.split("=", 1)
+                        if key in {"out_time_ms", "out_time_us"}:
+                            try:
+                                seconds = int(value) / 1_000_000
+                                fraction = max(0.0, min(1.0, seconds / max(0.001, expected_duration)))
+                                self._post_ui(self._apply_export_progress, fraction)
+                            except Exception:
+                                pass
 
-            returncode = process.wait()
-            cancelled = self.export_cancelled
-            self.export_process = None
+                returncode = process.wait()
+                cancelled = self.export_cancelled
+                self.export_process = None
 
-            if cancelled:
-                try:
-                    output.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                self._post_ui(self._export_cancelled_ui)
-                return
+                if cancelled:
+                    self._post_ui(self._export_cancelled_ui)
+                    return
 
-            if returncode != 0 or not output.exists():
-                raise RuntimeError("\n".join(error_lines)[-1800:] or "FFmpeg export failed.")
+                if returncode != 0 or not staged.is_file():
+                    raise RuntimeError("\n".join(error_lines)[-1800:] or "FFmpeg export failed.")
 
-            self._post_ui(self._export_done, output)
+                os.replace(staged, output)
+                self._post_ui(self._export_done, output)
         except Exception as exc:
             self.export_process = None
             self._post_ui(self._export_failed, str(exc))

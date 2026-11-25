@@ -9,7 +9,9 @@ Rules are typed one per line in Settings, for example::
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -94,3 +96,15 @@ def resolve_target(
         if label:
             folder = default_dir / label
     return folder, quality
+
+
+def writable_folder(value: str | Path) -> Path:
+    """Resolve a save folder and check that a download can create files there."""
+    folder = Path(os.path.expandvars(str(value).strip().strip('"'))).expanduser()
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryFile(dir=folder):
+            pass
+    except OSError as exc:
+        raise OSError(f"Cannot save in {folder}. {exc.strerror or exc}") from exc
+    return folder

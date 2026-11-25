@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -25,6 +26,28 @@ from media_editor_engine import (
     probe_media,
     safe_export_name,
 )
+
+
+class MediaEditorExportTests(unittest.TestCase):
+    def test_failed_export_preserves_existing_output_and_cleans_staging(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from media_editor import MediaEditorWindow
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "already-exported.mp4"
+            output.write_bytes(b"previous file")
+            failed = Mock()
+            fake = SimpleNamespace(export_cancelled=False, _post_ui=Mock(), _export_failed=failed)
+            command = [
+                sys.executable, "-c",
+                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b'incomplete'); sys.exit(1)",
+                str(output),
+            ]
+            MediaEditorWindow._export_worker(fake, command, output, 2.0)
+            self.assertEqual(output.read_bytes(), b"previous file")
+            self.assertEqual(list(Path(tmp).iterdir()), [output])
+            self.assertIs(fake._post_ui.call_args.args[0], failed)
 
 
 class MediaEditorEngineTests(unittest.TestCase):
