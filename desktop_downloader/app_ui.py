@@ -507,8 +507,12 @@ class UIMixin:
         if name == "download":
             self.open_add_url()
         elif name == "batch":
-            self.batch_dialog.open()
-            self.batch_page.focus()
+            shell = getattr(self, "native_shell", None)
+            if shell is not None:
+                shell.batch_visible = True
+            else:
+                self.batch_dialog.open()
+                self.batch_page.focus()
         elif name == "updates":
             shell = getattr(self, "native_shell", None)
             if shell is not None:
@@ -1200,6 +1204,7 @@ class UIMixin:
         key = f"queue:{batch_id}"
         shell = getattr(self, "native_shell", None)
         if shell is not None:
+            shell.batch_visible = False
             self._select_category(key)
         else:
             self._show_category(key if self.category_tree.tree.exists(key) else "all")

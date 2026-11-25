@@ -35,6 +35,7 @@
 #include <string>
 
 #include "add_url_dialog.h"
+#include "batch_dialog.h"
 #include "update_dialog.h"
 
 namespace {
@@ -181,6 +182,9 @@ public:
             send(command, value);
         });
 
+        batchDialog = new BatchDialog(this, [this](const QString &command, const QJsonValue &value) {
+            send(command, value);
+        });
         updateDialog = new UpdateDialog(this, [this](const QString &command) { send(command); });
 
         auto *sidebar = new QWidget;
@@ -505,6 +509,7 @@ public:
         const auto status = state.value("status").toString();
         addUrl->apply(state.value("addForm").toObject());
         updateDialog->apply(state.value("updateDialog").toObject());
+        batchDialog->apply(state.value("batchDialog").toObject());
         statusBar()->showMessage(status.isEmpty() ? QString("%1 downloading  ·  %2 queued  ·  %3 paused")
                                   .arg(totals.value("downloading").toInt()).arg(totals.value("queued").toInt())
                                   .arg(totals.value("paused").toInt()) : status);
@@ -617,7 +622,7 @@ private:
             QLabel#title, QLabel#brand { font-size: 16px; font-weight: 650; }
             QLabel#detailTitle { font-weight: 650; }
             QLabel#empty { color: %7; }
-            QPushButton, QLineEdit, QComboBox { background: %2; border: 1px solid %5; border-radius: 9px; padding: 7px 11px; }
+            QPushButton, QLineEdit, QComboBox, QPlainTextEdit { background: %2; border: 1px solid %5; border-radius: 9px; padding: 7px 11px; }
             QPushButton:hover, QPushButton:focus, QLineEdit:focus { border-color: #298cc5; }
             QPushButton:disabled { color: %7; }
             QPushButton#primary { background: #086a9c; border-color: #086a9c; color: white; font-weight: 650; }
@@ -639,6 +644,7 @@ private:
     DownloadModel model;
     AddUrlDialog *addUrl{};
     UpdateDialog *updateDialog{};
+    BatchDialog *batchDialog{};
     QWidget *navigation{};
     QSplitter *downloadsSplit{};
     QListWidget *categories{};

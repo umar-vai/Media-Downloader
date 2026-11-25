@@ -74,3 +74,16 @@ class NativeShellTests(unittest.TestCase):
         app.update_action_button.instate.return_value = False
         shell._dispatch({"command": "update_install"})
         app.download_or_install_update.assert_called_once_with()
+
+    def test_batch_submit_delegates_to_the_existing_queue(self):
+        app = SimpleNamespace(_enqueue_batch_downloads=Mock(return_value=("batch", 2, 1)),
+                              _after_batch_queued=Mock(), _set_status=Mock())
+        shell = self.make_shell(app)
+        value = {"links": "https://example.test/one\nhttps://example.test/two",
+                 "mode": "Video", "quality": "720p", "format": "MP3", "bitrate": "192"}
+        shell._batch_command("batch_submit", value)
+        app._enqueue_batch_downloads.assert_called_once_with(value["links"], {
+            "mode": "Video", "video_quality": "720p", "audio_format": "MP3", "audio_quality": "192",
+        })
+        app._after_batch_queued.assert_called_once_with("batch")
+        self.assertEqual(shell.batch_links, "")

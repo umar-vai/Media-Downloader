@@ -14,6 +14,7 @@ import time
 import tkinter as tk
 from typing import Any
 
+from batch_download import MAX_BATCH_URLS, parse_batch_urls_detailed
 import download_list as dl
 from main_window import TREE_LAYOUT
 from version import APP_VERSION
@@ -87,6 +88,10 @@ class NativeShell:
         )
         self.status = ""
         self.add_visible = False
+        self.batch_visible = False
+        self.batch_links = ""
+        self.batch_status = ""
+        self.batch_count = f"0 / {MAX_BATCH_URLS} links"
         self.update_visible = False
         self.add_status = ""
         self.add_thumbnail = ""
@@ -249,6 +254,8 @@ class NativeShell:
             app._choose_theme()
         elif command in {"add_url", "add_analyze", "add_stop", "add_close", "add_submit"}:
             self._add_command(command, message.get("value"))
+        elif command in {"batch_links", "batch_submit", "batch_close"}:
+            self._batch_command(command, message.get("value"))
         elif command == "clipboard":
             mode = "Audio" if message.get("value") == "Audio" else "Video"
             app._download_clipboard_link(mode)
@@ -323,6 +330,58 @@ class NativeShell:
             "thumbnail": self.add_thumbnail,
         }
 
+    def _batch_command(self, command: str, value: Any) -> None:
+        app = self.app
+        if command == "batch_close":
+            self.batch_visible = False
+        elif command == "batch_links" and isinstance(value, str):
+            self.batch_links = value[:2_000_000]
+            self.batch_status = ""
+            try:
+                urls, duplicates, invalid = parse_batch_urls_detailed(self.batch_links)
+            except ValueError as exc:
+                self.batch_count = f"0 / {MAX_BATCH_URLS} links"
+                if self.batch_links.strip():
+                    self.batch_status = str(exc)
+            else:
+                self.batch_count = f"{len(urls)} / {MAX_BATCH_URLS} links"
+                if duplicates or invalid:
+                    self.batch_status = f"{duplicates} duplicate · {invalid} invalid"
+        elif command == "batch_submit" and isinstance(value, dict):
+            links = str(value.get("links") or "")[:2_000_000]
+            options = {
+                "mode": "Audio" if value.get("mode") == "Audio" else "Video",
+                "video_quality": str(value.get("quality") or "720p"),
+                "audio_format": str(value.get("format") or "MP3"),
+                "audio_quality": str(value.get("bitrate") or "192"),
+            }
+            try:
+                batch_id, queued, duplicates = app._enqueue_batch_downloads(links, options)
+            except (ValueError, OSError) as exc:
+                self.batch_status = str(exc)
+            else:
+                self.batch_links = ""
+                self.batch_status = ""
+                self.batch_count = f"0 / {MAX_BATCH_URLS} links"
+                app._after_batch_queued(batch_id)
+                skipped = f" · {duplicates} duplicate skipped" if duplicates else ""
+                app._set_status(f"Queued {queued} batch downloads{skipped}", "ready")
+
+    def _batch_dialog(self) -> dict[str, Any]:
+        page = self.app.batch_page
+        if not self.batch_visible:
+            return {"visible": False}
+        return {
+            "visible": True,
+            "links": self.batch_links,
+            "status": self.batch_status,
+            "count": self.batch_count,
+            "mode": page.mode_var.get(),
+            "quality": page.quality_var.get(),
+            "format": page.audio_format_var.get(),
+            "bitrate": page.audio_quality_var.get(),
+        }
+
     def _update_dialog(self) -> dict[str, Any]:
         app = self.app
         if not self.update_visible:
@@ -392,6 +451,7 @@ class NativeShell:
             "version": APP_VERSION,
             "updateAvailable": app.top_update_button.available,
             "addForm": self._add_form(),
+            "batchDialog": self._batch_dialog(),
             "updateDialog": self._update_dialog(),
             "visible": self.visible,
             "visibilityRevision": self._visibility_revision,
