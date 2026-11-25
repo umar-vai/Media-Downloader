@@ -1,0 +1,21 @@
+cmake_minimum_required(VERSION 3.21)
+project(MediaDownloaderDesktop LANGUAGES CXX)
+
+find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets)
+qt_standard_project_setup()
+qt_add_executable(MediaDownloaderDesktop WIN32 main.cpp)
+target_compile_features(MediaDownloaderDesktop PRIVATE cxx_std_20)
+target_link_libraries(MediaDownloaderDesktop PRIVATE Qt6::Widgets)
+
+if(WIN32)
+    target_sources(MediaDownloaderDesktop PRIVATE desktop.rc)
+endif()
+if(MSVC)
+    target_compile_options(MediaDownloaderDesktop PRIVATE /utf-8)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_test(NAME native_desktop_smoke COMMAND MediaDownloaderDesktop --self-test)
+    set_tests_properties(native_desktop_smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()

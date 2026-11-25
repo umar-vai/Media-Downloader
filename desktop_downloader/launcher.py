@@ -28,4 +28,6 @@ if __name__ == "__main__":
             alert_existing_instance()
         raise SystemExit(0)
 
-    MediaDownloaderApp().mainloop()
+    from native_shell import executable
+
+    MediaDownloaderApp(native_path=executable()).mainloop()

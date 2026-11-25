@@ -60,6 +60,23 @@ def _run_version_check(name: str, executable: Path | str, args: list[str]) -> Ch
     return CheckResult(name, result.returncode == 0, detail)
 
 
+def _check_native_desktop(path: Path) -> CheckResult:
+    name = "native_desktop"
+    if not path.is_file():
+        return CheckResult(name, False, "Bundled native desktop is missing.")
+    try:
+        result = subprocess.run(
+            [str(path)], cwd=path.parent, input=b'{"visible":false}\n',
+            capture_output=True, env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+            creationflags=CREATE_NO_WINDOW, timeout=12, check=False,
+        )
+        messages = [json.loads(line) for line in result.stdout.splitlines()]
+        ok = result.returncode == 0 and any(item.get("command") == "ready" for item in messages)
+        return CheckResult(name, ok, f"Qt helper handshake, exit={result.returncode}.")
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return CheckResult(name, False, str(exc))
+
+
 def _check_writable(name: str, directory: Path) -> CheckResult:
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -132,6 +149,10 @@ def run_self_test(progress_path: Path | None = None) -> dict[str, Any]:
                 f"source mode: {source_updater}",
             )
         )
+
+    if getattr(sys, "frozen", False):
+        native = _resource_path("native_desktop/MediaDownloaderDesktop.exe")
+        record(_check_native_desktop(native))
 
     try:
         import yt_dlp

@@ -2,7 +2,7 @@ name: Build Media Downloader
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/v6-telegram-desktop]
     tags:
       - 'v*'
     paths:
@@ -160,6 +160,10 @@ jobs:
             --icon desktop_downloader/assets/app_icon.ico `
             desktop_downloader/updater.py
 
+      - name: Build and test C++/Qt desktop
+        shell: pwsh
+        run: ./desktop_downloader/ci/build_native_desktop.ps1 -Destination dist/native_desktop
+
       - name: Build portable Media Downloader EXE
         shell: pwsh
         run: |
@@ -167,6 +171,7 @@ jobs:
             --name MediaDownloader `
             --icon desktop_downloader/assets/app_icon.ico `
             --add-data "desktop_downloader/assets/app_icon.ico;assets" `
+            --add-data "dist/native_desktop;native_desktop" `
             --paths "." `
             --collect-submodules media_core `
             --collect-all yt_dlp `
@@ -196,10 +201,12 @@ jobs:
           $updater = (Resolve-Path "dist\MediaDownloaderUpdater.exe").Path
           $mpv = (Resolve-Path "dist\mpv.exe").Path
           $icon = (Resolve-Path "desktop_downloader/assets/app_icon.ico").Path
+          $nativeDesktop = (Resolve-Path "dist/native_desktop").Path
           pyinstaller --noconfirm --clean --onedir --windowed `
             --name MediaDownloader `
             --icon "$icon" `
             --add-data "$icon;assets" `
+            --add-data "$nativeDesktop;native_desktop" `
             --distpath "dist/installed" `
             --workpath "build/installed" `
             --specpath "build/installed" `
