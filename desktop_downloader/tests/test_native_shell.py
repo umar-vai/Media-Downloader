@@ -17,6 +17,7 @@ class NativeShellTests(unittest.TestCase):
         shell = NativeShell.__new__(NativeShell)
         shell.app = app
         shell.add_visible = True
+        shell.batch_visible = True
         shell.selected = []
         shell.selection_revision = 0
         return shell
@@ -87,3 +88,21 @@ class NativeShellTests(unittest.TestCase):
         })
         app._after_batch_queued.assert_called_once_with("batch")
         self.assertEqual(shell.batch_links, "")
+
+    def test_settings_save_reuses_validation_and_filters_other_settings(self):
+        app = SimpleNamespace(_apply_settings=Mock())
+        shell = self.make_shell(app)
+        shell.settings_visible = True
+        shell.settings_revision = 1
+        shell.settings_tab = "General"
+        shell._save_settings({
+            "values": {"theme": "Dark", "extension_token": "ignored"},
+            "rules": [["example.test", "Downloads", "720p"]],
+            "tab": "Save To",
+            "close": True,
+        })
+        app._apply_settings.assert_called_once_with({
+            "theme": "Dark", "folder_rules": "example.test => Downloads | 720p",
+        })
+        self.assertEqual(shell.settings_tab, "Save To")
+        self.assertFalse(shell.settings_visible)

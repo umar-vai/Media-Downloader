@@ -13,7 +13,7 @@ $build = Join-Path $toolRoot "build"
 
 & $python -m pip install "aqtinstall==3.3.0" "cmake==3.31.10" "ninja==1.13.2"
 if (-not (Test-Path "$qt/bin/windeployqt.exe")) {
-    & $python -m aqt install-qt windows desktop $qtVersion win64_mingw --outputdir $kit --archives qtbase qttools
+    & $python -m aqt install-qt windows desktop $qtVersion win64_mingw --outputdir $kit --archives qtbase
 }
 if (-not (Test-Path "$compiler/g++.exe")) {
     & $python -m aqt install-tool windows desktop tools_mingw1310 qt.tools.win64_mingw1310 --outputdir $kit

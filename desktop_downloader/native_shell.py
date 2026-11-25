@@ -16,7 +16,9 @@ from typing import Any
 
 from batch_download import MAX_BATCH_URLS, parse_batch_urls_detailed
 import download_list as dl
+from download_rules import parse_rules
 from main_window import TREE_LAYOUT
+from options_dialog import rules_from_rows
 from version import APP_VERSION
 
 LOG = logging.getLogger(__name__)
@@ -64,6 +66,15 @@ ROW_ACTIONS = {
 }
 
 
+SETTINGS_FIELDS = (
+    "download_dir", "default_mode", "video_quality", "audio_format", "audio_quality",
+    "max_concurrent_downloads", "auto_analyze_links", "open_editor_after_download", "confirm_before_exit",
+    "close_to_tray", "capture_dialog", "start_with_windows", "auto_check_updates", "auto_download_updates",
+    "theme", "skip_existing", "organize_by_site", "fast_mode", "embed_metadata", "embed_thumbnail",
+    "subtitles", "subtitle_langs", "clipboard_hotkey", "extension_enabled", "cookies_file", "cookies_browser",
+)
+
+
 def executable() -> Path | None:
     override = os.environ.get("MEDIA_DOWNLOADER_NATIVE_UI")
     if override and not getattr(sys, "frozen", False):
@@ -93,6 +104,10 @@ class NativeShell:
         self.batch_status = ""
         self.batch_count = f"0 / {MAX_BATCH_URLS} links"
         self.update_visible = False
+        self.settings_visible = False
+        self.settings_revision = 0
+        self.settings_tab = "General"
+        self.settings_status = ""
         self.add_status = ""
         self.add_thumbnail = ""
         self.rows_changed = True
@@ -228,6 +243,16 @@ class NativeShell:
             app.release_button.invoke()
         elif command == "update_close":
             self.update_visible = False
+        elif command == "settings_save":
+            self._save_settings(message.get("value"))
+        elif command == "settings_close":
+            self.settings_visible = False
+        elif command == "settings_check_updates":
+            if not self.settings_visible:
+                app.show_page("updates")
+                app.check_for_updates(manual=False, inline=True)
+        elif command == "copy_pairing_token":
+            app._copy_text(str(app.settings.get("extension_token") or ""), "pairing token")
         elif command == "browser_settings":
             app.open_settings(tab="Browser")
         elif command == "column" and isinstance(message.get("value"), str) and message["value"] in app._column_vars:
@@ -332,7 +357,11 @@ class NativeShell:
 
     def _batch_command(self, command: str, value: Any) -> None:
         app = self.app
+        if not self.batch_visible:
+            return
         if command == "batch_close":
+            if isinstance(value, str):
+                self._batch_command("batch_links", value)
             self.batch_visible = False
         elif command == "batch_links" and isinstance(value, str):
             self.batch_links = value[:2_000_000]
@@ -401,6 +430,46 @@ class NativeShell:
             "installText": app.update_action_button.cget("text"),
         }
 
+    def open_settings(self, tab: str | None) -> None:
+        self.settings_tab = {"Website folders": "Save To", "About": "Updates"}.get(tab, tab) or "General"
+        self.settings_visible = True
+        self.settings_revision += 1
+        self.settings_status = ""
+
+    def _save_settings(self, value: Any) -> None:
+        app = self.app
+        if not isinstance(value, dict) or not self.settings_visible or not isinstance(value.get("values"), dict):
+            return
+        payload = {key: data for key, data in value["values"].items() if key in SETTINGS_FIELDS}
+        rules = value.get("rules")
+        if isinstance(rules, list):
+            rows = [tuple(row) for row in rules if isinstance(row, list) and len(row) == 3]
+            payload["folder_rules"] = rules_from_rows(rows)
+        try:
+            app._apply_settings(payload)
+        except (ValueError, OSError, RuntimeError) as exc:
+            self.settings_status = str(exc)
+        else:
+            self.settings_status = "Settings saved."
+            self.settings_tab = str(value.get("tab") or self.settings_tab)
+            self.settings_visible = value.get("close") is not True
+            self.settings_revision += 1
+
+    def _settings_dialog(self) -> dict[str, Any]:
+        if not self.settings_visible:
+            return {"visible": False}
+        app = self.app
+        return {
+            "visible": True,
+            "revision": self.settings_revision,
+            "tab": self.settings_tab,
+            "status": self.settings_status,
+            "extension": str(app.statusbar.extension.cget("text")),
+            "values": {key: app.settings[key] for key in SETTINGS_FIELDS if key in app.settings},
+            "rules": [[rule.host, rule.folder, rule.quality]
+                      for rule in parse_rules(str(app.settings.get("folder_rules") or ""))],
+        }
+
     def categories(self) -> list[dict[str, str]]:
         counts = dl.category_counts(self.app._rows)
         fixed = [{"key": key, "name": label, "count": str(counts[key])}
@@ -453,6 +522,7 @@ class NativeShell:
             "addForm": self._add_form(),
             "batchDialog": self._batch_dialog(),
             "updateDialog": self._update_dialog(),
+            "settingsDialog": self._settings_dialog(),
             "visible": self.visible,
             "visibilityRevision": self._visibility_revision,
             "selectionRevision": self.selection_revision,

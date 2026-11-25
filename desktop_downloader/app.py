@@ -2789,7 +2789,11 @@ class DownloaderApp(UIMixin, tk.Tk):
 
     # ----------------------------------------------------------- settings page
     def open_settings(self, tab: str | None = None) -> None:
-        self._open_settings_dialog(tab)
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            shell.open_settings(tab)
+        else:
+            self._open_settings_dialog(tab)
 
     def _persist_settings(self) -> None:
         save_settings(self.settings)

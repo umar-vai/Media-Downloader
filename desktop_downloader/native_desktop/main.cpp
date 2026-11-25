@@ -36,6 +36,7 @@
 
 #include "add_url_dialog.h"
 #include "batch_dialog.h"
+#include "settings_dialog.h"
 #include "update_dialog.h"
 
 namespace {
@@ -183,6 +184,9 @@ public:
         });
 
         batchDialog = new BatchDialog(this, [this](const QString &command, const QJsonValue &value) {
+            send(command, value);
+        });
+        settingsDialog = new SettingsDialog(this, [this](const QString &command, const QJsonValue &value) {
             send(command, value);
         });
         updateDialog = new UpdateDialog(this, [this](const QString &command) { send(command); });
@@ -510,6 +514,7 @@ public:
         addUrl->apply(state.value("addForm").toObject());
         updateDialog->apply(state.value("updateDialog").toObject());
         batchDialog->apply(state.value("batchDialog").toObject());
+        settingsDialog->apply(state.value("settingsDialog").toObject());
         statusBar()->showMessage(status.isEmpty() ? QString("%1 downloading  ·  %2 queued  ·  %3 paused")
                                   .arg(totals.value("downloading").toInt()).arg(totals.value("queued").toInt())
                                   .arg(totals.value("paused").toInt()) : status);
@@ -645,6 +650,7 @@ private:
     AddUrlDialog *addUrl{};
     UpdateDialog *updateDialog{};
     BatchDialog *batchDialog{};
+    SettingsDialog *settingsDialog{};
     QWidget *navigation{};
     QSplitter *downloadsSplit{};
     QListWidget *categories{};

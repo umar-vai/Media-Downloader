@@ -99,7 +99,9 @@ public:
         actions->addWidget(start);
         layout->addLayout(actions);
         connect(close, &QPushButton::clicked, this, &QDialog::reject);
-        connect(this, &QDialog::rejected, this, [send] { send("batch_close", {}); });
+        connect(this, &QDialog::rejected, this, [this, send] {
+            send("batch_close", links->toPlainText().left(2'000'000));
+        });
         connect(start, &QPushButton::clicked, this, [this, send] {
             start->setEnabled(false);
             send("batch_submit", QJsonObject{{"links", links->toPlainText().left(2'000'000)}, {"mode", mode->currentText()},

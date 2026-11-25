@@ -520,7 +520,7 @@ class UIMixin:
             else:
                 self.about_dialog.open()
         elif name == "settings":
-            self._open_settings_dialog()
+            self.open_settings()
         elif name == "history":
             self._show_category("finished")
         elif name in {"queue", "list"} and self._category in {"finished"}:
