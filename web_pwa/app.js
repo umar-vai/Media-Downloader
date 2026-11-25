@@ -8,6 +8,8 @@ const state = {
   updatePoll: null,
   agent: {},
   downloads: {},
+  downloadsRefreshing: false,
+  downloadRows: new Map(),
   batchLastRefresh: 0,
   batchRefreshing: false,
   editorInfo: null,
@@ -23,6 +25,27 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+const paneLinks = [...document.querySelectorAll(".workspace-nav a")];
+const panes = [...document.querySelectorAll("[data-pane]")];
+
+function showPane(name) {
+  if (!panes.some((pane) => pane.dataset.pane === name)) name = "new";
+  for (const pane of panes) pane.hidden = pane.dataset.pane !== name;
+  for (const link of paneLinks) {
+    if (link.hash === `#${name}`) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+}
+
+window.addEventListener("hashchange", () => showPane(location.hash.slice(1)));
+showPane(location.hash.slice(1));
+
+function setDownloadsStatus(message = "") {
+  const status = $("downloadsStatus");
+  status.textContent = message;
+  status.hidden = !message;
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function api(path, options = {}) {
@@ -339,19 +362,41 @@ function escapeHtml(value) {
 }
 
 async function refreshDownloads() {
-  if (!state.key) return;
+  if (!state.key || state.downloadsRefreshing) return;
+  state.downloadsRefreshing = true;
   if (Date.now() - state.batchLastRefresh >= 2500) void refreshBatches();
   try {
     const {downloads} = await api("/api/downloads");
     state.downloads = Object.fromEntries(downloads.map((job) => [job.id, job]));
     const list = $("downloadsList");
-    list.innerHTML = "";
     if (!downloads.length) {
-      list.innerHTML = '<div class="empty">No downloads yet.</div>';
+      if (state.downloadRows.size) list.innerHTML = '<div class="empty">No downloads yet.</div>';
+      state.downloadRows.clear();
       return;
     }
-    downloads.forEach((job) => list.appendChild(jobRow(job)));
-  } catch {}
+    list.querySelector(".empty")?.remove();
+    const next = new Map();
+    let position = list.firstChild;
+    for (const job of downloads) {
+      const signature = JSON.stringify(job);
+      const previous = state.downloadRows.get(job.id);
+      const row = previous?.signature === signature ? previous.row : jobRow(job);
+      if (row === position) {
+        position = position.nextSibling;
+      } else {
+        list.insertBefore(row, position);
+      }
+      next.set(job.id, {signature, row});
+    }
+    for (const [id, previous] of state.downloadRows) {
+      if (next.get(id)?.row !== previous.row) previous.row.remove();
+    }
+    state.downloadRows = next;
+  } catch {
+    // Keep the existing queue visible when the local core reconnects.
+  } finally {
+    state.downloadsRefreshing = false;
+  }
 }
 
 function clearEditorPreviewObjectUrl() {
@@ -1104,7 +1149,7 @@ async function loadEditorPath(path) {
       body:JSON.stringify({path:source}),
     });
     renderEditorSource(data);
-    $("editorCard").scrollIntoView({behavior:"smooth", block:"start"});
+    if (location.hash !== "#editor") location.hash = "editor";
     return data;
   } catch (error) {
     state.editorInfo = null;
@@ -1737,7 +1782,7 @@ editorVideo.addEventListener("error", () => {
 });
 
 window.addEventListener("keydown", (event) => {
-  if (!state.editorInfo) return;
+  if (!state.editorInfo || $("editorCard").hidden) return;
   const tag = document.activeElement?.tagName?.toLowerCase();
   if (["input","select","textarea","button"].includes(tag)) return;
 
@@ -1808,7 +1853,7 @@ $("refreshDiagnosticsBtn").addEventListener("click", loadDiagnostics);
 $("exportDiagnosticsBtn").addEventListener("click", exportDiagnostics);
 $("openLogBtn").addEventListener("click", async () => {
   try { await api("/api/system/open-log", {method:"POST"}); }
-  catch (error) { $("analysisStatus").textContent = error.message; }
+  catch (error) { $("diagnosticsBox").textContent = error.message; }
 });
 $("openDownloadsBtn").addEventListener("click", async () => {
   try {
@@ -1816,7 +1861,8 @@ $("openDownloadsBtn").addEventListener("click", async () => {
       method:"POST",
       body:JSON.stringify({download_dir:$("downloadDirInput").value.trim()}),
     });
-  } catch (error) { $("analysisStatus").textContent = error.message; }
+    setDownloadsStatus();
+  } catch (error) { setDownloadsStatus(error.message); }
 });
 $("downloadsList").addEventListener("click", async (event) => {
   const cancel = event.target.closest("[data-cancel]");
@@ -1829,9 +1875,10 @@ $("downloadsList").addEventListener("click", async (event) => {
       const job = state.downloads[edit.dataset.editJob];
       if (job?.result?.path) await loadEditorPath(job.result.path);
     }
+    setDownloadsStatus();
     await refreshDownloads();
   } catch (error) {
-    $("analysisStatus").textContent = error.message;
+    setDownloadsStatus(error.message);
   }
 });
 

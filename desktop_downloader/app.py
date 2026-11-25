@@ -418,7 +418,7 @@ def get_bundled_updater_path() -> Path | None:
 
 
 class DownloaderApp(UIMixin, tk.Tk):
-    def __init__(self) -> None:
+    def __init__(self, native_path: Path | None = None) -> None:
         if os.name == "nt":
             try:  # own taskbar identity so the download icon shows (and pins) instead of python's
                 import ctypes
@@ -427,10 +427,11 @@ class DownloaderApp(UIMixin, tk.Tk):
                 pass
         _enable_dpi_awareness()
         super().__init__()
+        self.native_shell = None
         self.title(APP_NAME)
         self._apply_window_icon()
         self._start_minimized = win_startup.started_minimized()
-        if self._start_minimized:
+        if self._start_minimized or native_path is not None:
             self.withdraw()  # launched by Windows at sign-in: go straight to the tray
         self.after(400, self._init_tray)
         # A second launch from the taskbar / Start menu brings this window back from the tray.
@@ -517,6 +518,17 @@ class DownloaderApp(UIMixin, tk.Tk):
 
         self._center_window()
         self._build_ui()
+        if native_path is not None:
+            from native_shell import NativeShell
+
+            try:
+                self.native_shell = NativeShell(self, native_path)
+            except OSError:
+                LOGGER.exception("Could not start the native desktop")
+                if not self._start_minimized:
+                    self.deiconify()
+            else:
+                self._render_download_activity()
         self._sync_recent_file()
         LOGGER.info("App started version=%s executable=%s", APP_VERSION, sys.executable)
         self.after(120, self._drain_events)
@@ -576,6 +588,11 @@ class DownloaderApp(UIMixin, tk.Tk):
             pass
 
     def show_from_tray(self) -> None:
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            shell.show(True)
+            self._render_download_activity()
+            return
         try:
             self.deiconify()
             if self.state() == "iconic":
@@ -590,7 +607,11 @@ class DownloaderApp(UIMixin, tk.Tk):
             pass
 
     def hide_to_tray(self) -> None:
-        self.withdraw()
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            shell.show(False)
+        else:
+            self.withdraw()
         if self.tray is not None and not self._tray_hint_shown:
             self._tray_hint_shown = True
             self.tray.notify("Still running in the tray. Downloads continue in the background.")
@@ -615,7 +636,8 @@ class DownloaderApp(UIMixin, tk.Tk):
             self._tray_status_text = text
             self.tray.set_status(text)
         try:
-            hidden = self.state() in {"iconic", "withdrawn"}
+            shell = getattr(self, "native_shell", None)
+            hidden = not shell.visible if shell is not None else self.state() in {"iconic", "withdrawn"}
         except Exception:
             hidden = False
         for item in snapshots:
@@ -663,6 +685,9 @@ class DownloaderApp(UIMixin, tk.Tk):
         self._stop_integrations()
         if self.tray is not None:
             self.tray.stop()
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            shell.close()
         self.destroy()
 
     def _center_window(self) -> None:
@@ -2764,7 +2789,11 @@ class DownloaderApp(UIMixin, tk.Tk):
 
     # ----------------------------------------------------------- settings page
     def open_settings(self, tab: str | None = None) -> None:
-        self._open_settings_dialog(tab)
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            shell.open_settings(tab)
+        else:
+            self._open_settings_dialog(tab)
 
     def _persist_settings(self) -> None:
         save_settings(self.settings)

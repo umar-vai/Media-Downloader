@@ -507,19 +507,27 @@ class UIMixin:
         if name == "download":
             self.open_add_url()
         elif name == "batch":
-            self.batch_dialog.open()
-            self.batch_page.focus()
+            shell = getattr(self, "native_shell", None)
+            if shell is not None:
+                shell.batch_visible = True
+            else:
+                self.batch_dialog.open()
+                self.batch_page.focus()
         elif name == "updates":
-            self.about_dialog.open()
+            shell = getattr(self, "native_shell", None)
+            if shell is not None:
+                shell.update_visible = True
+            else:
+                self.about_dialog.open()
         elif name == "settings":
-            self._open_settings_dialog()
+            self.open_settings()
         elif name == "history":
             self._show_category("finished")
         elif name in {"queue", "list"} and self._category in {"finished"}:
             self._show_category("all")
         self._schedule_download_activity_refresh(30)
 
-    def open_add_url(self) -> None:
+    def _prefill_add_url(self) -> None:
         if not self.url_var.get().strip():
             try:
                 text = self.clipboard_get().strip()
@@ -528,6 +536,14 @@ class UIMixin:
             if text.startswith(("http://", "https://")) and "\n" not in text and len(text) < 2000:
                 self.url_var.set(text)
                 self._on_url_changed()
+
+    def open_add_url(self) -> None:
+        self._prefill_add_url()
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            shell.add_visible = True
+            shell.add_status = self.status_label.cget("text")
+            return
         self.add_dialog.open()
         self.after(60, lambda: (self.url_entry.focus_set(), self.url_entry.icursor("end")))
 
@@ -634,6 +650,11 @@ class UIMixin:
         color = STATUS_COLORS.get(kind, STATUS_COLORS["ready"])
         self.status_label.configure(text=text, foreground=color if kind in {"error", "cancelled"} else "")
         self.statusbar.set_message(text, color)
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            shell.status = text
+            if shell.add_visible:
+                shell.add_status = text
 
     # ============================================================ list data
     def _invalidate_history(self) -> None:
@@ -700,7 +721,8 @@ class UIMixin:
         active = self.download_queue.running_count()
         queued = self.download_queue.queued_count()
         try:
-            hidden = self.state() in {"withdrawn", "iconic"}
+            shell = getattr(self, "native_shell", None)
+            hidden = not shell.visible if shell is not None else self.state() in {"withdrawn", "iconic"}
         except Exception:
             hidden = False
         if not hidden:
@@ -714,6 +736,10 @@ class UIMixin:
         self._after_activity_render(snapshots, active, queued)
 
     def _refresh_view(self) -> None:
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            shell.rows_changed = True
+            return
         rows = self._rows
         self.category_tree.update_counts(dl.category_counts(rows), dl.queue_groups(rows))
         shown = dl.sort_rows(dl.filter_rows(rows, self._category, self._query), self._sort_column, self._sort_desc)
@@ -772,7 +798,9 @@ class UIMixin:
             self.after(3000, self._refresh_extension_status)
 
     def _selected_rows(self) -> list[dict[str, Any]]:
-        return [self._rows_by_key[key] for key in self.table.selected() if key in self._rows_by_key]
+        shell = getattr(self, "native_shell", None)
+        keys = shell.selected if shell is not None else self.table.selected()
+        return [self._rows_by_key[key] for key in keys if key in self._rows_by_key]
 
     def _update_selection_ui(self, totals: dict[str, Any] | None = None) -> None:
         rows = self._selected_rows()
@@ -789,7 +817,11 @@ class UIMixin:
 
     # ============================================================== actions
     def select_all(self) -> None:
-        self.table.select(list(self._shown_keys))
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            shell.select(list(self._shown_keys))
+        else:
+            self.table.select(list(self._shown_keys))
 
     def _row_entry(self, row: dict[str, Any]) -> dict[str, Any]:
         """A history-style dict for the Properties dialog."""
@@ -1153,22 +1185,36 @@ class UIMixin:
     # ------------------------------------------------------- after queueing
     def _after_link_queued(self, request_id: str, name: str) -> None:
         self.add_dialog.close()
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            shell.add_visible = False
         self.clear_form()
         self._set_status(f"Added to downloads: {name}", "ready")
         if self._category not in {"all", "unfinished", "queue:active", dl.category_for(name, self.mode_var.get())}:
             self._show_category("all")
         self._render_download_activity()
-        self.table.select([f"q:{request_id}"])
+        if shell is not None:
+            shell.select([f"q:{request_id}"])
+        else:
+            self.table.select([f"q:{request_id}"])
 
     def _after_batch_queued(self, batch_id: str) -> None:
         self.batch_dialog.close()
         self._render_download_activity()
         key = f"queue:{batch_id}"
-        self._show_category(key if self.category_tree.tree.exists(key) else "all")
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            shell.batch_visible = False
+            self._select_category(key)
+        else:
+            self._show_category(key if self.category_tree.tree.exists(key) else "all")
 
     # ============================================================ thumbnail
     def _reset_thumbnail_label(self) -> None:
         self.thumbnail_image = None
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            shell.add_thumbnail = ""
         self.thumb.set_image(None)
 
     def _apply_thumbnail(self, raw: bytes | None) -> None:
@@ -1181,6 +1227,14 @@ class UIMixin:
             image.thumbnail((width, height), Image.Resampling.BILINEAR)
             canvas = Image.new("RGB", (width, height), theme.rgb(ui.SURFACE_2))
             canvas.paste(image, ((width - image.width) // 2, (height - image.height) // 2))
+            shell = getattr(self, "native_shell", None)
+            if shell is not None:
+                from base64 import b64encode
+
+                png = io.BytesIO()
+                canvas.save(png, format="PNG")
+                shell.add_thumbnail = b64encode(png.getvalue()).decode("ascii")
+                return
             photo = ImageTk.PhotoImage(canvas)
             self.thumbnail_image = photo
             self.thumb.set_image(photo)
