@@ -689,10 +689,21 @@ int main(int argc, char *argv[]) {
         app.setWindowIcon(QIcon(args.at(icon + 1)));
     Window window;
     if (args.contains("--self-test")) {
-        window.apply(QJsonObject{{"visible", false}, {"theme", "Dark"},
-                                {"rows", QJsonArray{QJsonObject{{"key", "q:smoke"}, {"name", "Smoke.mp4"}}}},
-                                {"columns", QJsonArray{"name", "status"}}});
-        return window.itemCount() == 1 ? 0 : 1;
+        QJsonObject state{{"visible", true}, {"theme", "Dark"},
+                          {"rows", QJsonArray{QJsonObject{{"key", "q:smoke"}, {"name", "Smoke.mp4"}}}},
+                          {"columns", QJsonArray{"name", "status"}}};
+        window.apply(state);
+        const QStringList dialogs{"addForm", "updateDialog", "batchDialog", "settingsDialog"};
+        for (const auto &dialog : dialogs) {
+            state.insert(dialog, QJsonObject{{"visible", true}});
+            window.apply(state);
+            app.processEvents();
+            if (window.itemCount() != 1)
+                return 1;
+            state.remove(dialog);
+            window.apply(state);
+        }
+        return 0;
     }
 
     PipeReader reader;

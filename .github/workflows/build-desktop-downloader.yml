@@ -321,6 +321,14 @@ jobs:
             throw "Installer smoke uninstall failed with exit code $($uninstall.ExitCode)."
           }
 
+      - name: Smoke test upgrade from the previous public installer
+        shell: pwsh
+        timeout-minutes: 12
+        run: |
+          $version = python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from version import APP_VERSION; print(APP_VERSION)"
+          $installer = (Resolve-Path "dist/MediaDownloaderSetup.exe").Path
+          ./desktop_downloader/ci/installer_upgrade_smoke.ps1 -Installer $installer -ExpectedVersion $version
+
       - name: Generate SHA-256 checksums and compatibility alias
         shell: pwsh
         run: |

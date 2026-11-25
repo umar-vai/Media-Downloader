@@ -1782,7 +1782,7 @@ editorVideo.addEventListener("error", () => {
 });
 
 window.addEventListener("keydown", (event) => {
-  if (!state.editorInfo) return;
+  if (!state.editorInfo || $("editorCard").hidden) return;
   const tag = document.activeElement?.tagName?.toLowerCase();
   if (["input","select","textarea","button"].includes(tag)) return;
 
