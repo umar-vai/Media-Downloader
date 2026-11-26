@@ -64,6 +64,12 @@ def slider(wid: str, value: int, *, length: int = 160, low: int = 0, high: int =
     return {"type": "slider", "id": wid, "value": int(value), "min": low, "max": high, "length": length}
 
 
+def note(widget: Any, width: int = 240, top: int = 0) -> dict[str, Any]:
+    """A hint line that is hidden while empty (it keeps its place in the window's structure)."""
+    text = text_of(widget)
+    return pad(label(text, "hint", wrap=True, wrap_width=width, hidden=not text), top=top)
+
+
 def meter(wid: str, widget: Any, length: int = 160) -> dict[str, Any]:
     level = float(getattr(widget, "value", 0.0) or 0.0)
     color = "#E5322D" if level > 0.92 else "#F5B301" if level > 0.75 else "#1FA35B"
@@ -235,8 +241,8 @@ class ScreenRecorderForm(TkMirrorForm):
                       align="fill"), top=2),
             grid(2, label("Volume:"), slider("mic_volume", w.mic_volume_var.get()),
                  label("Level:"), meter("mic_meter", w.mic_meter), weights=[0, 1], colgap=GAP, rowgap=2),
-            label(text_of(w.meter_note), "hint", wrap=True, wrap_width=240) if text_of(w.meter_note) else None,
-            pad(label(text_of(w.audio_note), "hint", wrap=True, wrap_width=240), top=2) if text_of(w.audio_note) else None,
+            note(w.meter_note),
+            note(w.audio_note, top=2),
         )
         extras = vbox(
             check("webcam", text_of(w.webcam_check), w.webcam_var.get()),
@@ -257,7 +263,7 @@ class ScreenRecorderForm(TkMirrorForm):
                      label("minutes")), top=2),
             pad(check("open_editor", "Open in the media editor when done", w.open_editor_var.get()), top=2),
             pad(hbox(label("Hotkey:"), combo("hotkey", list(sr.HOTKEYS), w.hotkey_var.get(), 6)), top=2),
-            label(text_of(w.hotkey_note), "hint", wrap=True, wrap_width=240) if text_of(w.hotkey_note) else None,
+            note(w.hotkey_note),
             pad(grid(2, label("Save to:", valign="top"), label(text_of(w.folder_label), wrap=True, wrap_width=200),
                      weights=[0, 1], colgap=GAP), top=GAP),
             pad(hbox(button("browse", "Browse…", 10), button("open_folder", "Open folder", 11)), top=2),

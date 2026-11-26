@@ -1085,7 +1085,7 @@ class DownloaderApp(UIMixin, tk.Tk):
         self._start_available_downloads()
         return batch_id, len(payloads), duplicates
 
-    def _start_download(self, edit_after_download: bool) -> None:
+    def _start_download(self, edit_after_download: bool, again: bool = False) -> None:
         url = self.url_var.get().strip()
         platform = detect_platform(url)
         if not platform:
@@ -1102,6 +1102,19 @@ class DownloaderApp(UIMixin, tk.Tk):
             LOGGER.exception("Could not create download directory")
             messagebox.showerror(APP_NAME, f"Could not use the selected download folder.\n\n{exc}")
             return
+
+        if not again:
+            existing = download_list.find_downloaded(
+                getattr(self, "_history_rows", []), url, page_url=url, mode=self.mode_var.get(),
+                direct=bool(self.current_info.get("direct_file") or
+                            (self.current_info.get("info") or {}).get("direct_file")))
+            if existing is not None:
+                def download_again(_choice: str) -> None:
+                    if self.url_var.get().strip() == url:  # still the link that was asked about
+                        self._start_download(edit_after_download, again=True)
+
+                self._ask_download_again([existing], 0, download_again)
+                return
 
         name = self._available_download_name(self.name_var.get())
         info = dict(self.current_info)
@@ -1140,6 +1153,8 @@ class DownloaderApp(UIMixin, tk.Tk):
             "source_url": url,
             "page_url": url,
         }
+        if again:
+            request_settings["force_redownload"] = True
         if info.get("direct_file"):
             # A plain file: keep the name the user typed, with the link's file extension.
             ext = os.path.splitext(str(info.get("title") or ""))[1]
@@ -2247,14 +2262,15 @@ class DownloaderApp(UIMixin, tk.Tk):
                 self.tray.notify("No link found in the clipboard.", "Media Downloader")
             self._set_status("No link found in the clipboard.", "error")
             return
+        def added(_batch_id: str, queued: int, _again: bool) -> None:
+            if self.tray is not None:
+                self.tray.notify(f"Added {queued} link{'s' if queued != 1 else ''} from the clipboard",
+                                 "Media Downloader")
+
         try:
-            self._enqueue_batch_downloads("\n".join(urls), self._default_batch_options(mode))
+            self._queue_links("\n".join(urls), self._default_batch_options(mode), added)
         except (ValueError, OSError) as exc:
             self._set_status(str(exc), "error")
-            return
-        message = f"Added {len(urls)} link{'s' if len(urls) != 1 else ''} from the clipboard"
-        if self.tray is not None:
-            self.tray.notify(message, "Media Downloader")
 
     def _analyze_for_extension(self, data: dict[str, Any]) -> dict[str, Any]:
         """Answer the extension's "which qualities does this video have?" (runs on the local
@@ -2361,13 +2377,31 @@ class DownloaderApp(UIMixin, tk.Tk):
                 path = None
             if path is not None:
                 extra["cookiefile"] = str(path)
-        if bool(self.settings.get("capture_dialog", True)):
-            self._open_capture_dialog(url, options, extra, direct=direct, data=data)
-            return
+        def proceed(_choice: str = "") -> None:
+            if bool(self.settings.get("capture_dialog", True)):
+                self._open_capture_dialog(url, options, extra, direct=direct, data=data)
+                return
+            try:
+                self._enqueue_batch_downloads(url, options, extra=extra)
+            except (ValueError, OSError) as exc:
+                LOGGER.warning("Extension link rejected: %s", exc)
+
         try:
-            self._enqueue_batch_downloads(url, options, extra=extra)
-        except (ValueError, OSError) as exc:
-            LOGGER.warning("Extension link rejected: %s", exc)
+            size = int(data.get("fileSize") or 0) if direct else 0
+        except (TypeError, ValueError):
+            size = 0
+        existing = download_list.find_downloaded(
+            getattr(self, "_history_rows", []), url, page_url=page_url, mode=str(options.get("mode") or "Video"),
+            direct=direct, file_name=str(extra.get("file_name") or ""), size=size)
+        if existing is None:
+            proceed()
+            return
+
+        def again(_choice: str) -> None:
+            extra["force_redownload"] = True
+            proceed()
+
+        self._ask_download_again([existing], 0, again)
 
     # ------------------------------------------------------------------ download window
     def _open_capture_dialog(
@@ -2545,6 +2579,7 @@ class DownloaderApp(UIMixin, tk.Tk):
             ("Open screen recorder", self.open_screen_recorder),
             ("Open audio recorder", self.open_audio_recorder),
             ("Delete completed downloads…", self.delete_completed),
+            ("Clean up list (missing, cancelled, failed)…", self.cleanup_list),
             ("Open settings", self.open_settings),
             ("Export browser extension", self.export_browser_extension),
             ("Check for updates", lambda: self.check_for_updates(manual=True)),

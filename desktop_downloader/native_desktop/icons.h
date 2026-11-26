@@ -206,6 +206,10 @@ inline void paintTool(Painter &d, const std::string &name, unsigned ink) {
         d.line({{0.08f, 0.08f}, {0.62f, 0.62f}}, TOOL_RED, 0.15f);
         d.line({{0.62f, 0.08f}, {0.08f, 0.62f}}, TOOL_RED, 0.15f);
         d.check(0.70f, 0.74f, 0.46f, TOOL_GREEN, 0.13f);
+    } else if (name == "cleanup") {
+        for (float y : {0.20f, 0.42f, 0.64f}) d.line({{0.08f, y}, {y > 0.5f ? 0.56f : 0.92f, y}}, ink, 0.09f);
+        d.line({{0.58f, 0.58f}, {0.94f, 0.94f}}, TOOL_RED, 0.14f);
+        d.line({{0.94f, 0.58f}, {0.58f, 0.94f}}, TOOL_RED, 0.14f);
     } else if (name == "settings") {
         const float cx = 0.5f, cy = 0.5f;
         for (int i = 0; i < 8; ++i) {

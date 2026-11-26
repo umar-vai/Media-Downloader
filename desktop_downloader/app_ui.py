@@ -21,19 +21,21 @@ import tkinter as tk
 import webbrowser
 from pathlib import Path
 from tkinter import messagebox, ttk
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image, ImageTk
 
 import download_list as dl
+import file_download
 import native
 import theme
 import ui_kit as ui
+from batch_download import parse_batch_urls
 from batch_page import BatchSection
 from history_window import PropertiesDialog
 from icons import IconSet
 from partial_files import delete_partial_files, find_partial_files, path_size, remove_path, scan_partial_files
-from main_window import (CategoryTree, ConfirmDelete, DetailsPane, DownloadTable, SearchBox, StatusBar,
+from main_window import (CategoryTree, CleanupDialog, ConfirmDelete, DetailsPane, DownloadTable, SearchBox, StatusBar,
                          Toolbar, UpdateBadge, setup_style, sysfont, toolbar_states, totals_summary)
 from theme import C
 from ui_kit import px
@@ -172,6 +174,7 @@ class UIMixin:
         downloads.add_command(label="Delete…", accelerator="Del", command=self.delete_selected)
         downloads.add_command(label="Delete completed…", command=self.delete_completed)
         downloads.add_command(label="Remove missing files from list", command=self.remove_missing)
+        downloads.add_command(label="Clean up list…", command=self.cleanup_list)
         downloads.add_command(label="Clean up partial files…", command=self.clean_partial_files)
         downloads.add_separator()
         downloads.add_command(label="Copy download link", accelerator="Ctrl+C", command=self.copy_selected_links)
@@ -254,6 +257,8 @@ class UIMixin:
         bar.add("delete", "Delete", "delete", self.delete_selected, "Remove the selected downloads  (Del)")
         bar.add("delete_done", "Delete Completed", "delete_done", self.delete_completed,
                 "Remove finished downloads from the list")
+        bar.add("cleanup", "Clean Up", "cleanup", self.cleanup_list,
+                "Remove missing, cancelled and failed downloads in one go")
         bar.separator()
         bar.add("options", "Options", "settings", self.open_settings, "Settings")
         bar.add("browsers", "Browsers", "browser", self._browser_menu, "Browser extension")
@@ -416,7 +421,7 @@ class UIMixin:
     def _build_batch_dialog(self) -> None:
         dialog = native.HiddenDialog(self, "Add batch download", resizable=True, icon=self._icon_file)
         self.batch_dialog = dialog
-        self.batch_page = BatchSection(dialog, on_enqueue=self._enqueue_batch_downloads, settings=self.settings,
+        self.batch_page = BatchSection(dialog, on_enqueue=self._queue_links, settings=self.settings,
                                        on_queued=self._after_batch_queued)
 
     def _build_about_dialog(self) -> None:
@@ -1017,6 +1022,78 @@ class UIMixin:
         self._invalidate_history()
         self._set_status(f"Removed {removed} missing file{'s' if removed != 1 else ''} from the list", "ready")
 
+    # ------------------------------------------------------- already downloaded
+    def _ask_download_again(self, matches: list[dict[str, Any]], new_count: int,
+                            choose: Callable[[str], None]) -> None:
+        """Ask before fetching finished files again. ``choose`` gets "all" or "new"; nothing is
+        called when the user cancels."""
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            import native_forms
+
+            shell.show_form(native_forms.DuplicateForm(shell, matches, new_count, choose))
+            return
+        if len(matches) == 1 and not new_count:
+            row = matches[0]
+            if messagebox.askyesno(
+                    "Already downloaded",
+                    f"This file is already downloaded:\n\n{row['name']}\n{Path(row['path']).parent}\n\n"
+                    "Do you want to download it again?", parent=self):
+                choose("all")
+            return
+        text = f"{len(matches)} of {len(matches) + new_count} links are already downloaded."
+        if new_count:
+            answer = messagebox.askyesnocancel(
+                "Already downloaded",
+                f"{text}\n\nYes: download all of them again\nNo: download only the new ones", parent=self)
+            if answer is not None:
+                choose("all" if answer else "new")
+        elif messagebox.askyesno("Already downloaded", f"{text}\n\nDownload them again?", parent=self):
+            choose("all")
+
+    def _queue_links(self, text: str, options: dict[str, str],
+                     done: Callable[[str, int, bool], None]) -> None:
+        """Queue pasted links, asking first about the ones that are already downloaded.
+
+        ``done(batch_id, queued, again)`` runs once they are in the queue."""
+        urls, _duplicates = parse_batch_urls(text)
+        mode = str(options.get("mode") or "Video")
+        found = {url: dl.find_downloaded(self._history_rows, url, page_url=url, mode=mode,
+                                         direct=file_download.looks_like_file(url)) for url in urls}
+        matches = [row for row in found.values() if row]
+        fresh = [url for url, row in found.items() if not row]
+
+        def queue(choice: str) -> None:
+            again = choice == "all" and bool(matches)
+            try:
+                batch_id, queued, _dupes = self._enqueue_batch_downloads(
+                    "\n".join(urls if choice == "all" else fresh), options,
+                    **({"extra": {"force_redownload": True}} if again else {}))
+            except (ValueError, OSError) as exc:
+                messagebox.showerror("Media Downloader", f"Could not add the download.\n\n{exc}", parent=self)
+                return
+            done(batch_id, queued, again)
+
+        if matches:
+            self._ask_download_again(matches, len(fresh), queue)
+        else:
+            queue("all")
+
+    def cleanup_list(self) -> None:
+        """Remove every missing, cancelled and/or failed download in one go."""
+        counts: dict[str, int] = {}
+        for row in self._rows:
+            counts[row["status"]] = counts.get(row["status"], 0) + 1
+        if not any(counts.get(status) for status, _text in dl.CLEANUP_STATUSES):
+            messagebox.showinfo("Media Downloader", "There are no missing, cancelled or failed downloads.",
+                                parent=self)
+            return
+        picked = CleanupDialog.ask(self, counts)
+        # Read the rows again: a download may have been retried while the dialog was open.
+        rows = [row for row in self._rows if row["status"] in picked]
+        if rows:
+            self._delete_rows(rows, False)
+
     def clean_partial_files(self) -> None:
         """Delete leftover .part/fragment files in every download folder, except those of live downloads."""
         folders: list[str] = [str(self.download_dir)]
@@ -1062,12 +1139,19 @@ class UIMixin:
     def _delete_rows(self, rows: list[dict[str, Any]], delete_files: bool) -> None:
         history_ids: list[str] = []
         problems: list[str] = []
+        # Downloads that stay and can still continue: their partial files must survive.
+        removed_keys = {row["key"] for row in rows}
+        keep = {(os.path.normcase(str(other["save_to"] or "")), other["name"]) for other in self._rows
+                if other["key"] not in removed_keys and other["source"] == "queue"
+                and other["status"] in dl.STOPPABLE | {"paused", "stopping"}}
         for row in rows:
             request_id = row["request_id"]
             # An unfinished download leaves partial files behind; they go with it automatically.
             partial_dir = ""
             if row["status"] != "complete":
                 partial_dir = str(Path(row["path"]).parent) if row["path"] else str(row["save_to"] or "")
+                if (os.path.normcase(partial_dir), row["name"]) in keep:
+                    partial_dir = ""
             if row["source"] == "queue":
                 if row["status"] in dl.STOPPABLE | {"paused", "stopping"}:
                     self._discard_ids.add(request_id)

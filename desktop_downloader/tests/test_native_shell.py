@@ -99,13 +99,14 @@ class NativeShellTests(unittest.TestCase):
     def test_batch_form_queues_with_the_chosen_format(self):
         page = SimpleNamespace(mode_var=var("Video"), quality_var=var("720p"), audio_format_var=var("MP3"),
                                audio_quality_var=var("192"))
-        app = SimpleNamespace(batch_page=page, _enqueue_batch_downloads=Mock(return_value=("batch", 2, 0)),
+        queue = Mock(side_effect=lambda _text, _options, done: done("batch", 2, False))
+        app = SimpleNamespace(batch_page=page, _queue_links=queue,
                               _after_batch_queued=Mock(), _set_status=Mock())
         shell = self.make_shell(app)
         form = nf.BatchForm(shell)
         links = "https://example.test/one\nhttps://example.test/two"
         form.handle("click", "queue", {"links": links, "audio": True, "format": "M4A", "bitrate": "256"})
-        args = app._enqueue_batch_downloads.call_args[0]
+        args = app._queue_links.call_args[0]
         self.assertEqual(args[1], {"mode": "Audio", "video_quality": "720p", "audio_format": "M4A",
                                    "audio_quality": "256"})
         app._after_batch_queued.assert_called_once_with("batch")
@@ -161,6 +162,36 @@ class NativeShellTests(unittest.TestCase):
         self.assertEqual(form.mode, "progress")
         self.assertEqual(form.window_title(), "50% - File.zip")
         self.assertIn("100 B of 200 B", form.stats)
+
+    def test_capture_form_closes_after_every_finished_action(self):
+        for action in ("open", "show", "copy_path", "close"):
+            app = SimpleNamespace(clipboard_clear=Mock(), clipboard_append=Mock(), _set_status=Mock())
+            shell = self.make_shell(app)
+            shell.remove_form = Mock()
+            form = nf.CaptureForm(shell, Mock(), name="File", folder=str(Path.cwd()), source="example.test")
+            form.mode, form.path = "done", __file__
+            with patch.object(nf, "reveal"), patch.object(nf.os, "startfile", create=True):
+                form.handle("click", action, {})
+            self.assertTrue(form.done, action)
+
+    def test_duplicate_form_downloads_again_only_when_asked(self):
+        row = {"name": "a.mp4", "size_text": "", "last_try_text": "", "path": __file__}
+        for widget, expected in (("all", ["all"]), ("cancel", []), ("show", [])):
+            shell = self.make_shell(SimpleNamespace())
+            shell.remove_form = Mock()
+            chosen = []
+            form = nf.DuplicateForm(shell, [row], 0, chosen.append)
+            with patch.object(nf, "reveal"):
+                form.handle("click", widget, {})
+            self.assertEqual(chosen, expected, widget)
+            self.assertTrue(form.done)
+
+    def test_cleanup_form_returns_only_ticked_kinds_that_exist(self):
+        shell = self.make_shell(SimpleNamespace())
+        shell.remove_form = Mock()
+        form = nf.CleanupForm(shell, {"missing": 2, "failed": 1})
+        form.handle("click", "remove", {"missing": True, "cancelled": True, "failed": False})
+        self.assertEqual(form.result, {"missing"})
 
 
 if __name__ == "__main__":

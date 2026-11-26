@@ -820,6 +820,7 @@ def toolbar_states(rows: list[dict[str, Any]], selected: list[dict[str, Any]],
         "start_all": bool(totals["paused"]),
         "stop_all": bool(totals["downloading"] or totals["queued"]),
         "delete_done": any(row["status"] in dl.FINISHED for row in rows),
+        "cleanup": any(row["status"] in dict(dl.CLEANUP_STATUSES) for row in rows),
     }
 
 
@@ -861,6 +862,47 @@ class StatusBar(tk.Frame):
 
 
 # --------------------------------------------------------------------------- dialogs
+class CleanupDialog:
+    """Pick which kinds of dead downloads (missing, cancelled, failed) to remove from the list."""
+
+    @staticmethod
+    def ask(master: tk.Misc, counts: dict[str, int]) -> set[str]:
+        import native
+
+        shell = getattr(master.winfo_toplevel(), "native_shell", None)
+        if shell is not None:
+            import native_forms
+
+            answer = native_forms.run_modal(shell, native_forms.CleanupForm(shell, counts))
+            return answer if isinstance(answer, set) else set()
+
+        dialog = native.Dialog(master, "Clean up list", modal=True)
+        body = dialog.body
+        ttk.Label(body, text="Remove these downloads from the list and history?",
+                  style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        choices: dict[str, tk.BooleanVar] = {}
+        for row, (status, text) in enumerate(dl.CLEANUP_STATUSES, start=1):
+            choices[status] = tk.BooleanVar(dialog, value=bool(counts.get(status)))
+            box = ttk.Checkbutton(body, text=f"{text} ({counts.get(status, 0)})", variable=choices[status])
+            box.grid(row=row, column=0, sticky="w", pady=(native.GAP, 0))
+            if not counts.get(status):
+                box.configure(state="disabled")
+        ttk.Label(body, text="Leftover partial files of cancelled and failed downloads are deleted too. "
+                             "Finished files are not touched.", wraplength=380, justify="left").grid(
+            row=len(choices) + 1, column=0, sticky="w", pady=(native.PAD, 0))
+        picked: set[str] = set()
+
+        def confirm() -> None:
+            picked.update(status for status, var in choices.items() if var.get() and counts.get(status))
+            dialog.close()
+
+        dialog.add_button("Cancel", dialog.close)
+        dialog.add_button("Remove", confirm, default=True)
+        dialog.show()
+        master.wait_window(dialog)
+        return picked
+
+
 class ConfirmDelete:
     """Delete confirmation with an "also delete the files" option, like a download manager."""
 

@@ -151,6 +151,11 @@ def _tool_painter(name: str, ink: str) -> Painter:
             _line(d, u, [(0.08, 0.08), (0.62, 0.62)], TOOL_RED, 0.15)
             _line(d, u, [(0.62, 0.08), (0.08, 0.62)], TOOL_RED, 0.15)
             _check(d, u, 0.70, 0.74, 0.46, TOOL_GREEN, 0.13)
+        elif name == "cleanup":
+            for y in (0.20, 0.42, 0.64):
+                _line(d, u, [(0.08, y), (0.56 if y > 0.5 else 0.92, y)], ink, 0.09)
+            _line(d, u, [(0.58, 0.58), (0.94, 0.94)], TOOL_RED, 0.14)
+            _line(d, u, [(0.94, 0.58), (0.58, 0.94)], TOOL_RED, 0.14)
         elif name == "settings":
             cx = cy = 0.5
             for i in range(8):

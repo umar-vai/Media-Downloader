@@ -329,6 +329,113 @@ class ConfirmDeleteForm(NativeForm):
             self.close((False, False))
 
 
+# ------------------------------------------------------------------------------- clean up
+class CleanupForm(NativeForm):
+    """Native form of ``main_window.CleanupDialog``; its result is the set of statuses to remove."""
+
+    title = "Clean up list"
+    width = 420
+
+    def __init__(self, shell: Any, counts: dict[str, int]) -> None:
+        super().__init__(shell)
+        self.counts = counts
+        self.picked = {status for status, _text in dl.CLEANUP_STATUSES if counts.get(status)}
+
+    def body(self) -> dict[str, Any]:
+        boxes = [pad(check(status, f"{text} ({self.counts.get(status, 0)})", status in self.picked,
+                           enabled=bool(self.counts.get(status))), top=GAP)
+                 for status, text in dl.CLEANUP_STATUSES]
+        return vbox(
+            label("Remove these downloads from the list and history?", "title"),
+            *boxes,
+            pad(label("Leftover partial files of cancelled and failed downloads are deleted too. Finished files "
+                      "are not touched.", wrap=True, wrap_width=380), top=PAD),
+        )
+
+    def buttons(self) -> list[dict[str, Any]]:
+        return [push("remove", "Remove", default=True, enabled=bool(self.picked)), push("cancel", "Cancel")]
+
+    def handle(self, event: str, widget: str, values: dict[str, Any]) -> None:
+        self.picked = {status for status, _text in dl.CLEANUP_STATUSES
+                       if self.counts.get(status) and values.get(status, status in self.picked)}
+        if event == "click" and widget == "remove" and self.picked:
+            self.close(set(self.picked))
+        elif event == "close" or widget == "cancel":
+            self.close(set())
+
+
+# ----------------------------------------------------------------------- already downloaded
+class DuplicateForm(NativeForm):
+    """"You already have this file": asks before a finished download is fetched again.
+
+    ``choose`` is called with "all" (download everything again) or "new" (only what is missing).
+    """
+
+    title = "Already downloaded"
+    width = 480
+    owner = "none"  # the main window may be hidden in the tray when the browser sends a link
+
+    def __init__(self, shell: Any, matches: list[dict[str, Any]], new_count: int,
+                 choose: Callable[[str], None]) -> None:
+        super().__init__(shell)
+        self.matches = matches
+        self.new_count = new_count
+        self.choose = choose
+        self.topmost = True
+
+    def body(self) -> dict[str, Any]:
+        first = self.matches[0]
+        if len(self.matches) == 1 and not self.new_count:
+            details = " • ".join(p for p in (first["size_text"], first["last_try_text"]) if p)
+            lines = vbox(
+                label("This file is already downloaded.", "title"),
+                pad(label(first["name"], wrap=True, wrap_width=400), top=GAP),
+                label(details, "hint") if details else None,
+                label(f"Saved in: {Path(first['path']).parent}", "hint", wrap=True, wrap_width=400),
+                pad(label("Do you want to download it again?"), top=PAD),
+            )
+        else:
+            total = len(self.matches) + self.new_count
+            names = [label(f"• {row['name']}", wrap=True, wrap_width=400) for row in self.matches[:6]]
+            more = len(self.matches) - len(names)
+            lines = vbox(
+                label(f"{len(self.matches)} of {total} links are already downloaded.", "title"),
+                pad(vbox(*names), top=GAP),
+                label(f"…and {more} more", "hint") if more else None,
+                pad(label("Do you want to download them again?"), top=PAD),
+            )
+        return hbox(image("question", 32, valign="top"), {**lines, "stretch": True}, gap=PAD, valign="top")
+
+    def buttons(self) -> list[dict[str, Any]]:
+        if len(self.matches) == 1 and not self.new_count:
+            return [push("all", "Download again", default=True, width=14), push("open", "Open file", width=12),
+                    push("show", "Show in folder", width=14), push("cancel", "Cancel")]
+        choices = [push("all", "Download all again", default=True, width=17)]
+        if self.new_count:
+            choices.append(push("new", f"Only the new ({self.new_count})", width=17))
+        return choices + [push("cancel", "Cancel")]
+
+    def handle(self, event: str, widget: str, values: dict[str, Any]) -> None:
+        if event == "close" or (event == "click" and widget == "cancel"):
+            self.close()
+            return
+        if event != "click":
+            return
+        path = self.matches[0]["path"]
+        self.close()
+        if widget in {"all", "new"}:
+            self.choose(widget)
+        elif widget == "show":
+            reveal(path)
+        elif widget == "open":
+            try:
+                os.startfile(path)  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001
+                from tkinter import messagebox
+
+                messagebox.showerror("Media Downloader", f"Could not open it.\n\n{exc}")
+
+
 # --------------------------------------------------------------------------------- Add URL
 class AddUrlForm(NativeForm):
     title = "Add URL"
@@ -519,23 +626,24 @@ class BatchForm(NativeForm):
             except ValueError as exc:
                 messagebox.showerror("Batch download", str(exc))
                 return
+            def queued_links(batch_id: str, queued: int, _again: bool) -> None:
+                note = f"Queued {queued} link{'s' if queued != 1 else ''}"
+                if duplicates:
+                    note += f" • {duplicates} duplicate skipped"
+                if invalid:
+                    note += f" • {invalid} invalid skipped"
+                self.status = note
+                self._set_links("")
+                self.app._after_batch_queued(batch_id)
+                skipped = f" · {duplicates} duplicate skipped" if duplicates else ""
+                self.app._set_status(f"Queued {queued} batch downloads{skipped}", "ready")
+
             try:
-                batch_id, queued, _dupes = self.app._enqueue_batch_downloads(
+                self.app._queue_links(
                     "\n".join(urls), {"mode": self.mode, "video_quality": self.quality,
-                                      "audio_format": self.format, "audio_quality": self.bitrate})
+                                      "audio_format": self.format, "audio_quality": self.bitrate}, queued_links)
             except (ValueError, OSError) as exc:
                 messagebox.showerror("Batch download", str(exc))
-                return
-            note = f"Queued {queued} link{'s' if queued != 1 else ''}"
-            if duplicates:
-                note += f" • {duplicates} duplicate skipped"
-            if invalid:
-                note += f" • {invalid} invalid skipped"
-            self.status = note
-            self._set_links("")
-            self.app._after_batch_queued(batch_id)
-            skipped = f" · {duplicates} duplicate skipped" if duplicates else ""
-            self.app._set_status(f"Queued {queued} batch downloads{skipped}", "ready")
 
 
 # -------------------------------------------------------------------------- Updates & about
@@ -1190,8 +1298,6 @@ class CaptureForm(NativeForm):
                 pad({"type": "drop", "text": "Drag this file into Telegram, WhatsApp, a browser or a folder",
                      "path": self.path}, top=PAD),
             )
-        if self.mode == "deleted":
-            return vbox(label("The file was deleted.", "title"))
         return vbox(
             label(self.name, "title", wrap=True, wrap_width=520),
             pad(label(self.state_text), top=2, bottom=GAP),
@@ -1377,17 +1483,21 @@ class CaptureForm(NativeForm):
         elif widget == "copy_path":
             self.app.clipboard_clear()
             self.app.clipboard_append(self.path)
-            self.status = "Path copied."
+            self.app._set_status("Path copied", "ready")
+            self.close()
         elif widget == "open":
             if self.path and os.path.exists(self.path):
                 try:
                     os.startfile(self.path)  # type: ignore[attr-defined]
                 except Exception as exc:  # noqa: BLE001
                     messagebox.showerror("Media Downloader", f"Could not open it.\n\n{exc}")
+                    return
+                self.close()
             else:
                 messagebox.showwarning("Media Downloader", "The file is no longer on the disk.")
         elif widget == "show":
             reveal(self.path or self.folder)
+            self.close()
         elif widget == "delete":
             if not self.path or not os.path.exists(self.path):
                 messagebox.showwarning("Media Downloader", "The file is no longer on the disk.")
@@ -1402,8 +1512,7 @@ class CaptureForm(NativeForm):
                 messagebox.showerror("Media Downloader", f"Could not delete the file.\n\n{exc}")
                 return
             self.api.deleted(self.request_id, self.path)
-            self.mode = "deleted"
-            self.kind = "deleted"
+            self.close()
 
 
 def reveal(path: str) -> None:
