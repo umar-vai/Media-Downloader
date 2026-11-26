@@ -2445,6 +2445,21 @@ class DownloaderApp(UIMixin, tk.Tk):
             start=start, state=state, pause=self.pause_download, resume=self.resume_download,
             cancel=self.cancel_download, retry=self.retry_download, deleted=deleted,
         )
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            import native_forms
+
+            self._capture_dialogs = [d for d in self._capture_dialogs
+                                     if isinstance(d, native_forms.CaptureForm) and not d.done]
+            form = native_forms.CaptureForm(
+                shell, api, name=name, folder=str(folder), source=host, size_bytes=size,
+                is_file=direct, offset=len(self._capture_dialogs), ext=ext, host=host,
+                ext_saved=_same_folder(remembered.get(f"ext:{ext}") if ext else "", folder),
+                site_saved=_same_folder(remembered.get(f"site:{host}"), folder),
+            )
+            self._capture_dialogs.append(form)
+            shell.show_form(form)
+            return
         self._capture_dialogs = [d for d in self._capture_dialogs if _widget_alive(d)]
         dialog = CaptureDialog(
             self, api, name=name, folder=str(folder), source=host, size_bytes=size,
@@ -2523,6 +2538,15 @@ class DownloaderApp(UIMixin, tk.Tk):
             ("Export browser extension", self.export_browser_extension),
             ("Check for updates", lambda: self.check_for_updates(manual=True)),
         ]
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            import native_forms
+
+            for form in list(shell.forms.values()):
+                if isinstance(form, native_forms.PaletteForm):
+                    form.close()
+            shell.show_form(native_forms.PaletteForm(shell, commands))
+            return
         self._palette = CommandPalette(self, commands)
 
     def retry_all_failed(self) -> None:
@@ -2535,6 +2559,12 @@ class DownloaderApp(UIMixin, tk.Tk):
     def show_failure_details(self, request_id: str) -> None:
         item = self.download_queue.get(request_id)
         if item is None:
+            return
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            import native_forms
+
+            shell.show_form(native_forms.FailureForm(shell, item, self._retry_with_url))
             return
         FailureDialog(self, item, on_retry=self._retry_with_url)
 
@@ -2906,6 +2936,16 @@ class DownloaderApp(UIMixin, tk.Tk):
 
 
     def open_diagnostics(self) -> None:
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            import native_forms
+
+            if shell.diagnostics is None or shell.diagnostics.done:
+                shell.diagnostics = native_forms.DiagnosticsForm(shell)
+                shell.show_form(shell.diagnostics)
+            else:
+                shell.diagnostics.flash = not shell.diagnostics.flash
+            return
         existing = self.diagnostics_window
         if existing is not None:
             try:

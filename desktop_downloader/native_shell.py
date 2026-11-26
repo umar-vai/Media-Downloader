@@ -1,4 +1,9 @@
-"""Transport between the existing desktop controller and its native window."""
+"""Transport between the desktop controller and its native (C++) window.
+
+The controller (``app.DownloaderApp``) keeps running exactly as before, with its Tk window
+hidden. This class streams what the window shows to ``MediaDownloaderDesktop.exe`` as one JSON
+object per line, and turns the window's commands back into controller calls.
+"""
 
 from __future__ import annotations
 
@@ -14,14 +19,14 @@ import time
 import tkinter as tk
 from typing import Any
 
-from batch_download import MAX_BATCH_URLS, parse_batch_urls_detailed
 import download_list as dl
-from download_rules import parse_rules
-from main_window import TREE_LAYOUT
-from options_dialog import rules_from_rows
+import native_forms as nf
+from main_window import TREE_LAYOUT, details_view, toolbar_states, totals_summary
 from version import APP_VERSION
 
 LOG = logging.getLogger(__name__)
+POLL_MS = 30
+
 DIALOG_ACTIONS = {
     "add": "open_add_url",
     "batch": "open_batch_downloads",
@@ -48,6 +53,7 @@ SIMPLE_ACTIONS = {
     "quit": "quit_from_tray",
     "close": "_close_app",
     "focus": "_on_focus_in",
+    "hide": "_hide_window",
 }
 ROW_ACTIONS = {
     "open": "open_selected",
@@ -64,15 +70,13 @@ ROW_ACTIONS = {
     "details": "details_selected",
     "default": "_open_default",
 }
-
-
-SETTINGS_FIELDS = (
-    "download_dir", "default_mode", "video_quality", "audio_format", "audio_quality",
-    "max_concurrent_downloads", "auto_analyze_links", "open_editor_after_download", "confirm_before_exit",
-    "close_to_tray", "capture_dialog", "start_with_windows", "auto_check_updates", "auto_download_updates",
-    "theme", "skip_existing", "organize_by_site", "fast_mode", "embed_metadata", "embed_thumbnail",
-    "subtitles", "subtitle_langs", "clipboard_hotkey", "extension_enabled", "cookies_file", "cookies_browser",
-)
+EMPTY_TEXT = {
+    "all": ("No downloads yet", "Click Add URL (Ctrl+N) and paste a link, or send a video from your browser\n"
+                                "with the Media Downloader extension. Every download shows up here."),
+    "unfinished": ("Nothing unfinished", "Downloads that are running, queued, paused or failed appear here."),
+    "finished": ("No finished downloads", "Completed downloads are listed here with their size and folder."),
+    "queue:active": ("The queue is empty", "Running, waiting and paused downloads appear here."),
+}
 
 
 def executable() -> Path | None:
@@ -86,10 +90,21 @@ def executable() -> Path | None:
     return path if path.is_file() else None
 
 
+def row_tag(row: dict[str, Any]) -> str:
+    status = row["status"]
+    if status == "failed":
+        return "failed"
+    if status == "missing":
+        return "missing"
+    if status in {"paused", "cancelled", "queued"}:
+        return "dim"
+    return ""
+
+
 class NativeShell:
     def __init__(self, app: Any, path: Path) -> None:
         self.app = app
-        args = [str(path)]
+        args = [str(path), "--theme", "Dark" if str(app.settings.get("theme") or "Light") == "Dark" else "Light"]
         icon = app._icon_file
         if icon:
             args.extend(("--icon", icon))
@@ -98,17 +113,6 @@ class NativeShell:
             cwd=path.parent, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         self.status = ""
-        self.add_visible = False
-        self.batch_visible = False
-        self.batch_links = ""
-        self.batch_status = ""
-        self.batch_count = f"0 / {MAX_BATCH_URLS} links"
-        self.update_visible = False
-        self.settings_visible = False
-        self.settings_revision = 0
-        self.settings_tab = "General"
-        self.settings_status = ""
-        self.add_status = ""
         self.add_thumbnail = ""
         self.rows_changed = True
         self._view: dict[str, Any] = {}
@@ -118,15 +122,161 @@ class NativeShell:
         self.started = time.monotonic()
         self.selected: list[str] = []
         self.selection_revision = 0
-        self._messages: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=128)
+        self.forms: dict[str, nf.NativeForm] = {}
+        self.add_form: nf.AddUrlForm | None = None
+        self.batch_form: nf.BatchForm | None = None
+        self.updates_form: nf.UpdatesForm | None = None
+        self.options_form: nf.OptionsForm | None = None
+        self.diagnostics: nf.DiagnosticsForm | None = None
+        self._file_request: dict[str, Any] | None = None
+        self._file_reply: dict[str, Any] | None = None
+        self._messages: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=512)
         self._changed = threading.Condition()
         self._pending: dict[str, Any] | None = None
-        self._last_state: dict[str, Any] | None = None
+        self._last_state: str | None = None
         self._visibility_revision = 0
+        self._restore_hooks = nf.install_dialog_hooks(self)
         threading.Thread(target=self._read, daemon=True, name="native-commands").start()
         threading.Thread(target=self._write, daemon=True, name="native-state").start()
-        app.after(30, self._poll)
+        app.after(POLL_MS, self._poll)
 
+    # ------------------------------------------------------------------ compatibility
+    # app.py / app_ui.py use these flags to open and close the dialogs.
+    @property
+    def add_visible(self) -> bool:
+        return self.add_form is not None
+
+    @add_visible.setter
+    def add_visible(self, on: bool) -> None:
+        if on and self.add_form is None:
+            self.add_form = nf.AddUrlForm(self)
+            self.add_form.focus = "url"
+            self.show_form(self.add_form)
+        elif not on and self.add_form is not None:
+            self.close_add()
+
+    @property
+    def add_status(self) -> str:
+        return ""
+
+    @add_status.setter
+    def add_status(self, _text: str) -> None:
+        pass  # the Add URL form reads the status label itself
+
+    @property
+    def batch_visible(self) -> bool:
+        return self.batch_form is not None
+
+    @batch_visible.setter
+    def batch_visible(self, on: bool) -> None:
+        if on and self.batch_form is None:
+            self.batch_form = nf.BatchForm(self)
+            self.show_form(self.batch_form)
+        elif not on and self.batch_form is not None:
+            self.close_batch()
+
+    @property
+    def update_visible(self) -> bool:
+        return self.updates_form is not None
+
+    @update_visible.setter
+    def update_visible(self, on: bool) -> None:
+        if on and self.updates_form is None:
+            self.updates_form = nf.UpdatesForm(self)
+            self.show_form(self.updates_form)
+        elif not on and self.updates_form is not None:
+            self.close_updates()
+
+    def close_add(self) -> None:
+        form, self.add_form = self.add_form, None
+        if form is not None:
+            form.close()
+
+    def close_batch(self) -> None:
+        form, self.batch_form = self.batch_form, None
+        if form is not None:
+            form.close()
+
+    def close_updates(self) -> None:
+        form, self.updates_form = self.updates_form, None
+        if form is not None:
+            form.close()
+
+    def close_options(self) -> None:
+        form, self.options_form = self.options_form, None
+        if form is not None:
+            form.close()
+
+    def open_settings(self, tab: str | None) -> None:
+        if self.options_form is None:
+            self.options_form = nf.OptionsForm(self, tab)
+            self.show_form(self.options_form)
+        else:
+            self.options_form.select_tab(tab)
+            self.options_form.flash = not self.options_form.flash
+
+    # ------------------------------------------------------------------------- forms
+    def show_form(self, form: nf.NativeForm) -> None:
+        self.forms[form.form_id] = form
+        self.publish(force=True)
+
+    def remove_form(self, form: nf.NativeForm) -> None:
+        self.forms.pop(form.form_id, None)
+        if form is self.add_form:
+            self.add_form = None
+        if form is self.batch_form:
+            self.batch_form = None
+        if form is self.updates_form:
+            self.updates_form = None
+        if form is self.options_form:
+            self.options_form = None
+        self.publish(force=True)
+
+    def minimize_form(self, form: nf.NativeForm) -> None:
+        form.minimize_rev = getattr(form, "minimize_rev", 0) + 1
+
+    def form_specs(self) -> list[dict[str, Any]]:
+        specs = []
+        for form in list(self.forms.values()):
+            try:
+                spec = form.spec()
+            except Exception:  # noqa: BLE001
+                LOG.exception("Native dialog %s could not be described", form.form_id)
+                continue
+            spec["minimizeRev"] = getattr(form, "minimize_rev", 0)
+            specs.append(spec)
+        return specs
+
+    def file_dialog(self, kind: str, options: dict[str, Any]) -> list[str]:
+        """Shows a Windows file picker in the native window and waits for the answer."""
+        filters = []
+        for item in options.get("filetypes") or []:
+            try:
+                name, pattern = item
+            except (TypeError, ValueError):
+                continue
+            if isinstance(pattern, (list, tuple)):
+                pattern = " ".join(pattern)
+            filters.append([str(name), str(pattern)])
+        request = {
+            "id": f"f{time.monotonic_ns()}", "kind": kind, "title": str(options.get("title") or ""),
+            "filters": filters, "initialDir": str(options.get("initialdir") or ""),
+            "fileName": str(options.get("initialfile") or ""), "defaultExt": str(options.get("defaultextension") or ""),
+        }
+        top = next((f for f in reversed(list(self.forms.values()))), None)
+        if top is not None:
+            request["owner"] = top.form_id
+        self._file_reply = None
+        self._file_request = request
+        var = tk.BooleanVar(self.app, value=False)
+        self._file_var = var
+        self.publish(force=True)
+        self.app.wait_variable(var)
+        reply, self._file_reply = self._file_reply or {}, None
+        self._file_request = None
+        return [str(p) for p in reply.get("paths") or [] if p]
+
+    # ------------------------------------------------------------------------ transport
     def _read(self) -> None:
         with self.process.stdout as pipe:
             for line in pipe:
@@ -151,17 +301,33 @@ class NativeShell:
                     if self.closed:
                         break
                     state, self._pending = self._pending, None
-                pipe.write(json.dumps(state, separators=(",", ":")).encode("ascii") + b"\n")
+                pipe.write(state.encode("ascii") + b"\n")
                 pipe.flush()
         except (BrokenPipeError, OSError):
             pass
         finally:
-            pipe.close()
+            try:
+                pipe.close()
+            except OSError:
+                pass
 
     def close(self) -> None:
         with self._changed:
             self.closed = True
             self._changed.notify()
+        self._restore_hooks()
+        for form in list(self.forms.values()):
+            if form._done_var is not None:
+                try:
+                    form._done_var.set(True)
+                except tk.TclError:
+                    pass
+        file_var = getattr(self, "_file_var", None)
+        if file_var is not None:
+            try:
+                file_var.set(True)
+            except tk.TclError:
+                pass
         if self.process.poll() is None:
             try:
                 self.process.terminate()
@@ -172,6 +338,9 @@ class NativeShell:
         if self.closed:
             return
         app = self.app
+        # Scheduled first: a command below may open a modal dialog, which waits in a nested loop
+        # that still needs this poll to receive the dialog's answer.
+        app.after(POLL_MS, self._poll)
         if self.process.poll() is not None or (not self.ready and time.monotonic() - self.started > 12):
             LOG.warning("Native desktop unavailable (exit code %s), reopening desktop window", self.process.poll())
             self.close()
@@ -181,298 +350,133 @@ class NativeShell:
             app.show_from_tray()
             app._render_download_activity()
             return
-        for _ in range(30):
+        for _ in range(60):
             try:
                 message = self._messages.get_nowait()
             except queue.Empty:
                 break
             try:
                 self._dispatch(message)
-            except (tk.TclError, ValueError, OSError):
+            except (tk.TclError, ValueError, OSError, KeyError, TypeError):
                 if self.closed:
                     return
                 LOG.exception("Native desktop command failed")
             if self.closed:
                 return
-        if self.ready and self.visible:
+        if self.ready:
             self.publish()
-        app.after(100, self._poll)
 
     def show(self, visible: bool) -> None:
         self.visible = visible
         self._visibility_revision += 1
-        self.publish()
+        self.publish(force=True)
 
     def select(self, keys: list[str]) -> None:
         self.selected = keys
         self.selection_revision += 1
 
+    # ------------------------------------------------------------------------- commands
     def _dispatch(self, message: dict[str, Any]) -> None:
         app = self.app
         command = message.get("command")
         if not isinstance(command, str):
             return
+        value = message.get("value")
         if command == "ready":
             self.ready = True
+            self.rows_changed = True
+        elif command == "form":
+            if isinstance(value, dict):
+                form = self.forms.get(str(value.get("form") or ""))
+                if form is not None and not form.done:
+                    values = value.get("values") if isinstance(value.get("values"), dict) else {}
+                    form.handle(str(value.get("event") or ""), str(value.get("widget") or ""), values)
+                    self.publish(force=True)
+        elif command == "file_dialog":
+            request = self._file_request
+            if isinstance(value, dict) and request is not None and value.get("id") == request["id"]:
+                self._file_reply = value
+                var = getattr(self, "_file_var", None)
+                if var is not None:
+                    var.set(True)
         elif command == "category":
-            key = message.get("value")
-            if key in [category["key"] for category in self.categories()]:
+            if value in [category["key"] for category in self.categories()]:
                 self.select([])
-                app._select_category(key)
+                app._select_category(value)
         elif command == "search":
-            value = message.get("value")
             if isinstance(value, str):
                 app._search_changed(value[:2000])
         elif command == "sort":
-            if message.get("value") in dl.COLUMN_KEYS:
-                app._sort_by(message["value"])
+            if value in dl.COLUMN_KEYS:
+                app._sort_by(value)
         elif command == "updates":
             app.show_page("updates")
             if not app.top_update_button.available:
                 app.check_for_updates(manual=False, inline=True)
-        elif command == "update_check":
+        elif command == "update_badge":
+            app.top_update_button._clicked()
+        elif command == "check_updates":
+            app.show_page("updates")
             app.check_for_updates(manual=False, inline=True)
-        elif command == "update_install" and not app.update_action_button.instate(["disabled"]):
-            app.download_or_install_update()
-        elif command == "update_cancel":
-            app.cancel_update_download()
-        elif command == "update_later":
-            app.snooze_update()
-            self.update_visible = False
-        elif command == "update_release":
-            app.release_button.invoke()
-        elif command == "update_close":
-            self.update_visible = False
-        elif command == "settings_save":
-            self._save_settings(message.get("value"))
-        elif command == "settings_close":
-            self.settings_visible = False
-        elif command == "settings_check_updates":
-            if not self.settings_visible:
-                app.show_page("updates")
-                app.check_for_updates(manual=False, inline=True)
         elif command == "copy_pairing_token":
             app._copy_text(str(app.settings.get("extension_token") or ""), "pairing token")
         elif command == "browser_settings":
             app.open_settings(tab="Browser")
-        elif command == "column" and isinstance(message.get("value"), str) and message["value"] in app._column_vars:
-            var = app._column_vars[message["value"]]
+        elif command == "column" and isinstance(value, str) and value in app._column_vars:
+            var = app._column_vars[value]
             var.set(not var.get())
             app._apply_columns()
+            self.rows_changed = True
         elif command == "reset_columns":
             app._reset_columns()
+            self.rows_changed = True
         elif command == "width":
-            value = message.get("value")
             if isinstance(value, dict) and value.get("column") in dl.COLUMN_KEYS:
                 width = value.get("width")
-                if isinstance(width, int) and 70 <= width <= 4096:
-                    app.settings["list_widths"] = {**app.settings.get("list_widths", {}), value["column"]: width}
+                if isinstance(width, (int, float)) and 48 <= width <= 4096:
+                    app.settings["list_widths"] = {**app.settings.get("list_widths", {}), value["column"]: int(width)}
                     app._persist_settings()
+        elif command == "sidebar_width":
+            if isinstance(value, (int, float)) and 120 <= value <= 2000:
+                app.settings["sidebar_width"] = int(value)
+                app._persist_settings()
         elif command in {"navigation", "details_pane"}:
             setting, var = ("show_categories", app._show_categories_var) if command == "navigation" else (
                 "show_details", app._show_details_var)
             var.set(not var.get())
             app.settings[setting] = var.get()
             app._persist_settings()
-        elif command == "theme" and message.get("value") in ("Light", "Dark"):
-            app._theme_var.set(message["value"])
+        elif command == "theme" and value in ("Light", "Dark"):
+            app._theme_var.set(value)
             app._choose_theme()
-        elif command in {"add_url", "add_analyze", "add_stop", "add_close", "add_submit"}:
-            self._add_command(command, message.get("value"))
-        elif command in {"batch_links", "batch_submit", "batch_close"}:
-            self._batch_command(command, message.get("value"))
         elif command == "clipboard":
-            mode = "Audio" if message.get("value") == "Audio" else "Video"
-            app._download_clipboard_link(mode)
+            app._download_clipboard_link("Audio" if value == "Audio" else "Video")
         elif command in DIALOG_ACTIONS:
             getattr(app, DIALOG_ACTIONS[command])()
         elif command in SIMPLE_ACTIONS:
             getattr(app, SIMPLE_ACTIONS[command])()
-        elif command in ROW_ACTIONS or command == "selection":
+        elif command in ROW_ACTIONS or command in {"selection", "copy_page", "open_page"}:
             keys = message.get("keys")
             if isinstance(keys, list):
                 self.selected = [key for key in keys if isinstance(key, str) and key in app._rows_by_key]
-            actions = dl.available_actions(app._selected_rows())
-            if command in ROW_ACTIONS and (command in actions or command == "default"):
+            rows = app._selected_rows()
+            actions = dl.available_actions(rows)
+            if command in {"copy_page", "open_page"}:
+                if rows and "open_page" in actions:
+                    page = str(rows[0].get("page_url") or "")
+                    if command == "copy_page":
+                        app._copy_text(page, "web page link")
+                    else:
+                        import webbrowser
+
+                        webbrowser.open(page)
+            elif command in ROW_ACTIONS and (command in actions or command == "default"):
                 getattr(app, ROW_ACTIONS[command])()
 
-    def _add_command(self, command: str, value: Any) -> None:
-        app = self.app
-        if not self.add_visible:
-            return
-        if command == "add_close":
-            self.add_visible = False
-            return
-        if command == "add_stop":
-            app.cancel_analysis()
-            return
-        if command == "add_submit" and isinstance(value, dict):
-            url = str(value.get("url") or "").strip()
-            if url == app.url_var.get().strip() == app.last_analyzed_url and app.current_info is not None:
-                app.name_var.set(str(value.get("name") or "")[:350])
-                app._sync_mode("Audio" if value.get("mode") == "Audio" else "Video")
-                choices = (
-                    ("quality", app.video_quality, app.video_quality_var),
-                    ("format", app.audio_format, app.audio_format_var),
-                    ("bitrate", app.audio_quality, app.audio_quality_var),
-                )
-                for key, widget, variable in choices:
-                    choice = value.get(key)
-                    if choice in widget.cget("values"):
-                        variable.set(choice)
-                app.open_editor_after_var.set(value.get("edit") is True)
-                app.download()
-            return
-        if command in {"add_url", "add_analyze"} and isinstance(value, str):
-            if value != app.url_var.get():
-                app.url_var.set(value[:8192])
-                app._on_url_changed()
-            if command == "add_analyze":
-                app.analyze_media()
-
-    def _add_form(self) -> dict[str, Any]:
-        app = self.app
-        if not self.add_visible:
-            return {"visible": False}
-        info = app.current_info or {}
-        ready = bool(info) and app.url_var.get().strip() == app.last_analyzed_url
-        return {
-            "visible": True,
-            "url": app.url_var.get(),
-            "mode": app.mode_var.get(),
-            "quality": app.video_quality_var.get(),
-            "format": app.audio_format_var.get(),
-            "bitrate": app.audio_quality_var.get(),
-            "edit": app.open_editor_after_var.get(),
-            "folder": str(app.download_dir),
-            "name": app.name_var.get(),
-            "title": str(app.title_label.cget("text")),
-            "metadata": str(app.meta_label.cget("text")),
-            "running": app.analysis_running,
-            "ready": ready,
-            "direct": bool(info.get("direct_file")),
-            "status": self.add_status,
-            "thumbnail": self.add_thumbnail,
-        }
-
-    def _batch_command(self, command: str, value: Any) -> None:
-        app = self.app
-        if not self.batch_visible:
-            return
-        if command == "batch_close":
-            if isinstance(value, str):
-                self._batch_command("batch_links", value)
-            self.batch_visible = False
-        elif command == "batch_links" and isinstance(value, str):
-            self.batch_links = value[:2_000_000]
-            self.batch_status = ""
-            try:
-                urls, duplicates, invalid = parse_batch_urls_detailed(self.batch_links)
-            except ValueError as exc:
-                self.batch_count = f"0 / {MAX_BATCH_URLS} links"
-                if self.batch_links.strip():
-                    self.batch_status = str(exc)
-            else:
-                self.batch_count = f"{len(urls)} / {MAX_BATCH_URLS} links"
-                if duplicates or invalid:
-                    self.batch_status = f"{duplicates} duplicate · {invalid} invalid"
-        elif command == "batch_submit" and isinstance(value, dict):
-            links = str(value.get("links") or "")[:2_000_000]
-            options = {
-                "mode": "Audio" if value.get("mode") == "Audio" else "Video",
-                "video_quality": str(value.get("quality") or "720p"),
-                "audio_format": str(value.get("format") or "MP3"),
-                "audio_quality": str(value.get("bitrate") or "192"),
-            }
-            try:
-                batch_id, queued, duplicates = app._enqueue_batch_downloads(links, options)
-            except (ValueError, OSError) as exc:
-                self.batch_status = str(exc)
-            else:
-                self.batch_links = ""
-                self.batch_status = ""
-                self.batch_count = f"0 / {MAX_BATCH_URLS} links"
-                app._after_batch_queued(batch_id)
-                skipped = f" · {duplicates} duplicate skipped" if duplicates else ""
-                app._set_status(f"Queued {queued} batch downloads{skipped}", "ready")
-
-    def _batch_dialog(self) -> dict[str, Any]:
-        page = self.app.batch_page
-        if not self.batch_visible:
-            return {"visible": False}
-        return {
-            "visible": True,
-            "links": self.batch_links,
-            "status": self.batch_status,
-            "count": self.batch_count,
-            "mode": page.mode_var.get(),
-            "quality": page.quality_var.get(),
-            "format": page.audio_format_var.get(),
-            "bitrate": page.audio_quality_var.get(),
-        }
-
-    def _update_dialog(self) -> dict[str, Any]:
-        app = self.app
-        if not self.update_visible:
-            return {"visible": False}
-        return {
-            "visible": True,
-            "headline": app.update_status_label.cget("text"),
-            "detail": app.update_detail_label.cget("text"),
-            "notes": app.update_notes_label.cget("text"),
-            "progress": int(float(app.update_progress.cget("value"))),
-            "downloading": app.update_downloading,
-            "canCheck": not app.update_check_button.instate(["disabled"]),
-            "canInstall": not app.update_action_button.instate(["disabled"]),
-            "canSnooze": not app.update_later_button.instate(["disabled"]),
-            "canCancel": not app.update_cancel_button.instate(["disabled"]),
-            "releaseText": app.release_button.cget("text"),
-            "installText": app.update_action_button.cget("text"),
-        }
-
-    def open_settings(self, tab: str | None) -> None:
-        self.settings_tab = {"Website folders": "Save To", "About": "Updates"}.get(tab, tab) or "General"
-        self.settings_visible = True
-        self.settings_revision += 1
-        self.settings_status = ""
-
-    def _save_settings(self, value: Any) -> None:
-        app = self.app
-        if not isinstance(value, dict) or not self.settings_visible or not isinstance(value.get("values"), dict):
-            return
-        payload = {key: data for key, data in value["values"].items() if key in SETTINGS_FIELDS}
-        rules = value.get("rules")
-        if isinstance(rules, list):
-            rows = [tuple(row) for row in rules if isinstance(row, list) and len(row) == 3]
-            payload["folder_rules"] = rules_from_rows(rows)
-        try:
-            app._apply_settings(payload)
-        except (ValueError, OSError, RuntimeError) as exc:
-            self.settings_status = str(exc)
-        else:
-            self.settings_status = "Settings saved."
-            self.settings_tab = str(value.get("tab") or self.settings_tab)
-            self.settings_visible = value.get("close") is not True
-            self.settings_revision += 1
-
-    def _settings_dialog(self) -> dict[str, Any]:
-        if not self.settings_visible:
-            return {"visible": False}
-        app = self.app
-        return {
-            "visible": True,
-            "revision": self.settings_revision,
-            "tab": self.settings_tab,
-            "status": self.settings_status,
-            "extension": str(app.statusbar.extension.cget("text")),
-            "values": {key: app.settings[key] for key in SETTINGS_FIELDS if key in app.settings},
-            "rules": [[rule.host, rule.folder, rule.quality]
-                      for rule in parse_rules(str(app.settings.get("folder_rules") or ""))],
-        }
-
+    # ---------------------------------------------------------------------------- state
     def categories(self) -> list[dict[str, str]]:
         counts = dl.category_counts(self.app._rows)
-        fixed = [{"key": key, "name": label, "count": str(counts[key])}
+        fixed = [{"key": key, "name": label, "count": str(counts.get(key, 0))}
                  for key, _parent, label, _icon in TREE_LAYOUT if key != "queues"]
         added = [{"key": group["key"], "name": group["label"], "count": f"{group['done']}/{group['total']}"}
                  for group in dl.queue_groups(self.app._rows)]
@@ -483,8 +487,8 @@ class NativeShell:
         categories = self.categories()
         category = next((item for item in categories if item["key"] == app._category), None)
         if category is None:
-            app._category = "queue:active"
-            category = next(item for item in categories if item["key"] == app._category)
+            app._category = "all"
+            category = next(item for item in categories if item["key"] == "all")
         shown = dl.sort_rows(dl.filter_rows(app._rows, app._category, app._query), app._sort_column, app._sort_desc)
         app._shown_keys = [row["key"] for row in shown]
 
@@ -496,12 +500,23 @@ class NativeShell:
             self.select(selection)
 
         fields = ("key", "name", "size_text", "status", "status_text", "progress", "speed_text", "eta_text",
-                  "last_try_text", "added_text", "website", "quality", "save_to")
+                  "last_try_text", "added_text", "website", "quality", "save_to", "category")
+        total = len(shown)
+        if total:
+            empty = ("", "")
+        elif app._query:
+            empty = ("No matches", f"No downloads match “{app._query}”.")
+        else:
+            empty = EMPTY_TEXT.get(app._category) or ("Nothing here yet", "Downloads of this type appear here.")
         self._view = {
             "categories": categories,
             "category": category,
+            "countText": f"{total} item{'s' if total != 1 else ''}" if total else "",
+            "emptyTitle": empty[0],
+            "emptyText": empty[1],
             "rows": [
                 {**{field: row[field] for field in fields},
+                 "tag": row_tag(row),
                  "dragPath": row["path"] if row["status"] == "complete" and row["file_exists"] else "",
                  "actions": sorted(dl.available_actions([row]))}
                 for row in shown
@@ -510,38 +525,68 @@ class NativeShell:
         }
         self.rows_changed = False
 
-    def publish(self) -> None:
+    def _update_badge(self) -> dict[str, Any]:
+        badge = self.app.top_update_button
+        note = badge.note
+        color = str(note.cget("fg")).upper()
+        from theme import C
+
+        kind = {C["SUCCESS"].upper(): "success", C["DANGER"].upper(): "danger", C["MUTED"].upper(): "muted"}.get(color, "faint")
+        return {
+            "note": str(note.cget("text")) if note.winfo_manager() or badge.available else str(note.cget("text")),
+            "kind": kind,
+            "bold": badge.available,
+            "button": str(badge.button.cget("text")),
+            "enabled": badge.button.enabled,
+        }
+
+    def _extension_menu(self) -> str:
+        server = getattr(self.app, "extension_server", None)
+        if server is None:
+            return "Browser link is starting…"
+        if server.extension_active():
+            return f"Extension connected (port {server.port})"
+        return f"Listening on port {server.port}; waiting for the extension"
+
+    def publish(self, force: bool = False) -> None:
+        if self.closed or (not self.ready and not force):
+            return
         app = self.app
-        if self.rows_changed:
+        if self.rows_changed and self.visible:
             self._refresh_rows()
         selected = app._selected_rows()
+        totals = self._view.get("totals") or dl.totals(app._rows)
         state = {
             **self._view,
             "version": APP_VERSION,
-            "updateAvailable": app.top_update_button.available,
-            "addForm": self._add_form(),
-            "batchDialog": self._batch_dialog(),
-            "updateDialog": self._update_dialog(),
-            "settingsDialog": self._settings_dialog(),
             "visible": self.visible,
             "visibilityRevision": self._visibility_revision,
             "selectionRevision": self.selection_revision,
             "selection": self.selected,
-            "summary": dl.selection_summary(selected),
             "sort": app._sort_column,
             "descending": app._sort_desc,
             "status": self.status,
-            "updates": str(app.top_update_button.note.cget("text")),
+            "summaryText": totals_summary(totals),
+            "speedText": f"Speed: {totals['speed_text']}" if totals.get("speed_text") else "",
+            "toolbar": toolbar_states(app._rows, selected, totals),
+            "detailsPane": details_view(selected[0] if len(selected) == 1 else None, len(selected),
+                                        dl.selection_summary(selected)),
+            "actionCounts": dl.action_counts(selected) if len(selected) > 1 else {},
+            "updateBadge": self._update_badge(),
             "columns": ["name"] + dl.normalize_columns(app.settings.get("list_columns")),
             "details": bool(app.settings.get("show_details", True)),
             "navigation": bool(app.settings.get("show_categories", True)),
             "theme": app.settings.get("theme", "Light"),
             "widths": app.settings.get("list_widths", {}),
-            "selectedDetails": selected[0]["detail"] if len(selected) == 1 else "",
+            "sidebarWidth": int(app.settings.get("sidebar_width") or 214),
             "extension": str(app.statusbar.extension.cget("text")),
+            "extensionMenu": self._extension_menu(),
+            "forms": self.form_specs(),
+            "fileDialog": self._file_request,
         }
-        if state != self._last_state:
-            self._last_state = state
+        line = json.dumps(state, separators=(",", ":"), default=str)
+        if line != self._last_state or force:
+            self._last_state = line
             with self._changed:
-                self._pending = state
+                self._pending = line
                 self._changed.notify()

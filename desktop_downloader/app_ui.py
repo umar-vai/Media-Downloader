@@ -34,7 +34,7 @@ from history_window import PropertiesDialog
 from icons import IconSet
 from partial_files import delete_partial_files, find_partial_files, path_size, remove_path, scan_partial_files
 from main_window import (CategoryTree, ConfirmDelete, DetailsPane, DownloadTable, SearchBox, StatusBar,
-                         Toolbar, UpdateBadge, setup_style, sysfont)
+                         Toolbar, UpdateBadge, setup_style, sysfont, toolbar_states, totals_summary)
 from theme import C
 from ui_kit import px
 from version import APP_VERSION
@@ -548,6 +548,10 @@ class UIMixin:
         self.after(60, lambda: (self.url_entry.focus_set(), self.url_entry.icursor("end")))
 
     def _hide_window(self) -> None:
+        shell = getattr(self, "native_shell", None)
+        if shell is not None and getattr(self, "tray", None) is None:
+            shell.show(False)
+            return
         if getattr(self, "tray", None) is not None:
             self.hide_to_tray()
         else:
@@ -767,16 +771,7 @@ class UIMixin:
             self.table.show_empty(title, text)
 
         totals = dl.totals(rows)
-        parts = []
-        if totals["downloading"]:
-            parts.append(f"{totals['downloading']} downloading")
-        if totals["queued"]:
-            parts.append(f"{totals['queued']} queued")
-        if totals["paused"]:
-            parts.append(f"{totals['paused']} stopped")
-        if totals["failed"]:
-            parts.append(f"{totals['failed']} failed")
-        self.statusbar.set_totals("  •  ".join(parts) or "No active downloads", totals["speed_text"])
+        self.statusbar.set_totals(totals_summary(totals), totals["speed_text"])
         self._refresh_extension_status(reschedule=False)
         self._update_selection_ui(totals)
 
@@ -804,15 +799,10 @@ class UIMixin:
 
     def _update_selection_ui(self, totals: dict[str, Any] | None = None) -> None:
         rows = self._selected_rows()
-        actions = dl.available_actions(rows)
         totals = totals or dl.totals(self._rows)
         buttons = self.toolbar.buttons
-        buttons["resume"].set_enabled("resume" in actions)
-        buttons["stop"].set_enabled("stop" in actions)
-        buttons["delete"].set_enabled("delete" in actions)
-        buttons["start_all"].set_enabled(bool(totals["paused"]))
-        buttons["stop_all"].set_enabled(bool(totals["downloading"] or totals["queued"]))
-        buttons["delete_done"].set_enabled(any(row["status"] in dl.FINISHED for row in self._rows))
+        for key, enabled in toolbar_states(self._rows, rows, totals).items():
+            buttons[key].set_enabled(enabled)
         self.details.show(rows[0] if len(rows) == 1 else None, len(rows), dl.selection_summary(rows))
 
     # ============================================================== actions
@@ -977,6 +967,12 @@ class UIMixin:
             elif action == "redownload" and row["status"] in dl.FINISHED | {"failed", "cancelled"}:
                 self._redownload_row(row)
 
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            import native_forms
+
+            shell.show_form(native_forms.PropertiesForm(shell, self._row_entry(row), act))
+            return
         PropertiesDialog(self, self._row_entry(row), on_action=act)
 
     def _details_or_properties(self) -> None:
