@@ -67,12 +67,12 @@ def _check_native_desktop(path: Path) -> CheckResult:
     try:
         result = subprocess.run(
             [str(path)], cwd=path.parent, input=b'{"visible":false}\n',
-            capture_output=True, env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+            capture_output=True,
             creationflags=CREATE_NO_WINDOW, timeout=12, check=False,
         )
         messages = [json.loads(line) for line in result.stdout.splitlines()]
         ok = result.returncode == 0 and any(item.get("command") == "ready" for item in messages)
-        return CheckResult(name, ok, f"Qt helper handshake, exit={result.returncode}.")
+        return CheckResult(name, ok, f"Native desktop handshake, exit={result.returncode}.")
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         return CheckResult(name, False, str(exc))
 

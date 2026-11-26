@@ -1,4 +1,4 @@
-"""Transport between the existing desktop controller and its Qt window."""
+"""Transport between the existing desktop controller and its native window."""
 
 from __future__ import annotations
 
@@ -123,8 +123,8 @@ class NativeShell:
         self._pending: dict[str, Any] | None = None
         self._last_state: dict[str, Any] | None = None
         self._visibility_revision = 0
-        threading.Thread(target=self._read, daemon=True, name="qt-commands").start()
-        threading.Thread(target=self._write, daemon=True, name="qt-state").start()
+        threading.Thread(target=self._read, daemon=True, name="native-commands").start()
+        threading.Thread(target=self._write, daemon=True, name="native-state").start()
         app.after(30, self._poll)
 
     def _read(self) -> None:

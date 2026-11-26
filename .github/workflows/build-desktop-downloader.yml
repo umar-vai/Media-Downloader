@@ -2,7 +2,7 @@ name: Build Media Downloader
 
 on:
   push:
-    branches: [main, feature/v6-telegram-desktop]
+    branches: [main]
     tags:
       - 'v*'
     paths:
@@ -160,7 +160,7 @@ jobs:
             --icon desktop_downloader/assets/app_icon.ico `
             desktop_downloader/updater.py
 
-      - name: Build and test C++/Qt desktop
+      - name: Build and test native C++ desktop
         shell: pwsh
         run: ./desktop_downloader/ci/build_native_desktop.ps1 -Destination dist/native_desktop
 

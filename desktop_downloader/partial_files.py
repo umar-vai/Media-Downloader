@@ -9,6 +9,7 @@ removing the download from the list should remove them too.
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 # Same normalisation the download engine applies to the title when it picks the file name.
@@ -20,6 +21,38 @@ _STREAM_FILE = r"\.f(?:\d|hls|dash|http)[^.]*\.\w+"
 _DOWNLOAD_SUFFIX = r"(?:\.part(?:-frag\d+)?|\.ytdl|\.mdpart|-frag\d+|\.unpng)"
 _MERGE_SUFFIX = r"\.temp\.(?:mp4|m4a|webm|mkv|mov|mp3|opus|wav|flac)"
 _ANY_LEFTOVER = re.compile(rf"(?:{_DOWNLOAD_SUFFIX}|{_STREAM_FILE}|{_MERGE_SUFFIX})$", re.I)
+
+
+# Private per-download folder the engine stages everything in until the file is finished.
+WORKSPACE_PREFIX = ".media-downloader-"
+
+
+def _is_workspace(path: Path) -> bool:
+    return path.name.startswith(WORKSPACE_PREFIX) and path.is_dir()
+
+
+def _workspace_title(path: Path) -> str:
+    try:
+        return (path / ".title").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def remove_path(path: Path) -> None:
+    """Delete a leftover file or a whole workspace folder."""
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def path_size(path: Path) -> int:
+    try:
+        if path.is_dir():
+            return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def stem_for(name: str) -> str:
@@ -50,6 +83,8 @@ def find_partial_files(directory: str | Path, name: str) -> list[Path]:
             match = pattern.fullmatch(path.name)
             if match and _is_leftover(match.group("rest")) and path.is_file():
                 found.append(path)
+            elif _is_workspace(path) and stem_for(_workspace_title(path)) == stem:
+                found.append(path)
     except OSError:
         pass
     return found
@@ -61,7 +96,7 @@ def delete_partial_files(directory: str | Path, name: str) -> tuple[int, list[st
     problems: list[str] = []
     for path in find_partial_files(directory, name):
         try:
-            path.unlink(missing_ok=True)
+            remove_path(path)
             removed += 1
         except OSError as exc:
             problems.append(f"{path.name}: {exc}")
@@ -80,7 +115,9 @@ def scan_partial_files(directories: list[str | Path], keep: set[Path] | None = N
                 continue
             seen.add(folder)
             for path in folder.iterdir():
-                if _ANY_LEFTOVER.search(path.name) and path.is_file() and path not in keep:
+                if path in keep:
+                    continue
+                if _is_workspace(path) or (_ANY_LEFTOVER.search(path.name) and path.is_file()):
                     found.append(path)
         except OSError:
             continue

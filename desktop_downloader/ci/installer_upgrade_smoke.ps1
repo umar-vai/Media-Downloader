@@ -62,7 +62,7 @@ try {
     if ($report.version -ne $ExpectedVersion -or -not ($report.checks | Where-Object {
         $_.name -eq "native_desktop" -and $_.ok
     })) {
-        throw "The upgraded application did not start with the expected version and Qt runtime."
+        throw "The upgraded application did not start with the expected version."
     }
     if ((Get-FileHash -LiteralPath $settings).Hash -ne $settingsHash -or
         (Get-FileHash -LiteralPath $history).Hash -ne $historyHash) {
