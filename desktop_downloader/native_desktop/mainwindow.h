@@ -100,6 +100,7 @@ public:
         sep();
         add("delete", "Delete", "delete", "delete", L"Remove the selected downloads  (Del)");
         add("delete_done", "Delete Completed", "delete_done", "delete_completed", L"Remove finished downloads from the list");
+        add("cleanup", "Clean Up", "cleanup", "cleanup", L"Remove missing, cancelled and failed downloads in one go");
         sep();
         add("options", "Options", "settings", "settings", L"Settings");
         add("browsers", "Browsers", "browser", "browsers", L"Browser extension");

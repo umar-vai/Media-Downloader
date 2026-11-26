@@ -52,7 +52,7 @@ enum MenuId : UINT {
     ID_ADD = 100, ID_BATCH, ID_CLIP_VIDEO, ID_CLIP_AUDIO, ID_PALETTE, ID_HIDE, ID_EXIT,
     ID_OPEN, ID_OPEN_FOLDER, ID_EDIT, ID_OPEN_DOWNLOADS, ID_CHOOSE_FOLDER, ID_EDITOR, ID_SCREEN, ID_AUDIO,
     ID_RESUME, ID_STOP, ID_CANCEL, ID_REDOWNLOAD, ID_START_ALL, ID_STOP_ALL, ID_RETRY_ALL, ID_DELETE, ID_DELETE_DONE,
-    ID_REMOVE_MISSING, ID_CLEAN_PARTS, ID_COPY_LINK, ID_DETAILS, ID_PROPERTIES, ID_SELECT_ALL,
+    ID_REMOVE_MISSING, ID_CLEANUP, ID_CLEAN_PARTS, ID_COPY_LINK, ID_DETAILS, ID_PROPERTIES, ID_SELECT_ALL,
     ID_VIEW_CATEGORIES, ID_VIEW_DETAILS, ID_RESET_COLUMNS, ID_THEME_LIGHT, ID_THEME_DARK, ID_REFRESH,
     ID_CHECK_UPDATES, ID_ABOUT, ID_INSTALL_EXT, ID_DIAGNOSTICS, ID_LOG,
     ID_COLUMN_FIRST = 300,
@@ -202,6 +202,7 @@ public:
         AppendMenuW(downloadsMenu, MF_STRING, ID_DELETE, L"Delete…\tDel");
         AppendMenuW(downloadsMenu, MF_STRING, ID_DELETE_DONE, L"Delete completed…");
         AppendMenuW(downloadsMenu, MF_STRING, ID_REMOVE_MISSING, L"Remove missing files from list");
+        AppendMenuW(downloadsMenu, MF_STRING, ID_CLEANUP, L"Clean up list\u2026");
         AppendMenuW(downloadsMenu, MF_STRING, ID_CLEAN_PARTS, L"Clean up partial files…");
         AppendMenuW(downloadsMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(downloadsMenu, MF_STRING, ID_COPY_LINK, L"Copy download link\tCtrl+C");
@@ -276,7 +277,7 @@ public:
             {ID_CHOOSE_FOLDER, "choose_folder"}, {ID_EDITOR, "editor"}, {ID_SCREEN, "screen"}, {ID_AUDIO, "audio"},
             {ID_RESUME, "resume"}, {ID_STOP, "stop"}, {ID_CANCEL, "cancel"}, {ID_REDOWNLOAD, "redownload"},
             {ID_START_ALL, "resume_all"}, {ID_STOP_ALL, "pause_all"}, {ID_RETRY_ALL, "retry_all"}, {ID_DELETE, "delete"},
-            {ID_DELETE_DONE, "delete_completed"}, {ID_REMOVE_MISSING, "remove_missing"}, {ID_CLEAN_PARTS, "clean_parts"},
+            {ID_DELETE_DONE, "delete_completed"}, {ID_REMOVE_MISSING, "remove_missing"}, {ID_CLEAN_PARTS, "clean_parts"}, {ID_CLEANUP, "cleanup"},
             {ID_COPY_LINK, "copy_link"}, {ID_DETAILS, "details"}, {ID_PROPERTIES, "properties"},
             {ID_VIEW_CATEGORIES, "navigation"}, {ID_VIEW_DETAILS, "details_pane"}, {ID_RESET_COLUMNS, "reset_columns"},
             {ID_REFRESH, "refresh"}, {ID_CHECK_UPDATES, "check_updates"}, {ID_ABOUT, "updates"},
@@ -903,7 +904,7 @@ public:
             if (s["visible"].asBool()) {
                 if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
                 else if (!IsWindowVisible(hwnd)) ShowWindow(hwnd, SW_SHOW);
-                SetForegroundWindow(hwnd);
+                forceForeground(hwnd);
             } else {
                 ShowWindow(hwnd, SW_HIDE);
             }
@@ -955,7 +956,7 @@ public:
         applying = true;
 
         const Value &tb = s["toolbar"];
-        for (const char *k : {"resume", "stop", "delete", "start_all", "stop_all", "delete_done"}) toolbar.setEnabled(k, tb[k].asBool());
+        for (const char *k : {"resume", "stop", "delete", "start_all", "stop_all", "delete_done", "cleanup"}) toolbar.setEnabled(k, tb[k].asBool());
         const Value &badge = s["updateBadge"];
         COLORREF noteColor = g_theme.p.FAINT;
         std::string kind = badge["kind"].asString();

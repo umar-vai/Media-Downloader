@@ -41,6 +41,7 @@ DIALOG_ACTIONS = {
     "reset_folder": "reset_download_folder",
     "clean_parts": "clean_partial_files",
     "delete_completed": "delete_completed",
+    "cleanup": "cleanup_list",
 }
 SIMPLE_ACTIONS = {
     "open_downloads": "open_download_folder",
@@ -108,6 +109,9 @@ class NativeShell:
         icon = app._icon_file
         if icon:
             args.extend(("--icon", icon))
+        if getattr(sys, "frozen", False):
+            # What a taskbar pin of the window starts: the app itself, not the native window.
+            args.extend(("--launcher", sys.executable))
         self.process = subprocess.Popen(
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             cwd=path.parent, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

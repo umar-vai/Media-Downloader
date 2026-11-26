@@ -13,6 +13,14 @@ Downloaded files are saved to:
 
 You can change the save location from Settings.
 
+## v6.1.2
+
+- Asking for something you already downloaded (browser, Add URL, batch or clipboard) now asks first: download again, open the file, show it in its folder, or cancel.
+- The finished-download window closes after Open, Show in folder, Copy path or Delete.
+- Clicking the pinned taskbar icon brings the window back from the tray; pins made from the window now point at the app.
+- New Clean Up button: remove missing, cancelled and failed downloads in one go.
+- The audio and screen recorder windows no longer flicker while the clock and sound meters update.
+
 ## v4.5.1: in-app update fix
 
 - "Install update" could fail with "Installer exited with code 5" when a helper program started by the app (the editor's video player or ffmpeg) was still running and kept a program file locked. The updater now closes anything still running from the program folder, tries once more if a file is in use, saves the setup log next to the update log and says which file was the problem.

@@ -318,7 +318,8 @@ class CaptureDialog(tk.Toplevel):
     def _copy_path(self) -> None:
         self.clipboard_clear()
         self.clipboard_append(self._path)
-        self.status.configure(text="Path copied.")
+        self.update_idletasks()
+        self._on_close()
 
     def _drag_out(self, _event: Any) -> str:
         import file_drag
@@ -427,11 +428,13 @@ class CaptureDialog(tk.Toplevel):
     def _open_file(self) -> None:
         if self._path and os.path.exists(self._path):
             open_path(self._path)
+            self._on_close()
         else:
             messagebox.showwarning("Media Downloader", "The file is no longer on the disk.", parent=self)
 
     def _open_folder(self) -> None:
         reveal(self._path or self.folder_var.get())
+        self._on_close()
 
     def _delete_file(self) -> None:
         if not self._path or not os.path.exists(self._path):
@@ -448,10 +451,7 @@ class CaptureDialog(tk.Toplevel):
             messagebox.showerror("Media Downloader", f"Could not delete the file.\n\n{exc}", parent=self)
             return
         self._api.deleted(self._request_id, self._path)
-        self._clear()
-        ttk.Label(self.body, text="The file was deleted.", style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        self._last_status = ""
-        self._buttons_for("deleted")
+        self._on_close()
 
     def _on_escape(self) -> None:
         if self._mode == "prompt":

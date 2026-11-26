@@ -6,7 +6,58 @@
 // line on stdout (see native_shell.py and native_forms.py).
 #include "app.h"
 
+#include <initguid.h>
+#include <propkey.h>
+#include <propsys.h>
+
 namespace md {
+
+// The same identity as the Python process and the installer's shortcuts (APP_USER_MODEL_ID).
+constexpr const wchar_t *kAppId = L"TeamFahad.MediaDownloader";
+
+// This window belongs to the app: pinning it to the taskbar must pin the launcher, not this
+// helper, which cannot run on its own.
+void setTaskbarIdentity(HWND h, const std::wstring &launcher) {
+    IPropertyStore *store = nullptr;
+    if (FAILED(SHGetPropertyStoreForWindow(h, IID_PPV_ARGS(&store)))) return;
+    auto set = [store](const PROPERTYKEY &key, const std::wstring &value) {
+        PROPVARIANT pv;
+        PropVariantInit(&pv);
+        size_t bytes = (value.size() + 1) * sizeof(wchar_t);
+        pv.pwszVal = static_cast<LPWSTR>(CoTaskMemAlloc(bytes));
+        if (!pv.pwszVal) return;
+        memcpy(pv.pwszVal, value.c_str(), bytes);
+        pv.vt = VT_LPWSTR;
+        store->SetValue(key, pv);
+        PropVariantClear(&pv);
+    };
+    if (!launcher.empty()) {  // the relaunch properties must be set before the ID
+        set(PKEY_AppUserModel_RelaunchCommand, L"\"" + launcher + L"\"");
+        set(PKEY_AppUserModel_RelaunchDisplayNameResource, L"Media Downloader");
+        set(PKEY_AppUserModel_RelaunchIconResource, launcher + L",0");
+    }
+    set(PKEY_AppUserModel_ID, kAppId);
+    store->Release();
+}
+
+// Started on its own, for example from a taskbar pin made by an older version: start the app
+// instead (it brings its window back when it is already running). The installed layout is
+// <app>\_internal\native_desktop\MediaDownloaderDesktop.exe.
+void openLauncher() {
+    wchar_t self[32768]{};
+    DWORD n = GetModuleFileNameW(nullptr, self, 32768);
+    if (!n || n >= 32768) return;
+    std::wstring dir(self, n);
+    for (int up = 0; up < 3; ++up) {
+        size_t cut = dir.find_last_of(L'\\');
+        if (cut == std::wstring::npos) return;
+        dir.resize(cut);
+    }
+    std::wstring exe = dir + L"\\MediaDownloader.exe";
+    if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    AllowSetForegroundWindow(ASFW_ANY);
+    ShellExecuteW(nullptr, L"open", exe.c_str(), nullptr, dir.c_str(), SW_SHOWNORMAL);
+}
 
 bool registerClasses() {
     INITCOMMONCONTROLSEX icc{sizeof icc, ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES | ICC_PROGRESS_CLASS |
@@ -71,6 +122,39 @@ bool shortcut(const MSG &msg) {
         break;
     }
     return false;
+}
+
+// A live dialog (a recorder) gets a new state many times a second. A new clock text or meter level
+// must not lay out and repaint the whole window; a note that appears must.
+int liveFormTest(Value &state) {
+    auto spec = [](const char *clock, double level, bool note) {
+        std::string text = std::string(R"({"id":"live","title":"Live","buttons":[],"status":"","body":{"type":"vbox","children":[)") +
+            R"({"type":"label","style":"clock","text":")" + clock + R"("},)" +
+            R"({"type":"progress","id":"meter","value":)" + std::to_string(level) + R"(},)" +
+            R"({"type":"label","text":"Speak now","hidden":)" + (note ? "false" : "true") + "}]}}";
+        Value v;
+        json::parse(text, v);
+        Value list = Value::array();
+        list.push(v);
+        return list;
+    };
+    state.set("forms", spec("00:00:01", 0.1, false));
+    g_app.apply(state);
+    Form *form = g_formsById.count("live") ? g_formsById["live"].get() : nullptr;
+    if (!form) return 3;
+    HWND clock = form->root.children[0].hwnd;
+    UpdateWindow(form->hwnd);
+    ValidateRect(form->hwnd, nullptr);
+    state.set("forms", spec("00:00:02", 0.8, false));
+    g_app.apply(state);
+    if (GetUpdateRect(form->hwnd, nullptr, FALSE)) return 4;  // repainted for nothing
+    state.set("forms", spec("00:00:03", 0.2, true));
+    g_app.apply(state);
+    if (!GetUpdateRect(form->hwnd, nullptr, FALSE)) return 5;  // the note needs a new layout
+    if (form->root.children[0].hwnd != clock) return 6;        // and no rebuild
+    state.set("forms", Value::array());
+    g_app.apply(state);
+    return 0;
 }
 
 // Builds every window and feeds it a state with rows, every pane and a dialog, then exits.
@@ -163,7 +247,7 @@ int selfTest() {
     state.set("forms", Value::array());
     g_app.apply(state);
     if (!g_formsById.empty()) return 2;
-    return 0;
+    return liveFormTest(state);
 }
 
 }  // namespace md
@@ -174,14 +258,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     g_inst = inst;
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    std::wstring icon, themeArg = L"Light";
+    std::wstring icon, launcher, themeArg = L"Light";
+    bool fromController = false;  // the app always passes --theme
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
         if (a == L"--self-test") g_testMode = true;
         else if (a == L"--icon" && i + 1 < argc) icon = argv[++i];
-        else if (a == L"--theme" && i + 1 < argc) themeArg = argv[++i];
+        else if (a == L"--theme" && i + 1 < argc) {
+            themeArg = argv[++i];
+            fromController = true;
+        } else if (a == L"--launcher" && i + 1 < argc) launcher = argv[++i];
     }
     LocalFree(argv);
+    if (!fromController && !g_testMode) {
+        openLauncher();
+        return 0;
+    }
+    SetCurrentProcessExplicitAppUserModelID(kAppId);
     if (!icon.empty())
         g_icon = static_cast<HICON>(LoadImageW(nullptr, icon.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE));
     if (!g_icon) g_icon = LoadIconW(inst, MAKEINTRESOURCEW(1));
@@ -208,6 +301,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
             SetWindowPos(g_main, nullptr, 0, 0, S(1180), S(780), SWP_NOMOVE | SWP_NOZORDER);
         }
     }
+    setTaskbarIdentity(g_main, launcher);
     g_app.hwnd = g_main;
     g_app.create();
     centerOn(g_main, nullptr);

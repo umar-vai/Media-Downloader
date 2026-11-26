@@ -22,7 +22,7 @@ class BatchSection:
         self,
         dialog: native.Dialog,
         *,
-        on_enqueue: Callable[[str, dict[str, str]], tuple[str, int, int]],
+        on_enqueue: Callable[[str, dict[str, str], Callable[[str, int, bool], None]], None],
         settings: dict[str, Any],
         on_queued: Callable[[str], None] | None = None,
     ) -> None:
@@ -165,8 +165,19 @@ class BatchSection:
         except ValueError as exc:
             messagebox.showerror("Batch download", str(exc), parent=self.dialog)
             return
+        def queued_links(batch_id: str, queued: int, _again: bool) -> None:
+            note = f"Queued {queued} link{'s' if queued != 1 else ''}"
+            if duplicates:
+                note += f" • {duplicates} duplicate skipped"
+            if invalid:
+                note += f" • {invalid} invalid skipped"
+            self.status_label.configure(text=note)
+            self._clear()
+            if self._on_queued:
+                self._on_queued(batch_id)
+
         try:
-            batch_id, queued, _dupes = self._on_enqueue(
+            self._on_enqueue(
                 "\n".join(urls),
                 {
                     "mode": self.mode_var.get(),
@@ -174,19 +185,10 @@ class BatchSection:
                     "audio_format": self.audio_format_var.get(),
                     "audio_quality": self.audio_quality_var.get(),
                 },
+                queued_links,
             )
         except (ValueError, OSError) as exc:
             messagebox.showerror("Batch download", str(exc), parent=self.dialog)
-            return
-        note = f"Queued {queued} link{'s' if queued != 1 else ''}"
-        if duplicates:
-            note += f" • {duplicates} duplicate skipped"
-        if invalid:
-            note += f" • {invalid} invalid skipped"
-        self.status_label.configure(text=note)
-        self._clear()
-        if self._on_queued:
-            self._on_queued(batch_id)
 
     def refresh(self, snapshots: list[dict[str, Any]] | None = None) -> None:
         """Kept for compatibility: batch progress lives in the main list (Queues)."""

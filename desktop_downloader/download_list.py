@@ -12,7 +12,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 # ------------------------------------------------------------------ categories
 FILE_CATEGORIES: list[tuple[str, str]] = [
@@ -63,6 +63,8 @@ _STATUS_RANK = {
     "failed": 6, "cancelled": 7, "missing": 8, "complete": 9,
 }
 RESUMABLE = {"paused", "failed", "cancelled"}
+# What "Clean Up" can remove in one go, in the order it lists them.
+CLEANUP_STATUSES = (("missing", "File missing"), ("cancelled", "Cancelled"), ("failed", "Failed"))
 STOPPABLE = {"downloading", "connecting", "finishing", "queued", "retrying"}
 # After the data is in, yt-dlp merges video and audio or converts the file: say so instead of
 # leaving the row on its last percentage.
@@ -140,6 +142,74 @@ def website_of(url: str) -> str:
         return (urlsplit(str(url or "")).hostname or "").lower().removeprefix("www.")
     except ValueError:
         return ""
+
+
+# ------------------------------------------------------------------ already downloaded
+# Query parameters that only say where a link was shared from: they never change the file.
+_SHARE_PARAMS = {"fbclid", "gclid", "igshid", "igsh", "si", "feature", "mibextid"}
+
+
+def link_key(url: str) -> str:
+    """The same text for two spellings of one link ("" for something that is not a web link)."""
+    try:
+        parts = urlsplit(str(url or "").strip())
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return ""
+    if parts.scheme.lower() not in {"http", "https"} or not host:
+        return ""
+    host = host.removeprefix("www.").removeprefix("m.")
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    path = parts.path.rstrip("/")
+    if host in {"youtube.com", "music.youtube.com", "youtu.be"}:
+        pieces = path.strip("/").split("/")
+        video = ""
+        if host == "youtu.be":
+            video = pieces[0]
+        elif path == "/watch":
+            video = dict(query).get("v", "")
+        elif len(pieces) == 2 and pieces[0] in {"shorts", "embed", "live"}:
+            video = pieces[1]
+        if video:
+            return f"youtube:{video}"
+    kept = sorted((k, v) for k, v in query if k.lower() not in _SHARE_PARAMS and not k.lower().startswith("utm_"))
+    text = "&".join(f"{k}={v}" for k, v in kept)
+    return f"{host}{f':{port}' if port else ''}{path}{'?' + text if text else ''}"
+
+
+def _page_key(url: str) -> str:
+    key = link_key(url)
+    # A site's front page (a feed) plays many different videos: it does not identify one.
+    return key if "/" in key or "?" in key or key.startswith("youtube:") else ""
+
+
+def find_downloaded(rows: Iterable[dict[str, Any]], url: str, *, page_url: str = "", mode: str = "",
+                    direct: bool = False, file_name: str = "", size: int = 0) -> dict[str, Any] | None:
+    """The finished download (its file still on the disk) that this request would fetch again.
+
+    Videos match on the link or the page they play on, in the same Video / Audio mode. Plain
+    files match on the link, or on the same name with exactly the same size.
+    """
+    wanted = {link_key(url)}
+    if not direct:
+        wanted.add(_page_key(page_url))
+    wanted.discard("")
+    name = str(file_name or "").strip().lower()
+    for row in rows:
+        if row["status"] != "complete" or not row["path"]:
+            continue
+        keys = {link_key(row["url"])}
+        if not direct and row["category"] in {"video", "audio"}:
+            keys.add(_page_key(row["page_url"]))
+        same = bool(wanted & keys)
+        if same and not direct and mode and row["mode"] and row["mode"].lower() != mode.lower():
+            same = False  # the sound of a video that was saved is a different file
+        if not same and direct and name and size > 0:
+            same = row["name"].lower() == name and row["size"] == size
+        if same and Path(row["path"]).is_file():
+            return row
+    return None
 
 
 # ------------------------------------------------------------------ rows

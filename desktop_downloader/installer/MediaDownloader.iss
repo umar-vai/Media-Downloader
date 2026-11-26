@@ -47,8 +47,8 @@ Type: filesandordirs; Name: "{app}\_internal"
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Media Downloader"; Filename: "{app}\MediaDownloader.exe"; WorkingDir: "{app}"
-Name: "{autodesktop}\Media Downloader"; Filename: "{app}\MediaDownloader.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\Media Downloader"; Filename: "{app}\MediaDownloader.exe"; WorkingDir: "{app}"; AppUserModelID: "TeamFahad.MediaDownloader"
+Name: "{autodesktop}\Media Downloader"; Filename: "{app}\MediaDownloader.exe"; WorkingDir: "{app}"; AppUserModelID: "TeamFahad.MediaDownloader"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\MediaDownloader.exe"; Description: "Launch Media Downloader"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent

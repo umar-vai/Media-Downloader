@@ -414,7 +414,8 @@ public:
             }
             setProgress(n.hwnd, v["value"].asNumber(), v["busy"].asBool());
         } else if (t == "slider") {
-            if (first || v["value"] != n.lastValue) SendMessageW(n.hwnd, TBM_SETPOS, TRUE, v["value"].asInt(0));
+            if (first || (v["value"] != n.lastValue && GetCapture() != n.hwnd))
+                SendMessageW(n.hwnd, TBM_SETPOS, TRUE, v["value"].asInt(0));
             n.lastValue = v["value"];
         } else if (t == "list") {
             applyList(n, v);
@@ -511,6 +512,7 @@ public:
         collect(root, values);
         v.set("values", values);
         (void)immediate;
+        if (kind == "click" || kind == "enter") AllowSetForegroundWindow(ASFW_ANY);
         send("form", v);
     }
 
@@ -846,6 +848,31 @@ public:
     }
 
     std::vector<FormNode *> tabsNodes;
+    std::string laidOut;  // layoutKey() of what is on the screen
+
+    // Everything about the controls that decides where they go: their sizes and visibility.
+    void addLayoutKey(const FormNode &n, bool fillsParent, std::string &out) const {
+        bool hidden = n.spec["hidden"].asBool();
+        out += hidden ? 'h' : 'v';
+        if (n.children.empty()) {
+            int width = n.bounds.right - n.bounds.left;
+            int pref = prefWidth(n);
+            // A control stretched across its box keeps its place while its text still fits.
+            out += std::to_string(fillsParent && pref <= width ? 0 : pref) + 'x' +
+                   std::to_string(nodeHeight(n, width)) + ';';
+            return;
+        }
+        for (const auto &c : n.children) {
+            std::string align = c.spec["align"].asString();
+            addLayoutKey(c, n.type == "vbox" && (align.empty() || align == "fill"), out);
+        }
+    }
+
+    std::string layoutKey() const {
+        std::string out;
+        addLayoutKey(root, false, out);
+        return out;
+    }
 
     void layout() {
         RECT rc;
@@ -867,6 +894,7 @@ public:
         }
         place(status, pad, rc.bottom - pad - bh + (bh - lineHeight()) / 2, std::max(0, bx - pad - S(GAP)), lineHeight());
         (void)barH;
+        laidOut = layoutKey();
         InvalidateRect(hwnd, nullptr, TRUE);
     }
 
@@ -915,7 +943,11 @@ public:
         Value old = spec;
         spec = s;
         applyValues(root, s["body"], false);
-        bool grow = s["relayout"].asBool() || s["body"] != old["body"];
+        // The recorders send a new state many times a second (clock, sound meters). Moving and
+        // repainting every control each time makes the window flicker, so that only happens when
+        // something changed size or visibility.
+        bool grow = s["relayout"].asBool() || layoutKey() != laidOut ||
+                    s["status"].asString().empty() != old["status"].asString().empty();
         if (grow) {
             int w = contentWidth();
             int pad = S(PAD);
@@ -935,7 +967,8 @@ public:
                 bringToFront(false);
             }
         }
-        if (s["flash"].asBool() && !old["flash"].asBool()) bringToFront(true);
+        // The controller toggles "flash" each time the window is asked for again.
+        if (s["flash"].asBool() != old["flash"].asBool()) bringToFront(true);
     }
 
     void rebuild(const Value &s) {
@@ -951,7 +984,9 @@ public:
             if (GetParent(c) == hwnd) DestroyWindow(c);
         buttons.clear();
         listIds.clear();
+        sliderIds.clear();
         dropPaths.clear();
+        bool wasHidden = spec["hidden"].asBool();
         spec = s;
         structure = fullSignature(s);
         SetWindowTextW(hwnd, W(s["title"].asString()).c_str());
@@ -967,6 +1002,10 @@ public:
         applyValues(root, s["body"], true);
         sizeToContent();
         SetWindowPos(hwnd, nullptr, wr.left, wr.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        if (s["hidden"].asBool() != wasHidden) {
+            ShowWindow(hwnd, s["hidden"].asBool() ? SW_HIDE : SW_SHOW);
+            if (!s["hidden"].asBool()) bringToFront(false);
+        }
         focusWidget(s["focus"].asString());
     }
 
@@ -1024,13 +1063,7 @@ public:
             SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
             SetTimer(hwnd, 77, 500, nullptr);
         }
-        // Windows refuses SetForegroundWindow from a background process unless input is attached.
-        HWND fg = GetForegroundWindow();
-        DWORD fgThread = fg ? GetWindowThreadProcessId(fg, nullptr) : 0, me = GetCurrentThreadId();
-        if (fgThread && fgThread != me) AttachThreadInput(me, fgThread, TRUE);
-        SetForegroundWindow(hwnd);
-        BringWindowToTop(hwnd);
-        if (fgThread && fgThread != me) AttachThreadInput(me, fgThread, FALSE);
+        forceForeground(hwnd);
     }
 
     void destroy() {

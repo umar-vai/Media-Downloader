@@ -380,6 +380,16 @@ inline std::wstring clipboardText(HWND owner) {
     return out;
 }
 
+// Windows refuses SetForegroundWindow from a background process unless input is attached.
+inline void forceForeground(HWND h) {
+    HWND fg = GetForegroundWindow();
+    DWORD fgThread = fg ? GetWindowThreadProcessId(fg, nullptr) : 0, me = GetCurrentThreadId();
+    if (fgThread && fgThread != me) AttachThreadInput(me, fgThread, TRUE);
+    SetForegroundWindow(h);
+    BringWindowToTop(h);
+    if (fgThread && fgThread != me) AttachThreadInput(me, fgThread, FALSE);
+}
+
 inline void centerOn(HWND h, HWND owner) {
     RECT me;
     GetWindowRect(h, &me);
