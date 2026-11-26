@@ -4,7 +4,7 @@ project(MediaDownloaderDesktop LANGUAGES CXX)
 # A single self-contained Win32 executable: no UI toolkit or runtime DLLs to ship.
 add_executable(MediaDownloaderDesktop WIN32 main.cpp desktop.rc)
 target_compile_features(MediaDownloaderDesktop PRIVATE cxx_std_17)
-target_link_libraries(MediaDownloaderDesktop PRIVATE comctl32 uxtheme dwmapi shell32 gdi32 user32)
+target_link_libraries(MediaDownloaderDesktop PRIVATE comctl32 uxtheme dwmapi shell32 gdi32 user32 ole32 windowscodecs uuid)
 if(MSVC)
     # The manifest (common controls 6, DPI awareness) comes from desktop.rc.
     target_compile_options(MediaDownloaderDesktop PRIVATE /utf-8 /W3 /MT$<$<CONFIG:Debug>:d>)

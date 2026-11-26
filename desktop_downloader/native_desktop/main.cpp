@@ -15,7 +15,11 @@
 #include <windowsx.h>
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <objbase.h>
+#include <ole2.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <wincodec.h>
 #include <uxtheme.h>
 
 #include <algorithm>
@@ -40,6 +44,9 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "uuid.lib")
 #endif
 
 namespace {
@@ -342,6 +349,194 @@ const Column kColumns[] = {
     {"quality", "Quality", "quality", 90},   {"save_to", "Save to", "save_to", 250},
 };
 
+
+// ------------------------------------------------------------------------------------ system bits
+std::string base64Decode(const std::string &in) {
+    static int table[256];
+    static bool ready = false;
+    if (!ready) {
+        for (int &t : table) t = -1;
+        const char *a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; i < 64; ++i) table[static_cast<unsigned char>(a[i])] = i;
+        ready = true;
+    }
+    std::string out;
+    int acc = 0, bits = 0;
+    for (unsigned char c : in) {
+        if (table[c] < 0) continue;
+        acc = (acc << 6) | table[c];
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out += static_cast<char>((acc >> bits) & 0xFF);
+        }
+    }
+    return out;
+}
+
+template <class T> void release(T *&p) {
+    if (p) p->Release();
+    p = nullptr;
+}
+
+// Decodes PNG bytes into a bitmap with Windows' own imaging component (no image library needed).
+HBITMAP decodeImage(const std::string &bytes) {
+    if (bytes.empty()) return nullptr;
+    IWICImagingFactory *factory = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) return nullptr;
+    IWICStream *stream = nullptr;
+    IWICBitmapDecoder *decoder = nullptr;
+    IWICBitmapFrameDecode *frame = nullptr;
+    IWICFormatConverter *converter = nullptr;
+    HBITMAP bitmap = nullptr;
+    do {
+        if (FAILED(factory->CreateStream(&stream))) break;
+        if (FAILED(stream->InitializeFromMemory(reinterpret_cast<BYTE *>(const_cast<char *>(bytes.data())), static_cast<DWORD>(bytes.size())))) break;
+        if (FAILED(factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnLoad, &decoder))) break;
+        if (FAILED(decoder->GetFrame(0, &frame))) break;
+        if (FAILED(factory->CreateFormatConverter(&converter))) break;
+        if (FAILED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom))) break;
+        UINT w = 0, h = 0;
+        converter->GetSize(&w, &h);
+        if (w == 0 || h == 0 || w > 8192 || h > 8192) break;
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+        bi.bmiHeader.biWidth = static_cast<LONG>(w);
+        bi.bmiHeader.biHeight = -static_cast<LONG>(h);
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void *pixels = nullptr;
+        bitmap = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        if (!bitmap) break;
+        if (FAILED(converter->CopyPixels(nullptr, w * 4, w * h * 4, static_cast<BYTE *>(pixels)))) {
+            DeleteObject(bitmap);
+            bitmap = nullptr;
+        }
+    } while (false);
+    release(converter);
+    release(frame);
+    release(decoder);
+    release(stream);
+    release(factory);
+    return bitmap;
+}
+
+std::string pickFolder(HWND owner, const std::string &title) {
+    std::wstring caption = W(title);
+    wchar_t display[MAX_PATH]{};
+    BROWSEINFOW info{};
+    info.hwndOwner = owner;
+    info.pszDisplayName = display;
+    info.lpszTitle = caption.c_str();
+    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    PIDLIST_ABSOLUTE item = SHBrowseForFolderW(&info);
+    if (!item) return {};
+    wchar_t path[MAX_PATH]{};
+    bool ok = SHGetPathFromIDListW(item, path) != FALSE;
+    CoTaskMemFree(item);
+    return ok ? U8(path) : std::string();
+}
+
+// Dragging finished downloads out of the list: a minimal file-drop data object.
+class FileDrop final : public IDataObject {
+public:
+    explicit FileDrop(std::vector<std::wstring> files) : files_(std::move(files)) {}
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG n = --refs_;
+        if (n == 0) delete this;
+        return n;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void **out) override {
+        if (id == IID_IUnknown || id == IID_IDataObject) {
+            *out = static_cast<IDataObject *>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE GetData(FORMATETC *f, STGMEDIUM *m) override {
+        if (QueryGetData(f) != S_OK) return DV_E_FORMATETC;
+        size_t chars = 1;
+        for (const auto &p : files_) chars += p.size() + 1;
+        HGLOBAL mem = GlobalAlloc(GHND, sizeof(DROPFILES) + chars * sizeof(wchar_t));
+        if (!mem) return E_OUTOFMEMORY;
+        auto *drop = static_cast<DROPFILES *>(GlobalLock(mem));
+        drop->pFiles = sizeof(DROPFILES);
+        drop->fWide = TRUE;
+        auto *at = reinterpret_cast<wchar_t *>(reinterpret_cast<BYTE *>(drop) + sizeof(DROPFILES));
+        for (const auto &p : files_) {
+            wmemcpy(at, p.c_str(), p.size() + 1);
+            at += p.size() + 1;
+        }
+        GlobalUnlock(mem);
+        m->tymed = TYMED_HGLOBAL;
+        m->hGlobal = mem;
+        m->pUnkForRelease = nullptr;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetDataHere(FORMATETC *, STGMEDIUM *) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE QueryGetData(FORMATETC *f) override {
+        return f->cfFormat == CF_HDROP && (f->tymed & TYMED_HGLOBAL) && f->dwAspect == DVASPECT_CONTENT ? S_OK : DV_E_FORMATETC;
+    }
+    HRESULT STDMETHODCALLTYPE GetCanonicalFormatEtc(FORMATETC *, FORMATETC *out) override {
+        out->ptd = nullptr;
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE SetData(FORMATETC *, STGMEDIUM *, BOOL) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE EnumFormatEtc(DWORD direction, IEnumFORMATETC **out) override {
+        if (direction != DATADIR_GET) return E_NOTIMPL;
+        FORMATETC f{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+        return SHCreateStdEnumFmtEtc(1, &f, out);
+    }
+    HRESULT STDMETHODCALLTYPE DAdvise(FORMATETC *, DWORD, IAdviseSink *, DWORD *) override { return OLE_E_ADVISENOTSUPPORTED; }
+    HRESULT STDMETHODCALLTYPE DUnadvise(DWORD) override { return OLE_E_ADVISENOTSUPPORTED; }
+    HRESULT STDMETHODCALLTYPE EnumDAdvise(IEnumSTATDATA **) override { return OLE_E_ADVISENOTSUPPORTED; }
+
+private:
+    std::vector<std::wstring> files_;
+    ULONG refs_ = 1;
+};
+
+class DragSource final : public IDropSource {
+public:
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG n = --refs_;
+        if (n == 0) delete this;
+        return n;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void **out) override {
+        if (id == IID_IUnknown || id == IID_IDropSource) {
+            *out = static_cast<IDropSource *>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE QueryContinueDrag(BOOL escape, DWORD keys) override {
+        if (escape) return DRAGDROP_S_CANCEL;
+        return (keys & MK_LBUTTON) ? S_OK : DRAGDROP_S_DROP;
+    }
+    HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
+
+private:
+    ULONG refs_ = 1;
+};
+
+void dragFiles(const std::vector<std::wstring> &files) {
+    if (files.empty()) return;
+    auto *data = new FileDrop(files);
+    auto *source = new DragSource();
+    DWORD effect = 0;
+    DoDragDrop(data, source, DROPEFFECT_COPY, &effect);
+    data->Release();
+    source->Release();
+}
+
 // ------------------------------------------------------------------------------------------ forms
 // A form is a small modeless window. Closing it only hides it and tells the controller.
 class Form {
@@ -358,6 +553,7 @@ public:
     virtual void apply(const Value &state) = 0;
     // Edit and combo notifications from the form's controls.
     virtual void notifyControl(HWND, int) {}
+    virtual void drawOwner(const DRAWITEMSTRUCT *) {}
 
     void setVisible(bool visible) {
         if (visible == IsWindowVisible(hwnd)) return;
@@ -417,9 +613,12 @@ LRESULT CALLBACK Form::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         else if (self && l) self->notifyControl(reinterpret_cast<HWND>(l), HIWORD(w));
         return 0;
     }
-    case WM_DRAWITEM:
-        drawButton(reinterpret_cast<DRAWITEMSTRUCT *>(l));
+    case WM_DRAWITEM: {
+        auto *d = reinterpret_cast<DRAWITEMSTRUCT *>(l);
+        if (d->CtlType == ODT_BUTTON) drawButton(d);
+        else if (self) self->drawOwner(d);
         return TRUE;
+    }
     case WM_ERASEBKGND: {
         RECT rc;
         GetClientRect(h, &rc);
@@ -485,6 +684,7 @@ public:
         title = label(hwnd);
         SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(g_theme.bold), TRUE);
         meta = label(hwnd);
+        thumb = make(hwnd, L"STATIC", L"", SS_OWNERDRAW);
         status = label(hwnd);
         lMode = label(hwnd, "Type");
         mode = combo(hwnd, {"Video", "Audio"});
@@ -516,9 +716,11 @@ public:
         place(analyze, w - m - t.S(160), y, t.S(76), row);
         place(stop, w - m - t.S(76), y, t.S(76), row);
         y += row + gap;
-        place(title, m, y, w - 2 * m, t.S(22));
+        int thumbW = t.S(160), thumbH = t.S(90);
+        place(thumb, w - m - thumbW, y, thumbW, thumbH);
+        place(title, m, y, w - 2 * m - thumbW - t.S(10), t.S(22));
         y += t.S(24);
-        place(meta, m, y, w - 2 * m, t.S(22));
+        place(meta, m, y, w - 2 * m - thumbW - t.S(10), t.S(22));
         y += t.S(26);
         place(lMode, m, y + t.S(6), lw, row - t.S(6));
         place(mode, m + lw, y, t.S(140), t.S(300));
@@ -584,11 +786,42 @@ public:
         setText(title, s["title"].asString());
         setText(meta, s["metadata"].asString());
         setText(status, s["status"].asString());
+        if (s["thumbnail"].asString() != lastThumb) {
+            lastThumb = s["thumbnail"].asString();
+            if (thumbBitmap) DeleteObject(thumbBitmap);
+            thumbBitmap = decodeImage(base64Decode(lastThumb));
+            InvalidateRect(thumb, nullptr, TRUE);
+        }
         bool running = s["running"].asBool();
         EnableWindow(analyze, !running);
         EnableWindow(stop, running);
         EnableWindow(download, !running && s["ready"].asBool() && trim(getText(url)) == trim(s["url"].asString()));
         SetWindowTextW(download, comboText(mode) == "Audio" ? L"Download audio" : L"Download video");
+    }
+
+    void drawOwner(const DRAWITEMSTRUCT *d) override {
+        if (d->hwndItem != thumb) return;
+        RECT rc = d->rcItem;
+        HBRUSH back = CreateSolidBrush(g_theme.p.panel);
+        FillRect(d->hDC, &rc, back);
+        DeleteObject(back);
+        if (thumbBitmap) {
+            BITMAP bm{};
+            GetObject(thumbBitmap, sizeof bm, &bm);
+            int bw = rc.right - rc.left, bh = rc.bottom - rc.top;
+            double scale = std::min(static_cast<double>(bw) / bm.bmWidth, static_cast<double>(bh) / bm.bmHeight);
+            int dw = static_cast<int>(bm.bmWidth * scale), dh = static_cast<int>(bm.bmHeight * scale);
+            HDC mem = CreateCompatibleDC(d->hDC);
+            HGDIOBJ old = SelectObject(mem, thumbBitmap);
+            SetStretchBltMode(d->hDC, HALFTONE);
+            SetBrushOrgEx(d->hDC, 0, 0, nullptr);
+            StretchBlt(d->hDC, rc.left + (bw - dw) / 2, rc.top + (bh - dh) / 2, dw, dh, mem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteDC(mem);
+        }
+        HBRUSH edge = CreateSolidBrush(g_theme.p.border);
+        FrameRect(d->hDC, &rc, edge);
+        DeleteObject(edge);
     }
 
     void notifyControl(HWND ctl, int code) override {
@@ -630,7 +863,9 @@ private:
         send("add_submit", v);
     }
 
-    HWND url{}, mode{}, lUrl{}, analyze{}, stop{}, title{}, meta{}, status{}, lMode{}, lQuality{}, quality{}, lFormat{}, format{}, lBitrate{},
+    HBITMAP thumbBitmap = nullptr;
+    std::string lastThumb;
+    HWND thumb{}, url{}, mode{}, lUrl{}, analyze{}, stop{}, title{}, meta{}, status{}, lMode{}, lQuality{}, quality{}, lFormat{}, format{}, lBitrate{},
         bitrate{}, lName{}, name{}, lFolder{}, folder{}, browse{}, reset{}, editor{}, cancel{}, download{};
     bool shown = false;
     std::string suggestion, lastSentUrl;
@@ -814,8 +1049,8 @@ struct Field {
     std::vector<std::string> items;
 };
 
-const char *const kTabs[] = {"General", "Downloads", "Files", "Browser", "Updates"};
-constexpr int kTabCount = 5;
+const char *const kTabs[] = {"General", "Downloads", "Files", "Folders", "Browser", "Updates"};
+constexpr int kTabCount = 6;
 
 class SettingsForm : public Form {
 public:
@@ -837,18 +1072,18 @@ public:
             {Field::Combo, "audio_format", "Audio format", 1, kFormats},
             {Field::Combo, "audio_quality", "Bitrate (kbps)", 1, kBitrates},
             {Field::Number, "max_concurrent_downloads", "Simultaneous downloads", 1, {}},
-            {Field::Check, "organize_by_site", "Use a folder named after each website", 2, {}},
+            {Field::Check, "organize_by_site", "Use a folder named after each website", 3, {}},
             {Field::Check, "skip_existing", "Skip existing files", 2, {}},
             {Field::Check, "fast_mode", "Download stream segments in parallel", 2, {}},
             {Field::Check, "embed_metadata", "Embed media metadata", 2, {}},
             {Field::Check, "embed_thumbnail", "Use the thumbnail as cover art", 2, {}},
             {Field::Combo, "subtitles", "Subtitles", 2, {"Off", "Sidecar file", "Embed in video"}},
             {Field::Text, "subtitle_langs", "Subtitle languages (for example en,bn)", 2, {}},
-            {Field::Check, "extension_enabled", "Capture browser downloads", 3, {}},
-            {Field::Text, "cookies_file", "Cookies file", 3, {}},
-            {Field::Combo, "cookies_browser", "Read cookies from", 3, {"None", "Firefox", "Chrome", "Edge", "Brave"}},
-            {Field::Check, "auto_check_updates", "Check for updates on startup", 4, {}},
-            {Field::Check, "auto_download_updates", "Download verified updates automatically", 4, {}},
+            {Field::Check, "extension_enabled", "Capture browser downloads", 4, {}},
+            {Field::Text, "cookies_file", "Cookies file", 4, {}},
+            {Field::Combo, "cookies_browser", "Read cookies from", 4, {"None", "Firefox", "Chrome", "Edge", "Brave"}},
+            {Field::Check, "auto_check_updates", "Check for updates on startup", 5, {}},
+            {Field::Check, "auto_download_updates", "Download verified updates automatically", 5, {}},
         };
         for (int i = 0; i < kTabCount; ++i)
             tabs[i] = button(hwnd, kTabs[i], [this, i] { selectTab(i); });
@@ -861,14 +1096,22 @@ public:
             }
         }
         extras = {
-            {3, "Install browser extension", "install_extension"}, {3, "Copy pairing token", "copy_pairing_token"},
-            {4, "Check for updates", "settings_check_updates"},    {4, "Release notes", "update_release"},
-            {4, "Diagnostics", "diagnostics"},                      {4, "Open app log", "open_log"},
+            {4, "Install browser extension", "install_extension"}, {4, "Copy pairing token", "copy_pairing_token"},
+            {5, "Check for updates", "settings_check_updates"},    {5, "Release notes", "update_release"},
+            {5, "Diagnostics", "diagnostics"},                      {5, "Open app log", "open_log"},
         };
         for (auto &e : extras) {
             std::string command = e.command;
             e.control = button(hwnd, e.text, [command] { send(command); });
         }
+        browseDir = button(hwnd, "Browse...", [this] {
+            std::string picked = pickFolder(hwnd, "Choose the download folder");
+            if (picked.empty()) return;
+            for (auto &f : fields)
+                if (std::string(f.key) == "download_dir") setText(f.control, picked);
+        });
+        rulesHelp = label(hwnd, "One rule per line:   website => folder | quality   (for example: youtube.com => D:\\Videos | 1080p)");
+        rules = edit(hwnd, true);
         extension = label(hwnd);
         status = label(hwnd);
         cancel = button(hwnd, "Cancel", [this] { close(); });
@@ -892,8 +1135,10 @@ public:
                 cy += t.S(32);
             } else {
                 place(f.caption, m, cy + t.S(5), t.S(200), t.S(22));
-                int cw = f.kind == Field::Number ? t.S(80) : (f.kind == Field::Text ? w - 2 * m - t.S(210) : t.S(200));
+                bool dir = std::string(f.key) == "download_dir";
+                int cw = f.kind == Field::Number ? t.S(80) : (f.kind == Field::Text ? w - 2 * m - t.S(210) - (dir ? t.S(90) : 0) : t.S(200));
                 place(f.control, m + t.S(210), cy, cw, f.kind == Field::Combo ? t.S(300) : t.S(28));
+                if (dir) place(browseDir, w - m - t.S(82), cy, t.S(82), t.S(28));
                 cy += t.S(38);
             }
         }
@@ -902,6 +1147,8 @@ public:
             place(e.control, m, cy, t.S(240), t.S(30));
             cy += t.S(38);
         }
+        place(rulesHelp, m, y[3] + t.S(4), w - 2 * m, t.S(22));
+        place(rules, m, y[3] + t.S(30), w - 2 * m, t.S(h_) - y[3] - t.S(30) - t.S(100));
         place(extension, m, t.S(h_) - m - t.S(60), w - 2 * m, t.S(22));
         place(status, m, t.S(h_) - m - t.S(36), w - 2 * m - t.S(330), t.S(22));
         place(cancel, w - m - t.S(320), t.S(h_) - m - row, t.S(100), row);
@@ -928,11 +1175,20 @@ public:
                 case Field::Number: setText(f.control, std::to_string(v.asInt(6))); break;
                 }
             }
+            std::string text;
+            for (const auto &rule : s["rules"].items()) {
+                const auto &r = rule.items();
+                if (r.size() < 3) continue;
+                text += r[0].asString() + " => " + r[1].asString();
+                if (!r[2].asString().empty()) text += " | " + r[2].asString();
+                text += "\n";
+            }
+            SetWindowTextW(rules, W(toWindowsNewlines(text)).c_str());
             std::string tab = s["tab"].asString();
             int index = 0;
             for (int i = 0; i < kTabCount; ++i)
                 if (tab == kTabs[i]) index = i;
-            if (tab == "Save To") index = 1;
+            if (tab == "Save To") index = 3;
             selectTab(index);
         }
         if (!shown) {
@@ -959,6 +1215,46 @@ private:
             if (f.caption) ShowWindow(f.caption, cmd);
         }
         for (auto &e : extras) ShowWindow(e.control, e.tab == index ? SW_SHOW : SW_HIDE);
+        ShowWindow(browseDir, index == 1 ? SW_SHOW : SW_HIDE);
+        ShowWindow(rulesHelp, index == 3 ? SW_SHOW : SW_HIDE);
+        ShowWindow(rules, index == 3 ? SW_SHOW : SW_HIDE);
+    }
+
+    // "website => folder | quality" per line, the format the controller stores.
+    Value parseRules() const {
+        Value out = Value::array();
+        std::string text = getText(rules);
+        size_t start = 0;
+        while (start <= text.size()) {
+            size_t end = text.find('\n', start);
+            if (end == std::string::npos) end = text.size();
+            std::string line = trim(text.substr(start, end - start));
+            start = end + 1;
+            if (line.empty() || line[0] == '#') continue;
+            std::string quality;
+            size_t bar = line.rfind('|');
+            if (bar != std::string::npos) {
+                quality = trim(line.substr(bar + 1));
+                line = trim(line.substr(0, bar));
+            }
+            std::string host = line, folder;
+            size_t arrow = line.find("=>");
+            if (arrow != std::string::npos) {
+                host = trim(line.substr(0, arrow));
+                folder = trim(line.substr(arrow + 2));
+            }
+            Value row = Value::array();
+            row.push(host);
+            row.push(folder);
+            row.push(quality);
+            out.push(row);
+        }
+        return out;
+    }
+
+    static std::string trim(const std::string &s) {
+        size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
+        return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
     }
 
     void submit(bool closeAfter) {
@@ -977,6 +1273,7 @@ private:
         }
         Value msg = Value::object();
         msg.set("values", values);
+        msg.set("rules", parseRules());
         msg.set("close", closeAfter);
         msg.set("tab", std::string(kTabs[current]));
         send("settings_save", msg);
@@ -990,7 +1287,7 @@ private:
 
     std::vector<F> fields;
     std::vector<Extra> extras;
-    HWND tabs[kTabCount]{}, extension{}, status{}, cancel{}, save{}, ok{};
+    HWND tabs[kTabCount]{}, browseDir{}, rulesHelp{}, rules{}, extension{}, status{}, cancel{}, save{}, ok{};
     int current = 0, revision_ = -1;
     bool shown = false;
 };
@@ -1515,6 +1812,15 @@ LRESULT MainWindow::notify(NMHDR *h) {
             SetTimer(hwnd, TIMER_SELECTION, 30, nullptr);
         return 0;
     }
+    case LVN_BEGINDRAG: {
+        std::vector<std::wstring> files;
+        int i = -1;
+        while ((i = ListView_GetNextItem(list, i, LVNI_SELECTED)) >= 0)
+            if (i < static_cast<int>(rows.size()) && !rows[static_cast<size_t>(i)]["dragPath"].asString().empty())
+                files.push_back(W(rows[static_cast<size_t>(i)]["dragPath"].asString()));
+        dragFiles(files);
+        return 0;
+    }
     case LVN_COLUMNCLICK: {
         auto *n = reinterpret_cast<NMLISTVIEW *>(h);
         if (n->iSubItem >= 0 && n->iSubItem < static_cast<int>(columnKeys.size()))
@@ -1777,6 +2083,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR, int) {
     if (!icon.empty())
         g_icon = static_cast<HICON>(LoadImageW(nullptr, icon.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE));
 
+    OleInitialize(nullptr);
     HDC screen = GetDC(nullptr);
     g_theme.dpi = GetDeviceCaps(screen, LOGPIXELSX);
     ReleaseDC(nullptr, screen);
