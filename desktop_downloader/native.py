@@ -130,10 +130,14 @@ class Dialog(tk.Toplevel):
         return button
 
     def show(self) -> None:
+        owner = self.master.winfo_toplevel()
+        if getattr(owner, "native_shell", None) is not None:
+            self.transient("")
+        else:
+            self.transient(owner)
         if not self._placed:
             self._placed = True
             self.update_idletasks()
-            owner = self.master.winfo_toplevel()
             w, h = self.winfo_reqwidth(), self.winfo_reqheight()
             try:
                 x = owner.winfo_rootx() + (owner.winfo_width() - w) // 2
@@ -182,7 +186,8 @@ class HiddenDialog(Dialog):
         if self.on_close:
             self.on_close()
         try:
-            self.master.focus_force()
+            if getattr(self.master, "native_shell", None) is None:
+                self.master.focus_force()
         except tk.TclError:
             pass
 

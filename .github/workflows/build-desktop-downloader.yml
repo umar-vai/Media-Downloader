@@ -160,6 +160,10 @@ jobs:
             --icon desktop_downloader/assets/app_icon.ico `
             desktop_downloader/updater.py
 
+      - name: Build and test native C++ desktop
+        shell: pwsh
+        run: ./desktop_downloader/ci/build_native_desktop.ps1 -Destination dist/native_desktop
+
       - name: Build portable Media Downloader EXE
         shell: pwsh
         run: |
@@ -167,6 +171,7 @@ jobs:
             --name MediaDownloader `
             --icon desktop_downloader/assets/app_icon.ico `
             --add-data "desktop_downloader/assets/app_icon.ico;assets" `
+            --add-data "dist/native_desktop;native_desktop" `
             --paths "." `
             --collect-submodules media_core `
             --collect-all yt_dlp `
@@ -196,10 +201,12 @@ jobs:
           $updater = (Resolve-Path "dist\MediaDownloaderUpdater.exe").Path
           $mpv = (Resolve-Path "dist\mpv.exe").Path
           $icon = (Resolve-Path "desktop_downloader/assets/app_icon.ico").Path
+          $nativeDesktop = (Resolve-Path "dist/native_desktop").Path
           pyinstaller --noconfirm --clean --onedir --windowed `
             --name MediaDownloader `
             --icon "$icon" `
             --add-data "$icon;assets" `
+            --add-data "$nativeDesktop;native_desktop" `
             --distpath "dist/installed" `
             --workpath "build/installed" `
             --specpath "build/installed" `
@@ -313,6 +320,14 @@ jobs:
           if ($uninstall.ExitCode -ne 0) {
             throw "Installer smoke uninstall failed with exit code $($uninstall.ExitCode)."
           }
+
+      - name: Smoke test upgrade from the previous public installer
+        shell: pwsh
+        timeout-minutes: 12
+        run: |
+          $version = python -c "import sys; sys.path.insert(0, 'desktop_downloader'); from version import APP_VERSION; print(APP_VERSION)"
+          $installer = (Resolve-Path "dist/MediaDownloaderSetup.exe").Path
+          ./desktop_downloader/ci/installer_upgrade_smoke.ps1 -Installer $installer -ExpectedVersion $version
 
       - name: Generate SHA-256 checksums and compatibility alias
         shell: pwsh
