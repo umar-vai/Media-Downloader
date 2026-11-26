@@ -972,6 +972,8 @@ def _publish_download(produced: Path, folder: Path, filename: str) -> Path:
 
 def download_from_analysis(**kwargs: Any) -> Path:
     cancel_event: threading.Event = kwargs["cancel_event"]
+    # A paused download keeps its private workspace so it can resume; a cancelled one does not.
+    keep_partial: Callable[[], bool] | None = kwargs.pop("keep_partial", None)
     _check_cancel(cancel_event)
     folder = Path(kwargs["download_dir"]).expanduser()
     filename = str(kwargs["filename"])
@@ -1007,6 +1009,12 @@ def download_from_analysis(**kwargs: Any) -> Path:
     watcher = threading.Thread(target=watch, name="cancel-watch", daemon=True)
     try:
         _check_cancel(cancel_event)
+        workspace.mkdir(parents=True, exist_ok=True)
+        try:
+            # Lets "remove from list" and "clean up" find this workspace by the download's title.
+            (workspace / ".title").write_text(filename, encoding="utf-8")
+        except OSError:
+            pass
         watcher.start()
         # The same private directory is used for a retry or resume. Publishing only
         # happens after yt-dlp has finished all postprocessors.
@@ -1033,4 +1041,11 @@ def download_from_analysis(**kwargs: Any) -> Path:
         stop.set()
         if watcher.ident is not None:
             watcher.join()
+        if cancel_event.is_set() and not (keep_partial and keep_partial()):
+            # ffmpeg may need a moment to let go of its files on Windows.
+            for attempt in range(5):
+                shutil.rmtree(workspace, ignore_errors=True)
+                if not workspace.exists():
+                    break
+                time.sleep(0.3 * (attempt + 1))
         workspace_lock.release()

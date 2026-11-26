@@ -1289,6 +1289,7 @@ class DownloaderApp(UIMixin, tk.Tk):
                         audio_format=str(request_settings.get("audio_format") or "mp3"),
                         audio_quality=str(request_settings.get("audio_quality") or "192"),
                         cancel_event=cancel_event,
+                        keep_partial=lambda rid=request_id: rid in self._pause_ids,
                         on_status=lambda text: self._put_download_event(
                             "download_status",
                             request_id,

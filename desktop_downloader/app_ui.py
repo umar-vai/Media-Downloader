@@ -32,7 +32,7 @@ import ui_kit as ui
 from batch_page import BatchSection
 from history_window import PropertiesDialog
 from icons import IconSet
-from partial_files import delete_partial_files, find_partial_files, scan_partial_files
+from partial_files import delete_partial_files, find_partial_files, path_size, remove_path, scan_partial_files
 from main_window import (CategoryTree, ConfirmDelete, DetailsPane, DownloadTable, SearchBox, StatusBar,
                          Toolbar, UpdateBadge, setup_style, sysfont)
 from theme import C
@@ -1006,10 +1006,7 @@ class UIMixin:
             return
         total = 0
         for path in files:
-            try:
-                total += path.stat().st_size
-            except OSError:
-                pass
+            total += path_size(path)
         if not messagebox.askyesno(
                 "Clean up partial files",
                 f"Delete {len(files)} partial file{'s' if len(files) != 1 else ''} ({dl.format_size(total)}) left "
@@ -1019,7 +1016,7 @@ class UIMixin:
         problems: list[str] = []
         for path in files:
             try:
-                path.unlink(missing_ok=True)
+                remove_path(path)
             except OSError as exc:
                 problems.append(f"{path.name}: {exc}")
         self._set_status(f"Deleted {len(files) - len(problems)} partial file"

@@ -44,3 +44,28 @@ class ScanTests(unittest.TestCase):
                 (root / name).write_bytes(b"x")
             found = {p.name for p in scan_partial_files([root, root], {root / "keep.mp4.part"})}
             self.assertEqual(found, leftovers)
+
+
+class WorkspaceTests(unittest.TestCase):
+    def test_workspace_folder_is_found_scanned_and_deleted(self) -> None:
+        from partial_files import path_size, scan_partial_files
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            mine = root / ".media-downloader-abc"
+            other = root / ".media-downloader-def"
+            for folder, title in ((mine, "My Video"), (other, "Other")):
+                (folder / "work").mkdir(parents=True)
+                (folder / ".title").write_text(title, encoding="utf-8")
+                (folder / "work" / "x.f137.mp4.part").write_bytes(b"12345")
+            self.assertEqual(find_partial_files(root, "My Video.mp4"), [mine])
+            self.assertEqual(path_size(mine), len("My Video") + 5)
+            self.assertEqual({p.name for p in scan_partial_files([root])}, {mine.name, other.name})
+            self.assertEqual(scan_partial_files([root], {mine.resolve()}), [other.resolve()])
+            removed, problems = delete_partial_files(root, "My Video")
+            self.assertEqual((removed, problems), (1, []))
+            self.assertFalse(mine.exists())
+            self.assertTrue(other.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
