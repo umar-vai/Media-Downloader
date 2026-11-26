@@ -266,6 +266,17 @@ inline void drawOwnerButton(const DRAWITEMSTRUCT *d) {
         }
         return;
     }
+    // Coloured flat button (the recorders' Start / Pause / Stop buttons).
+    if (ci->kind == ControlInfo::Button && ci->background != CLR_INVALID) {
+        COLORREF base = ci->background;
+        COLORREF bgc = disabled ? mix(base, p.BG, 0.6) : pressed ? mix(base, RGB(0, 0, 0), 0.2)
+                     : ci->hot ? mix(base, RGB(255, 255, 255), 0.12) : base;
+        fill(dc, rc, bgc);
+        RECT t = rc;
+        text(dc, label, t, disabled ? mix(RGB(255, 255, 255), p.BG, 0.5) : RGB(255, 255, 255), g_theme.uiBold,
+             DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        return;
+    }
     // Push button (Tk "clam" button in the dark palette).
     COLORREF bg = pressed ? p.BORDER : (ci->hot && !disabled ? p.BORDER : p.SURFACE_3);
     COLORREF edge = ci->primary || focus ? p.ACCENT : p.BORDER;

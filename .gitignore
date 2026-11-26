@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# private download workspaces created during tests
+.media-downloader-*/

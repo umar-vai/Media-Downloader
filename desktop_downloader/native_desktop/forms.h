@@ -161,6 +161,11 @@ inline std::map<HWND, Form *> g_formsByHwnd;
 
 inline std::wstring wtext(const Value &v, const char *key) { return W(v[key].asString()); }
 
+inline COLORREF parseColor(const std::string &s, COLORREF fallback = CLR_INVALID) {
+    if (s.size() != 7 || s[0] != '#') return fallback;
+    return hex(static_cast<unsigned>(std::strtoul(s.c_str() + 1, nullptr, 16)));
+}
+
 // Row colours of form lists ("error" rows in red, like Tk's "fail" tag).
 inline std::unordered_map<HWND, std::vector<std::string>> g_listKinds;
 
@@ -259,6 +264,11 @@ public:
             n.hwnd = makeLabel(hwnd, v["text"].asString(), ink, style == "title", wrap ? SS_EDITCONTROL : SS_ENDELLIPSIS);
             if (style == "big") SendMessageW(n.hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(g_theme.big), FALSE);
             if (style == "mono") SendMessageW(n.hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(g_theme.mono), FALSE);
+            if (style == "clock") {
+                static HFONT clock = Theme::makeFont(MulDiv(22, g_theme.dpi, 72), FW_BOLD, L"Segoe UI");
+                SendMessageW(n.hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(clock), FALSE);
+                SetWindowLongPtrW(n.hwnd, GWL_STYLE, (GetWindowLongPtrW(n.hwnd, GWL_STYLE) & ~SS_LEFT) | SS_CENTER);
+            }
             if (v["click"].asBool()) {
                 SetWindowLongPtrW(n.hwnd, GWL_STYLE, GetWindowLongPtrW(n.hwnd, GWL_STYLE) | SS_NOTIFY);
                 info(n.hwnd)->onClick = [this, wid] { event("click", wid); };
@@ -285,6 +295,17 @@ public:
             n.hwnd = makeCombo(hwnd, items, [this, wid] { if (!applyingValues) event("change", wid); }, v["editable"].asBool());
         } else if (t == "button") {
             n.hwnd = makeButton(hwnd, v["text"].asString(), [this, wid] { event("click", wid); }, v["default"].asBool());
+            if (v["color"].isString()) {
+                info(n.hwnd)->background = parseColor(v["color"].asString());
+                if (!g_theme.dark) SetWindowLongPtrW(n.hwnd, GWL_STYLE, (GetWindowLongPtrW(n.hwnd, GWL_STYLE) & ~0xF) | BS_OWNERDRAW);
+            }
+        } else if (t == "slider") {
+            n.hwnd = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS | TBS_BOTH,
+                                     0, 0, 10, 10, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(g_nextId++)), g_inst, nullptr);
+            SendMessageW(n.hwnd, TBM_SETRANGEMIN, FALSE, v["min"].asInt(0));
+            SendMessageW(n.hwnd, TBM_SETRANGEMAX, TRUE, v["max"].asInt(100));
+            themeControl(n.hwnd);
+            sliderIds[n.hwnd] = wid;
         } else if (t == "progress") {
             n.hwnd = makeProgress(hwnd);
         } else if (t == "image") {
@@ -346,7 +367,7 @@ public:
 
     // ------------------------------------------------------------------------- values
     bool applyingValues = false;
-    std::map<HWND, std::string> listIds;
+    std::map<HWND, std::string> listIds, sliderIds;
     std::map<HWND, std::wstring> dropPaths;
 
     void applyValues(FormNode &n, const Value &v, bool first) {
@@ -386,7 +407,15 @@ public:
         } else if (t == "button") {
             setText(n.hwnd, v["text"].asString());
         } else if (t == "progress") {
+            COLORREF bar = parseColor(v["color"].asString());
+            if (g_progress[n.hwnd].bar != bar) {
+                g_progress[n.hwnd].bar = bar;
+                InvalidateRect(n.hwnd, nullptr, FALSE);
+            }
             setProgress(n.hwnd, v["value"].asNumber(), v["busy"].asBool());
+        } else if (t == "slider") {
+            if (first || v["value"] != n.lastValue) SendMessageW(n.hwnd, TBM_SETPOS, TRUE, v["value"].asInt(0));
+            n.lastValue = v["value"];
         } else if (t == "list") {
             applyList(n, v);
         } else if (t == "picture") {
@@ -467,6 +496,7 @@ public:
             else if (t == "combo") out.set(n.id, Value(comboText(n.hwnd)));
             else if (t == "list") out.set(n.id, Value(static_cast<int>(ListView_GetNextItem(n.hwnd, -1, LVNI_SELECTED))));
             else if (t == "tabs") out.set(n.id, Value(n.selectedTab));
+            else if (t == "slider") out.set(n.id, Value(static_cast<int>(SendMessageW(n.hwnd, TBM_GETPOS, 0, 0))));
         }
         for (const auto &c : n.children) collect(c, out);
     }
@@ -524,7 +554,7 @@ public:
             if (v["wrap"].asBool()) w = S(v["wrapWidth"].asInt(360));
             else w = measureWindow(windowText(n.hwnd), fontOf(n.hwnd)).cx + S(2);
         } else if (t == "entry" || t == "combo" || t == "spin") {
-            w = avgChar() * v["width"].asInt(t == "spin" ? 5 : 20) + S(t == "combo" ? 26 : 10);
+            w = avgChar() * v["width"].asInt(t == "spin" ? 5 : 20) + S(t == "combo" ? 26 : t == "spin" ? 30 : 10);
         } else if (t == "text") {
             w = avgChar() * v["width"].asInt(60) + S(24);
         } else if (t == "check" || t == "radio") {
@@ -541,6 +571,8 @@ public:
             w = cols + S(24);
         } else if (t == "picture") {
             w = S(v["w"].asInt(184));
+        } else if (t == "slider") {
+            w = S(v["length"].asInt(160));
         } else if (t == "drop") {
             w = measureWindow(W(v["text"].asString()), g_theme.ui).cx + S(PAD) * 4;
         } else if (t == "space") {
@@ -626,6 +658,8 @@ public:
         if (t == "space") return S(v["height"].asInt(GAP));
         if (t == "drop") return lineHeight() + S(PAD) * 2 + 4;
         if (t == "picture") return S(v["h"].asInt(104));
+        if (t == "slider") return S(24);
+        if (t == "label" && v["style"].asString() == "clock") return S(40);
         return 0;
     }
 
@@ -894,6 +928,13 @@ public:
         }
         if (s["focus"] != old["focus"]) focusWidget(s["focus"].asString());
         if (s["minimizeRev"] != old["minimizeRev"]) ShowWindow(hwnd, SW_MINIMIZE);
+        if (s["hidden"].asBool() != old["hidden"].asBool()) {
+            if (s["hidden"].asBool()) ShowWindow(hwnd, SW_HIDE);
+            else {
+                ShowWindow(hwnd, SW_SHOW);
+                bringToFront(false);
+            }
+        }
         if (s["flash"].asBool() && !old["flash"].asBool()) bringToFront(true);
     }
 
@@ -964,7 +1005,7 @@ public:
             GetWindowRect(hwnd, &r);
             SetWindowPos(hwnd, nullptr, r.left + S(28) * (offset % 8), r.top + S(28) * (offset % 8), 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
-        ShowWindow(hwnd, SW_SHOW);
+        if (!spec["hidden"].asBool()) ShowWindow(hwnd, SW_SHOW);
         for (auto &kv : listIds) {
             int sel = ListView_GetNextItem(kv.first, -1, LVNI_SELECTED);
             if (ListView_GetItemCount(kv.first) > 0) {
@@ -1162,6 +1203,12 @@ inline LRESULT CALLBACK formProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_ACTIVATE:
         if (f && LOWORD(w) != WA_INACTIVE) f->event("activate", "");
         break;
+    case WM_HSCROLL:
+        if (f && l && f->sliderIds.count(reinterpret_cast<HWND>(l)) && !f->applyingValues) {
+            int code = LOWORD(w);
+            if (code != TB_ENDTRACK) f->event("change", f->sliderIds[reinterpret_cast<HWND>(l)]);
+        }
+        return 0;
     }
     return DefWindowProcW(h, m, w, l);
 }

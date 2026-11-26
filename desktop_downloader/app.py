@@ -1682,6 +1682,7 @@ class DownloaderApp(UIMixin, tk.Tk):
         try:
             if window is not None and window.winfo_exists():
                 window.show()
+                self._show_recorder_natively(window, "screen")
                 return
         except Exception:
             self.recorder_window = None
@@ -1697,11 +1698,19 @@ class DownloaderApp(UIMixin, tk.Tk):
                 open_in_editor=lambda path: self.open_editor(path),
             )
             self.recorder_window.bind("<Destroy>", self._recorder_destroyed, add="+")
+            self._show_recorder_natively(self.recorder_window, "screen")
             LOGGER.info("Screen recorder opened")
         except Exception as exc:
             LOGGER.exception("Could not open the screen recorder")
             self.recorder_window = None
             messagebox.showerror(APP_NAME, f"Could not open the screen recorder.\n\n{exc}")
+
+    def _show_recorder_natively(self, window: Any, kind: str) -> None:
+        shell = getattr(self, "native_shell", None)
+        if shell is not None:
+            import native_recorders
+
+            native_recorders.attach(shell, window, kind)
 
     def open_audio_recorder(self) -> None:
         """Audio-only recorder: the other side of a call or meeting plus the microphone."""
@@ -1709,6 +1718,7 @@ class DownloaderApp(UIMixin, tk.Tk):
         try:
             if window is not None and window.winfo_exists():
                 window.show()
+                self._show_recorder_natively(window, "audio")
                 return
         except Exception:
             self.audio_recorder_window = None
@@ -1723,6 +1733,7 @@ class DownloaderApp(UIMixin, tk.Tk):
                 save_settings=self._save_audio_recorder_settings,
             )
             self.audio_recorder_window.bind("<Destroy>", self._audio_recorder_destroyed, add="+")
+            self._show_recorder_natively(self.audio_recorder_window, "audio")
             LOGGER.info("Audio recorder opened")
         except Exception as exc:
             LOGGER.exception("Could not open the audio recorder")
