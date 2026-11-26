@@ -728,65 +728,99 @@ class DetailsPane(tk.Frame):
         self.bar.configure(value=max(0.0, min(1.0, float(value))) * 1000)
 
     def show(self, row: dict[str, Any] | None, count: int, summary: str) -> None:
-        if row is None:
-            sig: tuple = ("none", count, summary)
-            if sig == self._sig:
-                return
-            self._sig = sig
-            self.title.configure(text=summary or "No download selected")
-            self.state.configure(text="")
-            self._set_bar(0, False)
-            for value in self.values.values():
-                value.configure(text="—")
-            self.where.configure(text="Select a download to see its progress. Double-click to open a finished file."
-                                 if not count else "Use the toolbar or right-click for actions on the selection.",
-                                 fg=C["MUTED"])
-            for key, button in self.buttons.items():
-                button.configure(state="normal" if count and key in {"toggle", "cancel"} else "disabled",
-                                 text="Pause" if key == "toggle" else button.cget("text"))
-            return
-        status = row["status"]
-        # Only problems get a colour (like Windows' own red error text); everything else is plain.
-        colors = {"failed": C["DANGER"], "missing": C["DANGER"]}
-        done = row["done_bytes"] if row["source"] == "queue" else row["size"]
-        if status == "complete":
-            done = row["size"]
-        values = {
-            "size": row["size_text"] or "—",
-            "done": dl.format_size(done) or ("—" if row["progress"] <= 0 else f"{row['progress'] * 100:.1f}%"),
-            "speed": row["speed_text"] or "—",
-            "eta": row["eta_text"] or "—",
-            "website": row["website"] or "—",
-            "quality": row["quality"] or "—",
-        }
-        detail = row["detail"] if status in {"failed", "retrying", "connecting", "stopping"} else ""
-        where = f"Save to:  {row['save_to'] or '—'}"
-        if detail:
-            where = f"{detail[:180]}"
-        actions = dl.available_actions([row])
-        toggle = "Resume" if "resume" in actions else "Pause"
-        sig = (row["key"], row["name"], row["status_text"], row["progress"], tuple(values.values()), where,
-               tuple(sorted(actions)))
+        view = details_view(row, count, summary)
+        sig = tuple(sorted((key, str(value)) for key, value in view.items()))
         if sig == self._sig:
             return
         self._sig = sig
-        self.title.configure(text=row["name"])
-        self.state.configure(text=row["status_text"], fg=colors.get(status, C["TEXT"]))
-        self._set_bar(row["progress"], status in {"connecting", "finishing", "retrying"})
+        self.title.configure(text=view["title"])
+        colors = {"danger": C["DANGER"]}
+        self.state.configure(text=view["state"], fg=colors.get(view["state_kind"], C["TEXT"]))
+        self._set_bar(view["progress"], view["busy"])
         for key, label in self.values.items():
-            label.configure(text=values[key])
-        self.where.configure(text=where, fg=C["DANGER"] if status == "failed" else C["MUTED"])
-        enabled = {
+            label.configure(text=view["values"][key])
+        self.where.configure(text=view["where"], fg=C["DANGER"] if view["where_kind"] == "danger" else C["MUTED"])
+        for key, button in self.buttons.items():
+            button.configure(state="normal" if view["enabled"][key] else "disabled")
+        self.buttons["toggle"].configure(text=view["toggle"])
+        self.buttons["more"].configure(text=view["more"])
+
+
+def details_view(row: dict[str, Any] | None, count: int, summary: str) -> dict[str, Any]:
+    """What the details pane shows for the selection (shared by the Tk and the native window)."""
+    if row is None:
+        return {
+            "title": summary or "No download selected",
+            "state": "", "state_kind": "", "progress": 0.0, "busy": False,
+            "values": {key: "—" for key, _label in DetailsPane.FIELDS},
+            "where": ("Select a download to see its progress. Double-click to open a finished file."
+                      if not count else "Use the toolbar or right-click for actions on the selection."),
+            "where_kind": "muted",
+            "enabled": {"toggle": bool(count), "cancel": bool(count), "open": False, "open_folder": False,
+                        "more": False},
+            "toggle": "Pause", "more": "Properties…",
+        }
+    status = row["status"]
+    done = row["done_bytes"] if row["source"] == "queue" else row["size"]
+    if status == "complete":
+        done = row["size"]
+    values = {
+        "size": row["size_text"] or "—",
+        "done": dl.format_size(done) or ("—" if row["progress"] <= 0 else f"{row['progress'] * 100:.1f}%"),
+        "speed": row["speed_text"] or "—",
+        "eta": row["eta_text"] or "—",
+        "website": row["website"] or "—",
+        "quality": row["quality"] or "—",
+    }
+    detail = row["detail"] if status in {"failed", "retrying", "connecting", "stopping"} else ""
+    where = f"Save to:  {row['save_to'] or '—'}"
+    if detail:
+        where = f"{detail[:180]}"
+    actions = dl.available_actions([row])
+    return {
+        "title": row["name"],
+        # Only problems get a colour (like Windows' own red error text); everything else is plain.
+        "state": row["status_text"], "state_kind": "danger" if status in {"failed", "missing"} else "",
+        "progress": max(0.0, min(1.0, float(row["progress"] or 0))),
+        "busy": status in {"connecting", "finishing", "retrying"},
+        "values": values,
+        "where": where, "where_kind": "danger" if status == "failed" else "muted",
+        "enabled": {
             "toggle": bool({"resume", "stop"} & actions),
             "cancel": "cancel" in actions,
             "open": "open" in actions,
             "open_folder": "open_folder" in actions,
             "more": "details" in actions or "properties" in actions,
-        }
-        for key, button in self.buttons.items():
-            button.configure(state="normal" if enabled[key] else "disabled")
-        self.buttons["toggle"].configure(text=toggle)
-        self.buttons["more"].configure(text="Error details…" if "details" in actions else "Properties…")
+        },
+        "toggle": "Resume" if "resume" in actions else "Pause",
+        "more": "Error details…" if "details" in actions else "Properties…",
+    }
+
+
+def totals_summary(totals: dict[str, Any]) -> str:
+    parts = []
+    if totals["downloading"]:
+        parts.append(f"{totals['downloading']} downloading")
+    if totals["queued"]:
+        parts.append(f"{totals['queued']} queued")
+    if totals["paused"]:
+        parts.append(f"{totals['paused']} stopped")
+    if totals["failed"]:
+        parts.append(f"{totals['failed']} failed")
+    return "  •  ".join(parts) or "No active downloads"
+
+
+def toolbar_states(rows: list[dict[str, Any]], selected: list[dict[str, Any]],
+                   totals: dict[str, Any]) -> dict[str, bool]:
+    actions = dl.available_actions(selected)
+    return {
+        "resume": "resume" in actions,
+        "stop": "stop" in actions,
+        "delete": "delete" in actions,
+        "start_all": bool(totals["paused"]),
+        "stop_all": bool(totals["downloading"] or totals["queued"]),
+        "delete_done": any(row["status"] in dl.FINISHED for row in rows),
+    }
 
 
 # --------------------------------------------------------------------------- status bar
@@ -833,6 +867,13 @@ class ConfirmDelete:
     @staticmethod
     def ask(master: tk.Misc, *, count: int, files: int, finished_only: bool = False) -> tuple[bool, bool]:
         import native
+
+        shell = getattr(master.winfo_toplevel(), "native_shell", None)
+        if shell is not None:
+            import native_forms
+
+            answer = native_forms.run_modal(shell, native_forms.ConfirmDeleteForm(shell, count, files, finished_only))
+            return answer if isinstance(answer, tuple) else (False, False)
 
         dialog = native.Dialog(master, "Delete completed" if finished_only else "Delete downloads", modal=True)
         noun = f"{count} download{'s' if count != 1 else ''}"
