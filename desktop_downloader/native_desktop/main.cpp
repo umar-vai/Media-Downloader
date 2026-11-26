@@ -259,18 +259,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::wstring icon, launcher, themeArg = L"Light";
-    bool fromController = false;  // the app always passes --theme
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
         if (a == L"--self-test") g_testMode = true;
         else if (a == L"--icon" && i + 1 < argc) icon = argv[++i];
-        else if (a == L"--theme" && i + 1 < argc) {
-            themeArg = argv[++i];
-            fromController = true;
-        } else if (a == L"--launcher" && i + 1 < argc) launcher = argv[++i];
+        else if (a == L"--theme" && i + 1 < argc) themeArg = argv[++i];
+        else if (a == L"--launcher" && i + 1 < argc) launcher = argv[++i];
     }
     LocalFree(argv);
-    if (!fromController && !g_testMode) {
+    // The app (and its packaged self-test) talks to this window through a pipe. Without one,
+    // somebody started the window by itself.
+    if (!g_testMode && GetFileType(GetStdHandle(STD_INPUT_HANDLE)) != FILE_TYPE_PIPE) {
         openLauncher();
         return 0;
     }
