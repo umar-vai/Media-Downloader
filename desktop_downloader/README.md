@@ -13,6 +13,12 @@ Downloaded files are saved to:
 
 You can change the save location from Settings.
 
+## v6.1.3
+
+- Downloads no longer fail with "[WinError 3]" when the drive of the default download folder is not there and you choose another folder.
+- A default or website folder on a missing drive now saves to Downloads\Media Downloader and tells you. Your settings stay as they are.
+- Choosing, or retrying a download for, a missing drive now says which drive is unavailable.
+
 ## v6.1.2
 
 - Asking for something you already downloaded (browser, Add URL, batch or clipboard) now asks first: download again, open the file, show it in its folder, or cancel.
