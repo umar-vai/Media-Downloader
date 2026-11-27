@@ -9,6 +9,7 @@ Rules are typed one per line in Settings, for example::
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +69,25 @@ def match_rule(url: str, rules: list[Rule]) -> Rule | None:
             if best is None or len(rule.host) > len(best.host):
                 best = rule
     return best
+
+
+def missing_drive(folder: str | Path) -> str:
+    """The drive (``H:``) or network share a folder lives on when it is not there, else ``""``."""
+    anchor = Path(folder).expanduser().anchor
+    if not anchor.rstrip("\\/") or os.path.isdir(anchor):
+        return ""
+    return anchor.rstrip("\\/")
+
+
+def available_folder(folder: Path, fallback: Path) -> tuple[Path, str]:
+    """``(folder, "")``, or ``(fallback, note)`` while the folder's drive is not there.
+
+    The saved setting is left alone, so the folder is used again when the drive is back.
+    """
+    drive = missing_drive(folder)
+    if not drive:
+        return folder, ""
+    return fallback, f"{drive} not found - using Downloads"
 
 
 def resolve_target(
