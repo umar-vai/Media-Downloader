@@ -48,7 +48,7 @@ from shared_engine import Cancelled as SharedCancelled, analyze_url as shared_an
 from media_core.engine import is_placeholder_title
 from batch_download import parse_batch_urls_detailed
 from command_palette import CommandPalette
-from download_rules import parse_rules, resolve_target
+from download_rules import available_folder, missing_drive, parse_rules, resolve_target
 from extension_server import ExtensionServer, purge_old_cookie_files, write_cookie_file
 from failure_dialog import FailureDialog
 from hotkey import GlobalHotkey, MOD_ALT, MOD_CONTROL
@@ -101,6 +101,14 @@ def _recent_ext_analysis(url: str) -> tuple[dict[str, Any], dict[str, Any]] | No
     if not hit or time.monotonic() - hit[0] > _EXT_ANALYSIS_TTL:
         return None
     return copy.deepcopy(hit[1]), copy.deepcopy(hit[2])
+
+
+def _report_folder_fallback(app: Any, note: str) -> None:
+    LOGGER.warning("Download folder unavailable: %s", note)
+    app._set_status(note, "error")
+    tray = getattr(app, "tray", None)
+    if tray is not None:
+        tray.notify(note, APP_NAME)
 
 
 def _same_folder(saved: Any, folder: Any) -> bool:
@@ -1020,7 +1028,11 @@ class DownloaderApp(UIMixin, tk.Tk):
         if audio_format not in AUDIO_FORMATS or bitrate not in {"128", "192", "256", "320"}:
             raise ValueError("Invalid audio output settings.")
 
-        self.download_dir.mkdir(parents=True, exist_ok=True)
+        if target_dir_override is not None:
+            drive = missing_drive(target_dir_override)
+            if drive:
+                raise OSError(f"{drive} not found. Choose another folder.")
+        fallback_note = ""
         batch_id = uuid.uuid4().hex
         payloads = []
         rules = parse_rules(str(self.settings.get("folder_rules") or ""))
@@ -1041,6 +1053,9 @@ class DownloaderApp(UIMixin, tk.Tk):
             )
             if target_dir_override is not None:
                 target_dir = target_dir_override
+            else:
+                target_dir, note = available_folder(target_dir, DEFAULT_DOWNLOAD_DIR)
+                fallback_note = note or fallback_note
             request_settings = {
                 **(extra or {}),
                 "batch_id": batch_id,
@@ -1081,6 +1096,8 @@ class DownloaderApp(UIMixin, tk.Tk):
             batch_id, len(payloads), duplicates
         )
         self._set_status(f"Queued {len(payloads)} batch downloads", "ready")
+        if fallback_note:
+            _report_folder_fallback(self, fallback_note)
         self._schedule_download_activity_refresh(40)
         self._start_available_downloads()
         return batch_id, len(payloads), duplicates
@@ -1094,13 +1111,6 @@ class DownloaderApp(UIMixin, tk.Tk):
         if not isinstance(self.current_info, dict) or self.last_analyzed_url != url:
             self._set_status("Analyze this link before downloading it.", "error")
             messagebox.showinfo(APP_NAME, "Analyze this link first, then press Download.")
-            return
-
-        try:
-            self.download_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            LOGGER.exception("Could not create download directory")
-            messagebox.showerror(APP_NAME, f"Could not use the selected download folder.\n\n{exc}")
             return
 
         if not again:
@@ -1126,6 +1136,13 @@ class DownloaderApp(UIMixin, tk.Tk):
             organize_by_site=bool(self.settings.get("organize_by_site", False)),
             platform=platform_name(url),
         )
+        target_dir, fallback_note = available_folder(target_dir, DEFAULT_DOWNLOAD_DIR)
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            LOGGER.exception("Could not create download directory")
+            messagebox.showerror(APP_NAME, f"Could not use the download folder {target_dir}.\n\n{exc}")
+            return
         try:
             history_duration = max(0, int(float(info.get("duration") or 0)))
         except (TypeError, ValueError):
@@ -1176,6 +1193,8 @@ class DownloaderApp(UIMixin, tk.Tk):
         self.media_action_hint.configure(text="Added to downloads. Paste another link whenever you want.")
         self._start_available_downloads()
         self._after_link_queued(request.id, name)
+        if fallback_note:
+            _report_folder_fallback(self, fallback_note)
 
     def _put_download_event(self, kind: str, request_id: str, data: Any = None) -> None:
         if kind == "download_progress":
@@ -1207,6 +1226,11 @@ class DownloaderApp(UIMixin, tk.Tk):
         )
         direct = bool(request_settings.get("direct"))
         try:
+            drive = missing_drive(download_dir)
+            if drive:
+                raise RuntimeError(
+                    f"{drive} is not available. Reconnect the drive and retry, or add the link again "
+                    "to save it in another folder.")
             if request_settings.get("batch_id") and not direct:
                 if cancel_event.is_set():
                     raise SharedCancelled("Batch item cancelled before analysis.")
@@ -1636,11 +1660,14 @@ class DownloaderApp(UIMixin, tk.Tk):
         self.save_location_label.configure(text=f"Saving to  {self.download_dir}")
 
     def open_download_folder(self) -> None:
-        self.download_dir.mkdir(parents=True, exist_ok=True)
+        folder, note = available_folder(self.download_dir, DEFAULT_DOWNLOAD_DIR)
+        if note:
+            _report_folder_fallback(self, note)
+        folder.mkdir(parents=True, exist_ok=True)
         if os.name == "nt":
-            os.startfile(str(self.download_dir))
+            os.startfile(str(folder))
         else:
-            subprocess.Popen(["xdg-open", str(self.download_dir)])
+            subprocess.Popen(["xdg-open", str(folder)])
 
     def open_editor(self, source_path: Path | None = None) -> None:
         existing = self.editor_window
@@ -1678,7 +1705,8 @@ class DownloaderApp(UIMixin, tk.Tk):
             messagebox.showerror(APP_NAME, "The selected media file could not be found.")
             return
         try:
-            self.editor_window = MediaEditorWindow(self, path, output_dir=self.download_dir)
+            self.editor_window = MediaEditorWindow(
+                self, path, output_dir=available_folder(self.download_dir, DEFAULT_DOWNLOAD_DIR)[0])
             self.editor_window.bind(
                 "<Destroy>",
                 lambda event: self._editor_destroyed(event),
@@ -1707,7 +1735,7 @@ class DownloaderApp(UIMixin, tk.Tk):
             stored = self.settings.get("recorder")
             self.recorder_window = ScreenRecorderWindow(
                 self,
-                output_dir=self.download_dir / "Recordings",
+                output_dir=available_folder(self.download_dir, DEFAULT_DOWNLOAD_DIR)[0] / "Recordings",
                 settings=stored if isinstance(stored, dict) else None,
                 save_settings=self._save_recorder_settings,
                 open_in_editor=lambda path: self.open_editor(path),
@@ -1743,7 +1771,7 @@ class DownloaderApp(UIMixin, tk.Tk):
             stored = self.settings.get("audio_recorder")
             self.audio_recorder_window = AudioRecorderWindow(
                 self,
-                output_dir=self.download_dir / "Recordings",
+                output_dir=available_folder(self.download_dir, DEFAULT_DOWNLOAD_DIR)[0] / "Recordings",
                 settings=stored if isinstance(stored, dict) else None,
                 save_settings=self._save_audio_recorder_settings,
             )
@@ -2442,6 +2470,8 @@ class DownloaderApp(UIMixin, tk.Tk):
                 last = str(self.settings.get("capture_last_dir") or "")
                 if last and os.path.isdir(last):
                     folder = Path(last)
+        folder, fallback_note = available_folder(folder, DEFAULT_DOWNLOAD_DIR)
+        proposed = folder
         try:
             size = int(data.get("fileSize") or 0) if direct else 0
         except (TypeError, ValueError):
@@ -2460,7 +2490,9 @@ class DownloaderApp(UIMixin, tk.Tk):
             if not ids:
                 return None
             self._capture_ids.add(ids[0])
-            self.settings["capture_last_dir"] = folder_text
+            # A stand-in for a missing drive is not remembered as the user's own choice.
+            if not (fallback_note and _same_folder(folder_text, proposed)):
+                self.settings["capture_last_dir"] = folder_text
             saved = dict(self.settings.get("capture_dirs") or {})
             for key, wanted in ((f"ext:{ext}" if ext else "", remember.get("ext")),
                                 (f"site:{host}" if host else "", remember.get("site"))):
@@ -2468,7 +2500,7 @@ class DownloaderApp(UIMixin, tk.Tk):
                     continue
                 if wanted:
                     saved[key] = folder_text
-                else:
+                elif not missing_drive(str(saved.get(key) or "")):
                     saved.pop(key, None)   # the box was cleared: stop using a saved folder
             self.settings["capture_dirs"] = saved
             save_settings(self.settings)
@@ -2502,6 +2534,7 @@ class DownloaderApp(UIMixin, tk.Tk):
                 ext_saved=_same_folder(remembered.get(f"ext:{ext}") if ext else "", folder),
                 site_saved=_same_folder(remembered.get(f"site:{host}"), folder),
             )
+            form.status = fallback_note
             self._capture_dialogs.append(form)
             shell.show_form(form)
             return
@@ -2512,6 +2545,8 @@ class DownloaderApp(UIMixin, tk.Tk):
             ext_saved=_same_folder(remembered.get(f"ext:{ext}") if ext else "", folder),
             site_saved=_same_folder(remembered.get(f"site:{host}"), folder),
         )
+        if fallback_note:
+            dialog.status.configure(text=fallback_note)
         self._capture_dialogs.append(dialog)
 
     def export_browser_extension(self) -> None:

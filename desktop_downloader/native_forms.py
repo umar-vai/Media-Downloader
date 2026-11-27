@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import download_list as dl
+from download_rules import missing_drive
 
 PAD = 10
 GAP = 6
@@ -1341,7 +1342,9 @@ class CaptureForm(NativeForm):
         try:
             os.makedirs(folder, exist_ok=True)
         except OSError as exc:
-            self.status = f"Cannot use that folder: {exc.strerror or exc}"
+            drive = missing_drive(folder)
+            self.status = (f"{drive} not found. Choose another folder." if drive
+                           else f"Cannot use that folder: {exc.strerror or exc}")
             return
         try:
             request_id = self.api.start(name, folder, later, {"ext": self.remember_ext, "site": self.remember_site})

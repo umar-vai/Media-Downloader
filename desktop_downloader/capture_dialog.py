@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 import download_list as dl
 import native
+from download_rules import missing_drive
 from native import GAP, PAD
 
 TICK_MS = 400
@@ -224,7 +225,9 @@ class CaptureDialog(tk.Toplevel):
         try:
             os.makedirs(folder, exist_ok=True)
         except OSError as exc:
-            self.status.configure(text=f"Cannot use that folder: {exc.strerror or exc}")
+            drive = missing_drive(folder)
+            self.status.configure(text=f"{drive} not found. Choose another folder." if drive
+                                  else f"Cannot use that folder: {exc.strerror or exc}")
             return
         try:
             request_id = self._api.start(
